@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include "draw-imp.h"
@@ -438,8 +460,6 @@ fz_blend_nonseparable_gray(byte * FZ_RESTRICT bp, int bal, const byte * FZ_RESTR
 				int invsa = 255 * 256 / sa;
 				int invba = 255 * 256 / ba;
 				int k;
-				int sg = (sp[0] * invsa) >> 8;
-				int bg = (bp[0] * invba) >> 8;
 
 				switch (blendmode)
 				{
@@ -447,11 +467,17 @@ fz_blend_nonseparable_gray(byte * FZ_RESTRICT bp, int bal, const byte * FZ_RESTR
 				case FZ_BLEND_HUE:
 				case FZ_BLEND_SATURATION:
 				case FZ_BLEND_COLOR:
-					bp[0] = bal ? fz_mul255(bp[n], bg) : bg;
+				{
+					int bg = (bp[0] * invba) >> 8;
+					bp[0] = fz_mul255(255 - sa, bp[0]) + fz_mul255(255 - ba, sp[0]) + fz_mul255(saba, bg);
 					break;
+				}
 				case FZ_BLEND_LUMINOSITY:
-					bp[0] = bal ? fz_mul255(bp[n], sg) : sg;
+				{
+					int sg = (sp[0] * invsa) >> 8;
+					bp[0] = fz_mul255(255 - sa, bp[0]) + fz_mul255(255 - ba, sp[0]) + fz_mul255(saba, sg);
 					break;
+				}
 				}
 
 				/* Normal blend for spots */
@@ -535,15 +561,14 @@ fz_blend_nonseparable(byte * FZ_RESTRICT bp, int bal, const byte * FZ_RESTRICT s
 				/* CMYK */
 				if (complement)
 				{
-					int sk = (sp[3] * invsa) >> 8;
-					int bk = (bp[3] * invba) >> 8;
+					int k;
 
 					rr = 255 - rr;
 					rg = 255 - rg;
 					rb = 255 - rb;
-					bp[0] = fz_mul255(255 - sa, 255 - bp[0]) + fz_mul255(255 - ba, sp[0]) + fz_mul255(saba, rr);
-					bp[1] = fz_mul255(255 - sa, 255 - bp[1]) + fz_mul255(255 - ba, sp[1]) + fz_mul255(saba, rg);
-					bp[2] = fz_mul255(255 - sa, 255 - bp[2]) + fz_mul255(255 - ba, sp[2]) + fz_mul255(saba, rb);
+					bp[0] = fz_mul255(255 - sa, bp[0]) + fz_mul255(255 - ba, sp[0]) + fz_mul255(saba, rr);
+					bp[1] = fz_mul255(255 - sa, bp[1]) + fz_mul255(255 - ba, sp[1]) + fz_mul255(saba, rg);
+					bp[2] = fz_mul255(255 - sa, bp[2]) + fz_mul255(255 - ba, sp[2]) + fz_mul255(saba, rb);
 
 					switch (blendmode)
 					{
@@ -551,12 +576,13 @@ fz_blend_nonseparable(byte * FZ_RESTRICT bp, int bal, const byte * FZ_RESTRICT s
 					case FZ_BLEND_HUE:
 					case FZ_BLEND_SATURATION:
 					case FZ_BLEND_COLOR:
-						bp[3] = bal ? fz_mul255(bp[n], bk) : bk;
+						k = (bp[3] * invba) >> 8;
 						break;
 					case FZ_BLEND_LUMINOSITY:
-						bp[3] = bal ? fz_mul255(bp[n], sk) : sk;
+						k = (sp[3] * invsa) >> 8;
 						break;
 					}
+					bp[3] = fz_mul255(255 - sa, bp[3]) + fz_mul255(255 - ba, sp[3]) + fz_mul255(saba, k);
 				}
 				else
 				{

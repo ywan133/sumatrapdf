@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "xps-imp.h"
 
@@ -227,7 +249,7 @@ static float sRGB_from_scRGB(float x)
 {
 	if (x < 0.0031308f)
 		return 12.92f * x;
-	return 1.055f * pow(x, 1/2.4f) - 0.055f;
+	return 1.055f * powf(x, 1/2.4f) - 0.055f;
 }
 
 void
@@ -248,7 +270,8 @@ xps_parse_color(fz_context *ctx, xps_document *doc, char *base_uri, char *string
 
 	if (string[0] == '#')
 	{
-		if (strlen(string) == 9)
+		size_t z = strlen(string);
+		if (z == 9)
 		{
 			samples[0] = unhex(string[1]) * 16 + unhex(string[2]);
 			samples[1] = unhex(string[3]) * 16 + unhex(string[4]);
@@ -258,9 +281,12 @@ xps_parse_color(fz_context *ctx, xps_document *doc, char *base_uri, char *string
 		else
 		{
 			samples[0] = 255;
-			samples[1] = unhex(string[1]) * 16 + unhex(string[2]);
-			samples[2] = unhex(string[3]) * 16 + unhex(string[4]);
-			samples[3] = unhex(string[5]) * 16 + unhex(string[6]);
+/* Use a macro to protect against overrunning the string. */
+#define UNHEX(idx) (idx < z ? unhex(string[idx]) : 0)
+			samples[1] = UNHEX(1) * 16 + UNHEX(2);
+			samples[2] = UNHEX(3) * 16 + UNHEX(4);
+			samples[3] = UNHEX(5) * 16 + UNHEX(6);
+#undef UNHEX
 		}
 
 		samples[0] /= 255;

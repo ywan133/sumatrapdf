@@ -1,33 +1,55 @@
 # Configuration for the Makefile
 
-OS := $(shell uname)
-OS := $(OS:MINGW%=MINGW)
-OS := $(OS:MSYS%=MINGW)
-OS := $(OS:Windows_NT=MINGW)
-OS := $(OS:Darwin=MACOS)
+# We use $OS from environment if set.
+ifeq ($(OS),)
+  OS := $(shell uname)
+  OS := $(OS:MINGW%=MINGW)
+  OS := $(OS:MSYS%=MINGW)
+  OS := $(OS:Windows_NT=MINGW)
+  OS := $(OS:Darwin=MACOS)
+endif
 
 WARNING_CFLAGS := -Wall -Wsign-compare
 
 # Feature configuration options
 
-ifeq ($(tesseract),yes)
-  USE_TESSERACT := yes
-  build_suffix += -tesseract
-endif
+build_suffix :=
 
-ifeq ($(extract),yes)
-  USE_EXTRACT := yes
-  build_suffix += -extract
+ifeq ($(tesseract),yes)
+  build_suffix := $(build_suffix)-tesseract
+  USE_TESSERACT := yes
 endif
 
 ifeq ($(tofu),yes)
-  build_suffix += -tofu
+  build_suffix := $(build_suffix)-tofu
   XCFLAGS += -DTOFU
 endif
 
 ifeq ($(tofu_cjk),yes)
-  build_suffix += -tofu_cjk
+  build_suffix := $(build_suffix)-tofu_cjk
   XCFLAGS += -DTOFU_CJK
+endif
+
+ifeq ($(tofu_cjk_ext),yes)
+  build_suffix := $(build_suffix)-tofu_cjk_ext
+  XCFLAGS += -DTOFU_CJK_EXT
+endif
+
+ifeq ($(tofu_cjk_lang),yes)
+  build_suffix := $(build_suffix)-tofu_cjk_lang
+  XCFLAGS += -DTOFU_CJK_LANG
+endif
+
+ifeq ($(archive),yes)
+  build_suffix := $(build_suffix)-archive
+  XCFLAGS += -DHAVE_LIBARCHIVE
+  HAVE_LIBARCHIVE := yes
+endif
+
+ifeq ($(commercial),yes)
+  build_suffix := $(build_suffix)-commercial
+  XCFLAGS += -DHAVE_SMARTOFFICE
+  HAVE_SMARTOFFICE := yes
 endif
 
 # System specific features
@@ -44,6 +66,7 @@ else
   LDREMOVEUNREACH := -Wl,--gc-sections
   ifeq ($(OS),MINGW)
     SO := dll
+    EXE := .exe
   else
     SO := so
   endif
@@ -59,10 +82,26 @@ SANITIZE_FLAGS += -fsanitize=address
 SANITIZE_FLAGS += -fsanitize=leak
 
 ifeq ($(shared),yes)
-  build_prefix += shared-
+  ifeq ($(findstring shared-, $(build_prefix)),)
+    override build_prefix := $(build_prefix)shared-
+  endif
   LIB_CFLAGS = -fPIC
   ifeq ($(OS),MACOS)
     LIB_LDFLAGS = -dynamiclib
+  else ifeq ($(OS),wasm)
+    LIB_LDFLAGS = -shared -sSIDE_MODULE
+    EXE_LDFLAGS = -sMAIN_MODULE
+  else ifeq ($(OS),wasm-mt)
+    LIB_LDFLAGS = -shared -sSIDE_MODULE
+    EXE_LDFLAGS = -sMAIN_MODULE
+  else ifeq ($(OS),pyodide)
+    LIB_LDFLAGS = -shared -sSIDE_MODULE
+    EXE_LDFLAGS = -sMAIN_MODULE
+
+    # Pyodide's ld does not support -b so we cannot use it to create object
+    # files containing font data, so leave HAVE_OBJCOPY unset. And we need
+    # extra memory when linking.
+    LDFLAGS += -sTOTAL_MEMORY=48MB
   else
     LIB_LDFLAGS = -shared
   endif
@@ -75,19 +114,19 @@ ifeq ($(build),debug)
   CFLAGS += -pipe -g
   LDFLAGS += -g
 else ifeq ($(build),release)
-  CFLAGS += -pipe -O2 -DNDEBUG -fomit-frame-pointer
+  CFLAGS += -pipe -O2 -DNDEBUG
   LDFLAGS += $(LDREMOVEUNREACH) -Wl,-s
 else ifeq ($(build),small)
-  CFLAGS += -pipe -Os -DNDEBUG -fomit-frame-pointer
+  CFLAGS += -pipe -Os -DNDEBUG
   LDFLAGS += $(LDREMOVEUNREACH) -Wl,-s
 else ifeq ($(build),valgrind)
-  CFLAGS += -pipe -O2 -DNDEBUG -DPACIFY_VALGRIND -fno-omit-frame-pointer
+  CFLAGS += -pipe -O2 -DNDEBUG -DPACIFY_VALGRIND
   LDFLAGS += $(LDREMOVEUNREACH) -Wl,-s
 else ifeq ($(build),sanitize)
-  CFLAGS += -pipe -g -fno-omit-frame-pointer $(SANITIZE_FLAGS)
+  CFLAGS += -pipe -g $(SANITIZE_FLAGS)
   LDFLAGS += -g $(SANITIZE_FLAGS)
 else ifeq ($(build),sanitize-release)
-  CFLAGS += -pipe -O2 -DNDEBUG -fno-omit-frame-pointer $(SANITIZE_FLAGS)
+  CFLAGS += -pipe -O2 -DNDEBUG $(SANITIZE_FLAGS)
   LDFLAGS += $(LDREMOVEUNREACH) -Wl,-s $(SANITIZE_FLAGS)
 else ifeq ($(build),profile)
   CFLAGS += -pipe -O2 -DNDEBUG -pg
@@ -96,7 +135,7 @@ else ifeq ($(build),coverage)
   CFLAGS += -pipe -g -pg -fprofile-arcs -ftest-coverage
   LIBS += -lgcov
 else ifeq ($(build),native)
-  CFLAGS += -pipe -O2 -DNDEBUG -fomit-frame-pointer -march=native
+  CFLAGS += -pipe -O2 -DNDEBUG -march=native
   LDFLAGS += $(LDREMOVEUNREACH) -Wl,-s
 else ifeq ($(build),memento)
   CFLAGS += -pipe -g -DMEMENTO -DMEMENTO_MUPDF_HACKS
@@ -110,7 +149,7 @@ else ifeq ($(build),memento)
     endif
   endif
 else ifeq ($(build),gperf)
-  CFLAGS += -pipe -O2 -DNDEBUG -fomit-frame-pointer -DGPERF
+  CFLAGS += -pipe -O2 -DNDEBUG -DGPERF
   LIBS += -lprofiler
 else
   $(error unknown build setting: '$(build)')
@@ -132,9 +171,17 @@ SYS_OPENJPEG_LIBS := -lopenjp2
 SYS_ZLIB_LIBS := -lz
 SYS_TESSERACT_LIBS := -ltesseract
 SYS_LEPTONICA_LIBS := -llept
+SYS_LIBARCHIVE_LIBS := -larchive
 
 ifneq "$(CLUSTER)" ""
   CFLAGS += -DCLUSTER
+endif
+
+ifeq ($(OS),Linux)
+    LINUX_OR_OPENBSD := yes
+endif
+ifeq ($(OS),OpenBSD)
+    LINUX_OR_OPENBSD := yes
 endif
 
 ifeq ($(OS),MINGW)
@@ -150,8 +197,24 @@ else ifeq ($(OS),MACOS)
   LD = xcrun ld
   RANLIB = xcrun ranlib
 
-else ifeq ($(OS),Linux)
-  HAVE_OBJCOPY := yes
+  ifneq ($(ARCHFLAGS),)
+    $(warning "MacOS with ARCHFLAGS set. Assuming we are building for arm64, and setting HAVE_LIBCRYPTO to no.")
+    HAVE_LIBCRYPTO := no
+  else ifeq (, $(shell command -v pkg-config))
+    $(warning "No pkg-config found, install it for proper integration of libcrypto")
+  else
+    HAVE_LIBCRYPTO := $(shell pkg-config --exists 'libcrypto >= 1.1.0' && echo yes)
+    ifeq ($(HAVE_LIBCRYPTO),yes)
+	  LIBCRYPTO_CFLAGS := $(shell pkg-config --cflags libcrypto) -DHAVE_LIBCRYPTO
+	  LIBCRYPTO_LIBS := $(shell pkg-config --libs libcrypto)
+    endif
+  endif
+
+else ifeq ($(LINUX_OR_OPENBSD),yes)
+
+  ifeq ($(OS),Linux)
+    HAVE_OBJCOPY := yes
+  endif
 
   ifeq ($(shell pkg-config --exists freetype2 && echo yes),yes)
 	SYS_FREETYPE_CFLAGS := $(shell pkg-config --cflags freetype2)
@@ -194,6 +257,12 @@ else ifeq ($(OS),Linux)
 	SYS_TESSERACT_LIBS := $(shell pkg-config --libs tesseract)
   endif
 
+  HAVE_SYS_LIBARCHIVE := $(shell pkg-config --exists 'libarchive' && echo yes)
+  ifeq ($(HAVE_SYS_LIBARCHIVE),yes)
+	SYS_LIBARCHIVE_CFLAGS := $(shell pkg-config --cflags libarchive)
+	SYS_LIBARCHIVE_LIBS := $(shell pkg-config --libs libarchive)
+  endif
+
   HAVE_SYS_CURL := $(shell pkg-config --exists libcurl && echo yes)
   ifeq ($(HAVE_SYS_CURL),yes)
 	SYS_CURL_CFLAGS := $(shell pkg-config --cflags libcurl)
@@ -202,8 +271,13 @@ else ifeq ($(OS),Linux)
 
   HAVE_GLUT := yes
   ifeq ($(HAVE_GLUT),yes)
-	SYS_GLUT_CFLAGS :=
-	SYS_GLUT_LIBS := -lglut -lGL
+    ifeq ($(OS),OpenBSD)
+      SYS_GLUT_CFLAGS := $(shell pkg-config --cflags glut gl)
+      SYS_GLUT_LIBS := $(shell pkg-config --libs glut gl)
+    else
+      SYS_GLUT_CFLAGS :=
+      SYS_GLUT_LIBS := -lglut -lGL
+    endif
   endif
 
   HAVE_X11 := $(shell pkg-config --exists x11 xext && echo yes)
@@ -212,7 +286,9 @@ else ifeq ($(OS),Linux)
 	X11_LIBS := $(shell pkg-config --libs x11 xext)
   endif
 
-  HAVE_LIBCRYPTO := $(shell pkg-config --exists 'libcrypto >= 1.1.0' && echo yes)
+  ifeq ($(HAVE_LIBCRYPTO),)
+    HAVE_LIBCRYPTO := $(shell pkg-config --exists 'libcrypto >= 1.1.0' && echo yes)
+  endif
   ifeq ($(HAVE_LIBCRYPTO),yes)
 	LIBCRYPTO_CFLAGS := $(shell pkg-config --cflags libcrypto) -DHAVE_LIBCRYPTO
 	LIBCRYPTO_LIBS := $(shell pkg-config --libs libcrypto)
@@ -246,8 +322,33 @@ ifeq "$(OS)" "wasm"
   HAVE_LIBCRYPTO=no
 endif
 
+ifeq "$(OS)" "wasm-mt"
+  build_prefix += wasm-mt/
+  CC = emcc
+  CXX = em++
+  AR = emar
+  HAVE_GLUT=no
+  HAVE_X11=no
+  HAVE_OBJCOPY=no
+  HAVE_LIBCRYPTO=no
+  CFLAGS += -pthread
+endif
+
+ifeq "$(OS)" "pyodide"
+  build_prefix += $(OS)/
+  # We use the provided $CC and $CXX.
+  AR = emar
+  HAVE_GLUT=no
+  HAVE_X11=no
+  HAVE_OBJCOPY=no
+  HAVE_LIBCRYPTO=no
+  CFLAGS += -pthread
+endif
+
 ifeq "$(OS)" "mingw32-cross"
   build_prefix += $(OS)/
+  SO := dll
+  EXE := .exe
   CC = i686-w64-mingw32-gcc
   CXX = i686-w64-mingw32-g++
   LD = i686-w64-mingw32-gcc
@@ -258,6 +359,8 @@ endif
 
 ifeq "$(OS)" "mingw64-cross"
   build_prefix += $(OS)/
+  SO := dll
+  EXE := .exe
   CC = x86_64-w64-mingw32-gcc
   CXX = x86_64-w64-mingw32-g++
   LD = x86_64-w64-mingw32-gcc

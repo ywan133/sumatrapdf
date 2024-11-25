@@ -1,5 +1,5 @@
 
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 extern Kind kindFilePDF;
@@ -30,20 +30,25 @@ extern Kind kindFileWebp;
 extern Kind kindFileJp2;
 
 extern Kind kindFileFb2;
+extern Kind kindFileFb2z;
 extern Kind kindFileEpub;
 extern Kind kindFileMobi;
 extern Kind kindFilePalmDoc;
 extern Kind kindFileHTML;
+extern Kind kindFileSvg;
+extern Kind kindFileHeic;
+extern Kind kindFileAvif;
 extern Kind kindFileTxt;
 
-extern Kind kindFileVbkm;
-extern Kind kindFileDir;
+extern Kind kindDirectory;
 
-const WCHAR* FindEmbeddedPdfFileStreamNo(const WCHAR* path);
+const char* FindEmbeddedPdfFileStreamNo(const char* path);
 
-Kind GuessFileTypeFromContent(const WCHAR* path);
-Kind GuessFileTypeFromContent(std::span<u8> d);
-Kind GuessFileTypeFromName(const WCHAR*);
-Kind GuessFileType(const WCHAR* path, bool fromContent);
+Kind GuessFileTypeFromContent(const char* path);
+Kind GuessFileTypeFromContent(const ByteSlice& d);
+Kind GuessFileTypeFromName(const char*);
+Kind GuessFileType(const char* path, bool sniff);
+const char* GfxFileExtFromData(const ByteSlice&);
+const char* GfxFileExtFromKind(Kind);
 
 bool KindInArray(Kind* kinds, int nKinds, Kind kind);

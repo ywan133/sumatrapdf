@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
@@ -15,7 +15,7 @@ static const StructInfo gSutPointIInfo = {sizeof(Point), 2, gSutPointIFields, "X
 
 struct SutStructNested {
     Point point;
-    Vec<COLORREF>* colorArray;
+    Vec<char*>* colorArray;
 };
 
 static const FieldInfo gSutStructNestedFields[] = {
@@ -42,18 +42,18 @@ static const StructInfo gSutStructItemInfo = {sizeof(SutStructItem), 3, gSutStru
 struct SutStruct {
     int internal;
     bool boolean;
-    COLORREF color;
+    char* color;
     float floatingPoint;
     int integer;
-    WCHAR* string;
-    WCHAR* nullString;
-    WCHAR* escapedString;
+    char* string;
+    char* nullString;
+    char* escapedString;
     char* utf8String;
     char* nullUtf8String;
     char* escapedUtf8String;
     Vec<int>* intArray;
-    Vec<WCHAR*>* strArray;
-    Vec<WCHAR*>* emptyStrArray;
+    Vec<char*>* strArray;
+    Vec<char*>* emptyStrArray;
     Point point;
     Vec<SutStructItem*>* sutStructItems;
     char* internalString;
@@ -62,15 +62,15 @@ struct SutStruct {
 static const FieldInfo gSutStructFields[] = {
     {(size_t)-1, SettingType::Comment, (intptr_t) "This file will be overwritten - modify at your own risk!\r\n"},
     {offsetof(SutStruct, boolean), SettingType::Bool, (intptr_t) true},
-    {offsetof(SutStruct, color), SettingType::Color, 0xffcc9933},
+    {offsetof(SutStruct, color), SettingType::Color, (intptr_t) "0xffcc9933"},
     {offsetof(SutStruct, floatingPoint), SettingType::Float, (intptr_t) "-3.14"},
     {offsetof(SutStruct, integer), SettingType::Int, 27},
-    {offsetof(SutStruct, string), SettingType::String, (intptr_t)L"String"},
+    {offsetof(SutStruct, string), SettingType::String, (intptr_t) "String"},
     {offsetof(SutStruct, nullString), SettingType::String, 0},
-    {offsetof(SutStruct, escapedString), SettingType::String, (intptr_t)L"$\nstring "},
-    {offsetof(SutStruct, utf8String), SettingType::Utf8String, (intptr_t) "Utf-8 String"},
-    {offsetof(SutStruct, nullUtf8String), SettingType::Utf8String, 0},
-    {offsetof(SutStruct, escapedUtf8String), SettingType::Utf8String, (intptr_t) "$\nstring "},
+    {offsetof(SutStruct, escapedString), SettingType::String, (intptr_t) "$\nstring "},
+    {offsetof(SutStruct, utf8String), SettingType::String, (intptr_t) "Utf-8 String"},
+    {offsetof(SutStruct, nullUtf8String), SettingType::String, 0},
+    {offsetof(SutStruct, escapedUtf8String), SettingType::String, (intptr_t) "$\nstring "},
     {offsetof(SutStruct, intArray), SettingType::IntArray, (intptr_t) "1 2 -3"},
     {offsetof(SutStruct, strArray), SettingType::StringArray, (intptr_t) "one \"two three\" \"\""},
     {offsetof(SutStruct, emptyStrArray), SettingType::StringArray, 0},
@@ -156,20 +156,21 @@ Key = Value";
         free(reserialized);
         data->internal++;
     }
-    utassert(RGB(0xab, 0xcd, 0xef) == data->color);
-    utassert(str::Eq(data->escapedString, L"\t\r\n$ "));
+    utassert(str::Eq(data->color, "#abcdef"));
+    utassert(str::Eq(data->escapedString, "\t\r\n$ "));
     utassert(str::Eq(data->escapedUtf8String, "\r\n[]\t"));
     utassert(2 == data->intArray->size() && 3 == data->intArray->at(0));
     utassert(3 == data->strArray->size() && 0 == data->emptyStrArray->size());
-    utassert(str::Eq(data->strArray->at(0), L"with space") && str::Eq(data->strArray->at(1), L"plain") &&
-             str::Eq(data->strArray->at(2), L"quote:\""));
+    utassert(str::Eq(data->strArray->at(0), "with space") && str::Eq(data->strArray->at(1), "plain") &&
+             str::Eq(data->strArray->at(2), "quote:\""));
     utassert(2 == data->sutStructItems->size());
     utassert(Point(-1, 5) == data->sutStructItems->at(0)->compactPoint);
     utassert(2 == data->sutStructItems->at(0)->floatArray->size());
     utassert(0 == data->sutStructItems->at(0)->nested.colorArray->size());
     utassert(0 == data->sutStructItems->at(1)->floatArray->size());
     utassert(2 == data->sutStructItems->at(1)->nested.colorArray->size());
-    utassert(0x12785634 == data->sutStructItems->at(1)->nested.colorArray->at(0));
+    utassert(str::Eq("#12345678", data->sutStructItems->at(1)->nested.colorArray->at(0)));
+    utassert(str::Eq("#987654", data->sutStructItems->at(1)->nested.colorArray->at(1)));
     utassert(!data->internalString);
     utassert(!str::Eq(serialized, AutoFree(SerializeStruct(&gSutStructInfo, data))));
     data->sutStructItems->at(0)->nested.point.x++;
@@ -181,9 +182,9 @@ Key = Value";
     if (!data) {
         return;
     }
-    utassert(data->boolean && 0xffcc9933 == data->color);
+    utassert(data->boolean && str::Eq("0xffcc9933", data->color));
     utassert(-3.14f == data->floatingPoint && 27 == data->integer);
-    utassert(str::Eq(data->string, L"String") && !data->nullString && str::Eq(data->escapedString, L"$\nstring "));
+    utassert(str::Eq(data->string, "String") && !data->nullString && str::Eq(data->escapedString, "$\nstring "));
     utassert(str::Eq(data->utf8String, "Utf-8 String") && !data->nullUtf8String &&
              str::Eq(data->escapedUtf8String, "$\nstring "));
     utassert(data->intArray);
@@ -193,10 +194,10 @@ Key = Value";
     utassert(data->emptyStrArray);
     utassert(3 == data->strArray->size());
     utassert(0 == data->emptyStrArray->size());
-    Vec<WCHAR*>* sa = data->strArray;
-    utassert(str::Eq(sa->at(0), L"one"));
-    utassert(str::Eq(sa->at(1), L"two three"));
-    utassert(str::Eq(sa->at(2), L""));
+    Vec<char*>* sa = data->strArray;
+    utassert(str::Eq(sa->at(0), "one"));
+    utassert(str::Eq(sa->at(1), "two three"));
+    utassert(str::Eq(sa->at(2), ""));
 
     utassert(Point(111, 222) == data->point);
     utassert(data->sutStructItems && 0 == data->sutStructItems->size());

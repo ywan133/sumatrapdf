@@ -1,25 +1,47 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
 /* Sample various functions into lookup tables */
 
 static void
-pdf_sample_composite_shade_function(fz_context *ctx, fz_shade *shade, pdf_function *func, float t0, float t1)
+pdf_sample_composite_shade_function(fz_context *ctx, float *shade, int n, pdf_function *func, float t0, float t1)
 {
-	int i, n;
+	int i;
 	float t;
 
-	n = fz_colorspace_n(ctx, shade->colorspace);
 	for (i = 0; i < 256; i++)
 	{
 		t = t0 + (i / 255.0f) * (t1 - t0);
-		pdf_eval_function(ctx, func, &t, 1, shade->function[i], n);
-		shade->function[i][n] = 1;
+		pdf_eval_function(ctx, func, &t, 1, shade, n);
+		shade += n;
+		*shade++ = 1;
 	}
 }
 
 static void
-pdf_sample_component_shade_function(fz_context *ctx, fz_shade *shade, int funcs, pdf_function **func, float t0, float t1)
+pdf_sample_component_shade_function(fz_context *ctx, float *shade, int funcs, pdf_function **func, float t0, float t1)
 {
 	int i, k;
 	float t;
@@ -28,19 +50,30 @@ pdf_sample_component_shade_function(fz_context *ctx, fz_shade *shade, int funcs,
 	{
 		t = t0 + (i / 255.0f) * (t1 - t0);
 		for (k = 0; k < funcs; k++)
-			pdf_eval_function(ctx, func[k], &t, 1, &shade->function[i][k], 1);
-		shade->function[i][k] = 1;
+			pdf_eval_function(ctx, func[k], &t, 1, shade++, 1);
+		*shade++ = 1;
 	}
 }
 
-static void
-pdf_sample_shade_function(fz_context *ctx, fz_shade *shade, int funcs, pdf_function **func, float t0, float t1)
+void
+pdf_sample_shade_function(fz_context *ctx, float *samples, int n, int funcs, pdf_function **func, float t0, float t1)
 {
-	shade->use_function = 1;
 	if (funcs == 1)
-		pdf_sample_composite_shade_function(ctx, shade, func[0], t0, t1);
+		pdf_sample_composite_shade_function(ctx, samples, n, func[0], t0, t1);
 	else
-		pdf_sample_component_shade_function(ctx, shade, funcs, func, t0, t1);
+		pdf_sample_component_shade_function(ctx, samples, funcs, func, t0, t1);
+}
+
+static void
+make_sampled_shade_function(fz_context *ctx, fz_shade *shade, int funcs, pdf_function **func, float t0, float t1)
+{
+	int n = shade->colorspace->n;
+	if (funcs != 1)
+		n = funcs;
+	shade->function_stride = n + 1;
+	shade->function = Memento_label(fz_malloc(ctx, sizeof(float) * 256 * shade->function_stride), "shade samples");
+
+	pdf_sample_shade_function(ctx, shade->function, n, funcs, func, t0, t1);
 }
 
 /* Type 1-3 -- Function-based, linear and radial shadings */
@@ -48,12 +81,12 @@ pdf_sample_shade_function(fz_context *ctx, fz_shade *shade, int funcs, pdf_funct
 #define FUNSEGS 64 /* size of sampled mesh for function-based shadings */
 
 static void
-pdf_load_function_based_shading(fz_context *ctx, pdf_document *doc, fz_shade *shade, pdf_obj *dict, pdf_function *func)
+pdf_load_function_based_shading(fz_context *ctx, pdf_document *doc, fz_shade *shade, pdf_obj *dict, int funcs, pdf_function **func)
 {
 	pdf_obj *obj;
 	float x0, y0, x1, y1;
 	float fv[2];
-	int xx, yy;
+	int xx, yy, zz;
 	float *p;
 	int n = fz_colorspace_n(ctx, shade->colorspace);
 
@@ -78,16 +111,40 @@ pdf_load_function_based_shading(fz_context *ctx, pdf_document *doc, fz_shade *sh
 	shade->u.f.domain[1][1] = y1;
 
 	p = shade->u.f.fn_vals;
-	for (yy = 0; yy <= FUNSEGS; yy++)
+	if (funcs == 1)
 	{
-		fv[1] = y0 + (y1 - y0) * yy / FUNSEGS;
-
-		for (xx = 0; xx <= FUNSEGS; xx++)
+		for (yy = 0; yy <= FUNSEGS; yy++)
 		{
-			fv[0] = x0 + (x1 - x0) * xx / FUNSEGS;
+			fv[1] = y0 + (y1 - y0) * yy / FUNSEGS;
 
-			pdf_eval_function(ctx, func, fv, 2, p, n);
-			p += n;
+			for (xx = 0; xx <= FUNSEGS; xx++)
+			{
+				fv[0] = x0 + (x1 - x0) * xx / FUNSEGS;
+
+				pdf_eval_function(ctx, func[0], fv, 2, p, n);
+				p += n;
+			}
+		}
+	}
+	else
+	{
+		if (funcs != n)
+			fz_throw(ctx, FZ_ERROR_SYNTAX, "Expected 1 2in, n-out function, or n 2 in, 1-out functions");
+
+		for (yy = 0; yy <= FUNSEGS; yy++)
+		{
+			fv[1] = y0 + (y1 - y0) * yy / FUNSEGS;
+
+			for (xx = 0; xx <= FUNSEGS; xx++)
+			{
+				fv[0] = x0 + (x1 - x0) * xx / FUNSEGS;
+
+				for (zz = 0; zz < n; zz++)
+				{
+					pdf_eval_function(ctx, func[zz], fv, 2, p, 1);
+					p ++;
+				}
+			}
 		}
 	}
 }
@@ -122,7 +179,7 @@ pdf_load_linear_shading(fz_context *ctx, pdf_document *doc, fz_shade *shade, pdf
 		e1 = pdf_array_get_bool(ctx, obj, 1);
 	}
 
-	pdf_sample_shade_function(ctx, shade, funcs, func, d0, d1);
+	make_sampled_shade_function(ctx, shade, funcs, func, d0, d1);
 
 	shade->u.l_or_r.extend[0] = e0;
 	shade->u.l_or_r.extend[1] = e1;
@@ -160,7 +217,7 @@ pdf_load_radial_shading(fz_context *ctx, pdf_document *doc, fz_shade *shade, pdf
 		e1 = pdf_array_get_bool(ctx, obj, 1);
 	}
 
-	pdf_sample_shade_function(ctx, shade, funcs, func, d0, d1);
+	make_sampled_shade_function(ctx, shade, funcs, func, d0, d1);
 
 	shade->u.l_or_r.extend[0] = e0;
 	shade->u.l_or_r.extend[1] = e1;
@@ -249,9 +306,9 @@ pdf_load_type4_shade(fz_context *ctx, pdf_document *doc, fz_shade *shade, pdf_ob
 	pdf_load_mesh_params(ctx, doc, shade, dict);
 
 	if (funcs > 0)
-		pdf_sample_shade_function(ctx, shade, funcs, func, shade->u.m.c0[0], shade->u.m.c1[0]);
+		make_sampled_shade_function(ctx, shade, funcs, func, shade->u.m.c0[0], shade->u.m.c1[0]);
 
-	shade->buffer = pdf_load_compressed_stream(ctx, doc, pdf_to_num(ctx, dict));
+	shade->buffer = pdf_load_compressed_stream(ctx, doc, pdf_to_num(ctx, dict), 0);
 }
 
 static void
@@ -260,9 +317,9 @@ pdf_load_type5_shade(fz_context *ctx, pdf_document *doc, fz_shade *shade, pdf_ob
 	pdf_load_mesh_params(ctx, doc, shade, dict);
 
 	if (funcs > 0)
-		pdf_sample_shade_function(ctx, shade, funcs, func, shade->u.m.c0[0], shade->u.m.c1[0]);
+		make_sampled_shade_function(ctx, shade, funcs, func, shade->u.m.c0[0], shade->u.m.c1[0]);
 
-	shade->buffer = pdf_load_compressed_stream(ctx, doc, pdf_to_num(ctx, dict));
+	shade->buffer = pdf_load_compressed_stream(ctx, doc, pdf_to_num(ctx, dict), 0);
 }
 
 /* Type 6 & 7 -- Patch mesh shadings */
@@ -273,9 +330,9 @@ pdf_load_type6_shade(fz_context *ctx, pdf_document *doc, fz_shade *shade, pdf_ob
 	pdf_load_mesh_params(ctx, doc, shade, dict);
 
 	if (funcs > 0)
-		pdf_sample_shade_function(ctx, shade, funcs, func, shade->u.m.c0[0], shade->u.m.c1[0]);
+		make_sampled_shade_function(ctx, shade, funcs, func, shade->u.m.c0[0], shade->u.m.c1[0]);
 
-	shade->buffer = pdf_load_compressed_stream(ctx, doc, pdf_to_num(ctx, dict));
+	shade->buffer = pdf_load_compressed_stream(ctx, doc, pdf_to_num(ctx, dict), 0);
 }
 
 static void
@@ -284,9 +341,9 @@ pdf_load_type7_shade(fz_context *ctx, pdf_document *doc, fz_shade *shade, pdf_ob
 	pdf_load_mesh_params(ctx, doc, shade, dict);
 
 	if (funcs > 0)
-		pdf_sample_shade_function(ctx, shade, funcs, func, shade->u.m.c0[0], shade->u.m.c1[0]);
+		make_sampled_shade_function(ctx, shade, funcs, func, shade->u.m.c0[0], shade->u.m.c1[0]);
 
-	shade->buffer = pdf_load_compressed_stream(ctx, doc, pdf_to_num(ctx, dict));
+	shade->buffer = pdf_load_compressed_stream(ctx, doc, pdf_to_num(ctx, dict), 0);
 }
 
 /* Load all of the shading dictionary parameters, then switch on the shading type. */
@@ -312,7 +369,7 @@ pdf_load_shading_dict(fz_context *ctx, pdf_document *doc, pdf_obj *dict, fz_matr
 		FZ_INIT_STORABLE(shade, 1, fz_drop_shade_imp);
 		shade->type = FZ_MESH_TYPE4;
 		shade->use_background = 0;
-		shade->use_function = 0;
+		shade->function_stride = 0;
 		shade->matrix = transform;
 		shade->bbox = fz_infinite_rect;
 
@@ -392,7 +449,7 @@ pdf_load_shading_dict(fz_context *ctx, pdf_document *doc, pdf_obj *dict, fz_matr
 		shade->type = type;
 		switch (type)
 		{
-		case 1: pdf_load_function_based_shading(ctx, doc, shade, dict, func[0]); break;
+		case 1: pdf_load_function_based_shading(ctx, doc, shade, dict, funcs, func); break;
 		case 2: pdf_load_linear_shading(ctx, doc, shade, dict, funcs, func); break;
 		case 3: pdf_load_radial_shading(ctx, doc, shade, dict, funcs, func); break;
 		case 4: pdf_load_type4_shade(ctx, doc, shade, dict, funcs, func); break;
@@ -419,11 +476,14 @@ pdf_load_shading_dict(fz_context *ctx, pdf_document *doc, pdf_obj *dict, fz_matr
 static size_t
 fz_shade_size(fz_context *ctx, fz_shade *s)
 {
+	size_t f = 0;
 	if (s == NULL)
 		return 0;
+	if (s->function_stride)
+		f = sizeof(float) * s->function_stride * 256;
 	if (s->type == FZ_FUNCTION_BASED)
-		return sizeof(*s) + sizeof(float) * s->u.f.xdivs * s->u.f.ydivs * fz_colorspace_n(ctx, s->colorspace);
-	return sizeof(*s) + fz_compressed_buffer_size(s->buffer);
+		return sizeof(*s) + sizeof(float) * s->u.f.xdivs * s->u.f.ydivs * fz_colorspace_n(ctx, s->colorspace) + f;
+	return sizeof(*s) + fz_compressed_buffer_size(s->buffer) + f;
 }
 
 fz_shade *

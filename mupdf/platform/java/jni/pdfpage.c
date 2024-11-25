@@ -1,7 +1,29 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* PDFPage interface */
 
 JNIEXPORT jobject JNICALL
-FUN(PDFPage_createAnnotation)(JNIEnv *env, jobject self, jint subtype)
+FUN(PDFPage_createAnnotation)(JNIEnv *env, jobject self, jint type)
 {
 	fz_context *ctx = get_context(env);
 	pdf_page *page = from_PDFPage(env, self);
@@ -10,7 +32,7 @@ FUN(PDFPage_createAnnotation)(JNIEnv *env, jobject self, jint subtype)
 	if (!ctx || !page) return NULL;
 
 	fz_try(ctx)
-		annot = pdf_create_annot(ctx, page, subtype);
+		annot = pdf_create_annot(ctx, page, type);
 	fz_catch(ctx)
 		jni_rethrow(env, ctx);
 
@@ -50,12 +72,12 @@ FUN(PDFPage_update)(JNIEnv *env, jobject self)
 }
 
 JNIEXPORT jboolean JNICALL
-FUN(PDFPage_applyRedactions)(JNIEnv *env, jobject self, jboolean blackBoxes, jint imageMethod)
+FUN(PDFPage_applyRedactions)(JNIEnv *env, jobject self, jboolean blackBoxes, jint imageMethod, jint lineArt, jint text)
 {
 	fz_context *ctx = get_context(env);
 	pdf_page *page = from_PDFPage(env, self);
 	jboolean redacted = JNI_FALSE;
-	pdf_redact_options opts = { blackBoxes, imageMethod };
+	pdf_redact_options opts = { blackBoxes, imageMethod, lineArt, text };
 
 	if (!ctx || !page) return JNI_FALSE;
 
@@ -125,8 +147,8 @@ FUN(PDFPage_getWidgets)(JNIEnv *env, jobject self)
 {
 	fz_context *ctx = get_context(env);
 	pdf_page *page = from_PDFPage(env, self);
-	pdf_widget *widget = NULL;
-	pdf_widget *widgets = NULL;
+	pdf_annot *widget = NULL;
+	pdf_annot *widgets = NULL;
 	jobjectArray jwidgets = NULL;
 	int count;
 	int i;
@@ -183,7 +205,7 @@ FUN(PDFPage_createSignature)(JNIEnv *env, jobject self)
 {
 	fz_context *ctx = get_context(env);
 	pdf_page *page = from_PDFPage(env, self);
-	pdf_widget *widget = NULL;
+	pdf_annot *widget = NULL;
 	char name[80];
 
 	if (!ctx || !page)
@@ -200,4 +222,80 @@ FUN(PDFPage_createSignature)(JNIEnv *env, jobject self)
 	}
 
 	return to_PDFWidget_safe_own(ctx, env, widget);
+}
+
+JNIEXPORT jobject JNICALL
+FUN(PDFPage_getTransform)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_page *page = from_PDFPage(env, self);
+	fz_matrix ctm;
+
+	if (!ctx || !page)
+		return NULL;
+
+	fz_try(ctx)
+		pdf_page_transform(ctx, page, NULL, &ctm);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return to_Matrix_safe(ctx, env, ctm);
+}
+
+JNIEXPORT jobject JNICALL
+FUN(PDFPage_getObject)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_page *page = from_PDFPage(env, self);
+
+	if (!ctx || !page)
+		return NULL;
+
+	return to_PDFObject_safe_own(ctx, env, pdf_keep_obj(ctx, page->obj));
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFPage_setPageBox)(JNIEnv *env, jobject self, jint box, jobject jrect)
+{
+	fz_context *ctx = get_context(env);
+	pdf_page *page = from_PDFPage(env, self);
+	fz_rect rect = from_Rect(env, jrect);
+
+	if (!ctx || !page)
+		return;
+
+	fz_try(ctx)
+		pdf_set_page_box(ctx, page, box, rect);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT jint JNICALL
+FUN(PDFPage_countAssociatedFiles)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_page *page = from_PDFPage(env, self);
+	int n;
+
+	fz_try(ctx)
+		n = pdf_count_page_associated_files(ctx, page);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return n;
+}
+
+JNIEXPORT jobject JNICALL
+FUN(PDFPage_associatedFile)(JNIEnv *env, jobject self, jint idx)
+{
+	fz_context *ctx = get_context(env);
+	pdf_page *page = from_PDFPage(env, self);
+	pdf_obj *af;
+
+	fz_try(ctx)
+		af = pdf_page_associated_file(ctx, page, idx);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return to_PDFObject_safe_own(ctx, env, af);
 }

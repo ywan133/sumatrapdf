@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <string.h>
@@ -89,6 +111,16 @@ fz_document_writer *fz_new_document_writer_of_size(fz_context *ctx, size_t size,
 	return wri;
 }
 
+static void fz_save_pixmap_as_jpeg_default(fz_context *ctx, fz_pixmap *pixmap, const char *filename)
+{
+	fz_save_pixmap_as_jpeg(ctx, pixmap, filename, 90);
+}
+
+fz_document_writer *fz_new_jpeg_pixmap_writer(fz_context *ctx, const char *path, const char *options)
+{
+	return fz_new_pixmap_writer(ctx, path, options, "out-%04d.jpeg", 0, fz_save_pixmap_as_jpeg_default);
+}
+
 fz_document_writer *fz_new_png_pixmap_writer(fz_context *ctx, const char *path, const char *options)
 {
 	return fz_new_pixmap_writer(ctx, path, options, "out-%04d.png", 0, fz_save_pixmap_as_png);
@@ -126,6 +158,8 @@ fz_document_writer *fz_new_pkm_pixmap_writer(fz_context *ctx, const char *path, 
 
 static int is_extension(const char *a, const char *ext)
 {
+	if (!a)
+		return 0;
 	if (a[0] == '.')
 		++a;
 	return !fz_strcasecmp(a, ext);
@@ -147,8 +181,10 @@ fz_new_document_writer(fz_context *ctx, const char *path, const char *explicit_f
 		format = strrchr(path, '.');
 	while (format)
 	{
+#if FZ_ENABLE_OCR_OUTPUT
 		if (is_extension(format, "ocr"))
 			return fz_new_pdfocr_writer(ctx, path, options);
+#endif
 #if FZ_ENABLE_PDF
 		if (is_extension(format, "pdf"))
 			return fz_new_pdf_writer(ctx, path, options);
@@ -174,6 +210,8 @@ fz_new_document_writer(fz_context *ctx, const char *path, const char *explicit_f
 			return fz_new_pbm_pixmap_writer(ctx, path, options);
 		if (is_extension(format, "pkm"))
 			return fz_new_pkm_pixmap_writer(ctx, path, options);
+		if (is_extension(format, "jpeg") || is_extension(format, "jpg"))
+			return fz_new_jpeg_pixmap_writer(ctx, path, options);
 
 		if (is_extension(format, "pcl"))
 			return fz_new_pcl_writer(ctx, path, options);
@@ -194,44 +232,40 @@ fz_new_document_writer(fz_context *ctx, const char *path, const char *explicit_f
 			return fz_new_text_writer(ctx, "stext.xml", path, options);
 		if (is_extension(format, "stext.json"))
 			return fz_new_text_writer(ctx, "stext.json", path, options);
-#ifdef HAVE_EXTRACT
+
+#if FZ_ENABLE_ODT_OUTPUT
 		if (is_extension(format, "odt"))
-		{
-			return fz_new_odt_writer(ctx, format, path, options);
-		}
+			return fz_new_odt_writer(ctx, path, options);
+#endif
+#if FZ_ENABLE_DOCX_OUTPUT
 		if (is_extension(format, "docx"))
-		{
-			return fz_new_docx_writer(ctx, format, path, options);
-		}
-#else
-		if (is_extension(format, "odt"))
-		{
-			fz_throw(ctx, FZ_ERROR_GENERIC, "odt output not available in this build.");
-		}
-		if (is_extension(format, "docx"))
-		{
-			fz_throw(ctx, FZ_ERROR_GENERIC, "docx output not available in this build.");
-		}
+			return fz_new_docx_writer(ctx, path, options);
 #endif
 		if (format != explicit_format)
 			format = prev_period(path, format);
 		else
 			format = NULL;
 	}
-	fz_throw(ctx, FZ_ERROR_GENERIC, "cannot detect document format");
+	fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot detect document format");
 }
 
 fz_document_writer *
 fz_new_document_writer_with_output(fz_context *ctx, fz_output *out, const char *format, const char *options)
 {
-	if (is_extension(format, "cbz"))
-		return fz_new_cbz_writer_with_output(ctx, out, options);
+#if FZ_ENABLE_OCR_OUTPUT
 	if (is_extension(format, "ocr"))
 		return fz_new_pdfocr_writer_with_output(ctx, out, options);
+#endif
 #if FZ_ENABLE_PDF
 	if (is_extension(format, "pdf"))
 		return fz_new_pdf_writer_with_output(ctx, out, options);
 #endif
+
+	if (is_extension(format, "cbz"))
+		return fz_new_cbz_writer_with_output(ctx, out, options);
+
+	if (is_extension(format, "svg"))
+		return fz_new_svg_writer_with_output(ctx, out, options);
 
 	if (is_extension(format, "pcl"))
 		return fz_new_pcl_writer_with_output(ctx, out, options);
@@ -253,7 +287,31 @@ fz_new_document_writer_with_output(fz_context *ctx, fz_output *out, const char *
 	if (is_extension(format, "stext.json"))
 		return fz_new_text_writer_with_output(ctx, "stext.json", out, options);
 
-	fz_throw(ctx, FZ_ERROR_GENERIC, "unknown output document format: %s", format);
+#if FZ_ENABLE_ODT_OUTPUT
+	if (is_extension(format, "odt"))
+		return fz_new_odt_writer_with_output(ctx, out, options);
+#endif
+#if FZ_ENABLE_DOCX_OUTPUT
+	if (is_extension(format, "docx"))
+		return fz_new_docx_writer_with_output(ctx, out, options);
+#endif
+
+	fz_throw(ctx, FZ_ERROR_ARGUMENT, "unknown output document format: %s", format);
+}
+
+fz_document_writer *
+fz_new_document_writer_with_buffer(fz_context *ctx, fz_buffer *buffer, const char *format, const char *options)
+{
+	fz_document_writer *wri;
+	fz_output *out = fz_new_output_with_buffer(ctx, buffer);
+	fz_try(ctx) {
+		wri = fz_new_document_writer_with_output(ctx, out, format, options);
+	}
+	fz_catch(ctx) {
+		fz_drop_output(ctx, out);
+		fz_rethrow(ctx);
+	}
+	return wri;
 }
 
 void
@@ -285,7 +343,7 @@ fz_begin_page(fz_context *ctx, fz_document_writer *wri, fz_rect mediabox)
 	if (!wri)
 		return NULL;
 	if (wri->dev)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "called begin page without ending the previous page");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "called begin page without ending the previous page");
 	wri->dev = wri->begin_page(ctx, wri, mediabox);
 	return wri->dev;
 }

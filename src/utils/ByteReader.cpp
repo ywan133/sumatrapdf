@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
@@ -55,12 +55,7 @@ bool ByteReader::Unpack(void* strct, size_t size, const char* format, size_t off
     return idx == size;
 }
 
-ByteReader::ByteReader(std::string_view data) {
-    d = (const u8*)data.data();
-    len = data.size();
-}
-
-ByteReader::ByteReader(std::span<u8> data) {
+ByteReader::ByteReader(const ByteSlice& data) {
     d = (const u8*)data.data();
     len = data.size();
 }

@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "xps-imp.h"
 
@@ -141,8 +163,8 @@ xps_add_link_target(fz_context *ctx, xps_document *doc, char *name)
 	doc->target = target;
 }
 
-fz_location
-xps_lookup_link_target(fz_context *ctx, fz_document *doc_, const char *target_uri, float *xp, float *yp)
+fz_link_dest
+xps_lookup_link_target(fz_context *ctx, fz_document *doc_, const char *target_uri)
 {
 	xps_document *doc = (xps_document*)doc_;
 	xps_target *target;
@@ -150,8 +172,8 @@ xps_lookup_link_target(fz_context *ctx, fz_document *doc_, const char *target_ur
 	needle = needle ? needle + 1 : target_uri;
 	for (target = doc->target; target; target = target->next)
 		if (!strcmp(target->name, needle))
-			return fz_make_location(0, target->page);
-	return fz_make_location(-1, -1);
+			return fz_make_link_dest_xyz(0, target->page, 0, 0, 0);
+	return fz_make_link_dest_xyz(0, fz_atoi(needle) - 1, 0, 0, 0);
 }
 
 static void
@@ -344,7 +366,7 @@ xps_read_page_list(fz_context *ctx, xps_document *doc)
 	xps_read_and_process_metadata_part(ctx, doc, "/_rels/.rels", NULL);
 
 	if (!doc->start_part)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find fixed document sequence start part");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cannot find fixed document sequence start part");
 
 	xps_read_and_process_metadata_part(ctx, doc, doc->start_part, NULL);
 
@@ -359,6 +381,8 @@ xps_read_page_list(fz_context *ctx, xps_document *doc)
 		fz_catch(ctx)
 		{
 			fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+			fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+			fz_report_error(ctx);
 			fz_warn(ctx, "cannot process FixedDocument rels part");
 		}
 		xps_read_and_process_metadata_part(ctx, doc, fixdoc->name, fixdoc);
@@ -388,25 +412,25 @@ xps_load_fixed_page(fz_context *ctx, xps_document *doc, xps_fixpage *page)
 
 		root = fz_xml_root(xml);
 		if (!root)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "FixedPage missing root element");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "FixedPage missing root element");
 
 		if (fz_xml_is_tag(root, "AlternateContent"))
 		{
 			fz_xml *node = xps_lookup_alternate_content(ctx, doc, root);
 			if (!node)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "FixedPage missing alternate root element");
-			fz_detach_xml(ctx, xml, node);
+				fz_throw(ctx, FZ_ERROR_FORMAT, "FixedPage missing alternate root element");
+			fz_detach_xml(ctx, node);
 			root = node;
 		}
 
 		if (!fz_xml_is_tag(root, "FixedPage"))
-			fz_throw(ctx, FZ_ERROR_GENERIC, "expected FixedPage element");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "expected FixedPage element");
 		width_att = fz_xml_att(root, "Width");
 		if (!width_att)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "FixedPage missing required attribute: Width");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "FixedPage missing required attribute: Width");
 		height_att = fz_xml_att(root, "Height");
 		if (!height_att)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "FixedPage missing required attribute: Height");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "FixedPage missing required attribute: Height");
 
 		page->width = atoi(width_att);
 		page->height = atoi(height_att);
@@ -425,7 +449,7 @@ xps_load_fixed_page(fz_context *ctx, xps_document *doc, xps_fixpage *page)
 }
 
 static fz_rect
-xps_bound_page(fz_context *ctx, fz_page *page_)
+xps_bound_page(fz_context *ctx, fz_page *page_, fz_box_type box)
 {
 	xps_page *page = (xps_page*)page_;
 	fz_rect bounds;
@@ -479,15 +503,7 @@ xps_load_page(fz_context *ctx, fz_document *doc_, int chapter, int number)
 		n ++;
 	}
 
-	fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find page %d", number + 1);
-}
-
-static int
-xps_recognize(fz_context *ctx, const char *magic)
-{
-	if (strstr(magic, "/_rels/.rels") || strstr(magic, "\\_rels\\.rels"))
-		return 100;
-	return 0;
+	fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot find page %d", number + 1);
 }
 
 static const char *xps_extensions[] =
@@ -505,13 +521,70 @@ static const char *xps_mimetypes[] =
 	NULL
 };
 
+static int
+xps_recognize_doc_content(fz_context *ctx, const fz_document_handler *handler, fz_stream *stream, fz_archive *dir, void **state, fz_document_recognize_state_free_fn **free_state)
+{
+	fz_archive *arch = NULL;
+	int ret = 0;
+	fz_xml *xml = NULL;
+	fz_xml *pos;
+
+	if (state)
+		*state = NULL;
+	if (free_state)
+		*free_state = NULL;
+
+	fz_var(arch);
+	fz_var(ret);
+	fz_var(xml);
+
+	fz_try(ctx)
+	{
+		if (stream == NULL)
+			arch = fz_keep_archive(ctx, dir);
+		else
+		{
+			arch = fz_try_open_archive_with_stream(ctx, stream);
+			if (arch == NULL)
+				break;
+		}
+
+		xml = fz_try_parse_xml_archive_entry(ctx, arch, "/_rels/.rels", 0);
+		if (xml == NULL)
+			xml = fz_try_parse_xml_archive_entry(ctx, arch, "\\_rels\\.rels", 0);
+
+		if (xml == NULL)
+			break;
+
+		pos = fz_xml_find_dfs(xml, "Relationship", "Type", "http://schemas.microsoft.com/xps/2005/06/fixedrepresentation");
+		if (pos)
+			ret = 100;
+	}
+	fz_always(ctx)
+	{
+		fz_drop_xml(ctx, xml);
+		fz_drop_archive(ctx, arch);
+	}
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+
+	return ret;
+}
+
+static fz_document *
+xps_open(fz_context *ctx, const fz_document_handler *handler, fz_stream *file, fz_stream *accel, fz_archive *dir, void *state)
+{
+	if (file)
+		return xps_open_document_with_stream(ctx, file);
+	else
+		return xps_open_document_with_directory(ctx, dir);
+}
+
 fz_document_handler xps_document_handler =
 {
-	xps_recognize,
-	xps_open_document,
-	xps_open_document_with_stream,
+	NULL,
+	xps_open,
 	xps_extensions,
 	xps_mimetypes,
-	NULL,
-	NULL
+	xps_recognize_doc_content
 };

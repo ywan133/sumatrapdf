@@ -1,21 +1,21 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-class HttpRsp {
-  public:
-    AutoFreeWstr url;
+struct HttpRsp {
+    AutoFreeStr url;
     str::Str data;
     DWORD error = (DWORD)-1;
     DWORD httpStatusCode = (DWORD)-1;
 
-    HttpRsp() {
-    }
+    HttpRsp() = default;
 };
 
-bool HttpRspOk(const HttpRsp*);
+struct HttpProgress {
+    i64 nDownloaded;
+};
 
-bool HttpPost(const WCHAR* server, int port, const WCHAR* url, str::Str* headers, str::Str* data);
-bool HttpGet(const WCHAR* url, HttpRsp* rspOut);
-bool HttpGetToFile(const WCHAR* url, const WCHAR* destFilePath);
-// void  HttpGetAsync(const char *url, const std::function<void(HttpRsp *)> &);
-void HttpGetAsync(const WCHAR* url, const std::function<void(HttpRsp*)>&);
+bool IsHttpRspOk(const HttpRsp*);
+
+bool HttpPost(const char* server, int port, const char* url, str::Str* headers, str::Str* data);
+bool HttpGet(const char* url, HttpRsp* rspOut);
+bool HttpGetToFile(const char* url, const char* destFilePath, const Func1<HttpProgress*>& cbProgress);

@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 extern "C" {
@@ -9,49 +9,24 @@ extern "C" {
 #include "utils/BaseUtil.h"
 #include "utils/ScopedWin.h"
 #include "utils/GdiPlusUtil.h"
-#include "utils/Log.h"
+#include "utils/WinUtil.h"
 
-#include "wingui/TreeModel.h"
+#include "wingui/UIModels.h"
 
-#include "Annotation.h"
+#include "Settings.h"
+#include "DocProperties.h"
+#include "DocController.h"
 #include "EngineBase.h"
-#include "EngineFzUtil.h"
+#include "Annotation.h"
+#include "EngineMupdf.h"
+#include "FzImgReader.h"
 #include "PdfCreator.h"
 
-// using namespace Gdiplus;
+#include "utils/Log.h"
 
-using Gdiplus::ARGB;
-using Gdiplus::Bitmap;
-using Gdiplus::Brush;
-using Gdiplus::Color;
-using Gdiplus::Font;
-using Gdiplus::FontStyle;
-using Gdiplus::FontStyleRegular;
-using Gdiplus::FontStyleUnderline;
-using Gdiplus::Graphics;
-using Gdiplus::LinearGradientBrush;
-using Gdiplus::LinearGradientMode;
-using Gdiplus::Ok;
-using Gdiplus::Pen;
-using Gdiplus::SolidBrush;
-using Gdiplus::Status;
+static AutoFreeStr gPdfProducer;
 
-using Gdiplus::CombineModeReplace;
-using Gdiplus::CompositingQualityHighQuality;
-using Gdiplus::GraphicsPath;
-using Gdiplus::Image;
-using Gdiplus::Matrix;
-using Gdiplus::PenAlignmentInset;
-using Gdiplus::Region;
-using Gdiplus::SmoothingModeAntiAlias;
-using Gdiplus::StringFormat;
-using Gdiplus::StringFormatFlagsDirectionRightToLeft;
-using Gdiplus::TextRenderingHintClearTypeGridFit;
-using Gdiplus::UnitPixel;
-
-static AutoFreeWstr gPdfProducer;
-
-void PdfCreator::SetProducerName(const WCHAR* name) {
+void PdfCreator::SetProducerName(const char* name) {
     if (!str::Eq(gPdfProducer, name)) {
         gPdfProducer.SetCopy(name);
     }
@@ -71,7 +46,7 @@ static fz_image* render_to_pixmap(fz_context* ctx, HBITMAP hbmp, Size size) {
         fz_throw(ctx, FZ_ERROR_GENERIC, "render_to_pixmap: failed to allocate %d bytes", (int)stride * h);
     }
 
-    BITMAPINFO bmi = {0};
+    BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
     bmi.bmiHeader.biWidth = w;
     bmi.bmiHeader.biHeight = -h;
@@ -116,6 +91,7 @@ static fz_image* render_to_pixmap(fz_context* ctx, HBITMAP hbmp, Size size) {
         fz_drop_pixmap(ctx, pix);
     }
     fz_catch(ctx) {
+        fz_report_error(ctx);
         fz_rethrow(ctx);
     }
     return img;
@@ -131,7 +107,7 @@ static void installFitzErrorCallbacks(fz_context* ctx) {
 }
 
 PdfCreator::PdfCreator() {
-    ctx = fz_new_context(nullptr, nullptr, FZ_STORE_UNLIMITED);
+    ctx = fz_new_context_windows(kFzStoreUnlimited);
     if (!ctx) {
         return;
     }
@@ -141,6 +117,7 @@ PdfCreator::PdfCreator() {
         doc = pdf_create_document(ctx);
     }
     fz_catch(ctx) {
+        fz_report_error(ctx);
         doc = nullptr;
     }
 }
@@ -148,7 +125,7 @@ PdfCreator::PdfCreator() {
 PdfCreator::~PdfCreator() {
     pdf_drop_document(ctx, doc);
     fz_flush_warnings(ctx);
-    fz_drop_context(ctx);
+    fz_drop_context_windows(ctx);
 }
 
 pdf_obj* add_image_res(fz_context* ctx, pdf_document* doc, pdf_obj* resources, char* name, fz_image* image) {
@@ -167,8 +144,8 @@ pdf_obj* add_image_res(fz_context* ctx, pdf_document* doc, pdf_obj* resources, c
 }
 
 // based on create_page in pdfcreate.c
-bool PdfCreator::AddPageFromFzImage(fz_image* image, float imgDpi) {
-    CrashIf(!ctx || !doc);
+bool PdfCreator::AddPageFromFzImage(fz_image* image, float imgDpi) const {
+    ReportIf(!ctx || !doc);
     if (!ctx || !doc) {
         return false;
     }
@@ -181,6 +158,8 @@ bool PdfCreator::AddPageFromFzImage(fz_image* image, float imgDpi) {
     fz_var(resources);
     fz_var(dev);
 
+    bool ok = true;
+    fz_var(ok);
     fz_try(ctx) {
         float zoom = 1.0f;
         if (imgDpi > 0) {
@@ -205,9 +184,10 @@ bool PdfCreator::AddPageFromFzImage(fz_image* image, float imgDpi) {
         fz_drop_device(ctx, dev);
     }
     fz_catch(ctx) {
-        return false;
+        ok = false;
+        fz_report_error(ctx);
     }
-    return true;
+    return ok;
 }
 
 static bool AddPageFromHBITMAP(PdfCreator* c, HBITMAP hbmp, Size size, float imgDpi) {
@@ -223,6 +203,7 @@ static bool AddPageFromHBITMAP(PdfCreator* c, HBITMAP hbmp, Size size, float img
         fz_drop_image(c->ctx, image);
     }
     fz_catch(c->ctx) {
+        fz_report_error(c->ctx);
         return false;
     }
     return ok;
@@ -241,9 +222,9 @@ bool PdfCreator::AddPageFromGdiplusBitmap(Gdiplus::Bitmap* bmp, float imgDpi) {
     return ok;
 }
 
-bool PdfCreator::AddPageFromImageData(const char* data, size_t len, float imgDpi) {
-    CrashIf(!ctx || !doc);
-    if (!ctx || !doc || !data || len == 0) {
+bool PdfCreator::AddPageFromImageData(const ByteSlice& data, float imgDpi) const {
+    ReportIf(!ctx || !doc);
+    if (!ctx || !doc || data.empty()) {
         return false;
     }
 
@@ -251,11 +232,12 @@ bool PdfCreator::AddPageFromImageData(const char* data, size_t len, float imgDpi
     fz_var(img);
 
     fz_try(ctx) {
-        fz_buffer* buf = fz_new_buffer_from_copied_data(ctx, (u8*)data, len);
+        fz_buffer* buf = fz_new_buffer_from_copied_data(ctx, data.data(), data.size());
         img = fz_new_image_from_buffer(ctx, buf);
     }
     fz_catch(ctx) {
-        return false;
+        fz_report_error(ctx);
+        img = nullptr;
     }
     if (!img) {
         return false;
@@ -265,38 +247,31 @@ bool PdfCreator::AddPageFromImageData(const char* data, size_t len, float imgDpi
     return ok;
 }
 
-bool PdfCreator::SetProperty(DocumentProperty prop, const WCHAR* value) {
+// clang-format off
+static const char* pdfCreatorPropsMap[] = {
+    kPropTitle, "Title",
+    kPropAuthor, "Author",
+    kPropSubject, "Subject",
+    kPropCopyright, "Copyright",
+    kPropModificationDate, "ModDate",
+    kPropCreatorApp, "Creator",
+    kPropPdfProducer, "Producer",
+    nullptr
+};
+// clang-format on
+
+bool PdfCreator::SetProperty(const char* propName, const char* value) const {
     if (!ctx || !doc) {
         return false;
     }
 
-    // adapted from EnginePdf::GetProperty
-    static struct {
-        DocumentProperty prop;
-        const char* name;
-    } pdfPropNames[] = {
-        {DocumentProperty::Title, "Title"},
-        {DocumentProperty::Author, "Author"},
-        {DocumentProperty::Subject, "Subject"},
-        {DocumentProperty::Copyright, "Copyright"},
-        {DocumentProperty::ModificationDate, "ModDate"},
-        {DocumentProperty::CreatorApp, "Creator"},
-        {DocumentProperty::PdfProducer, "Producer"},
-    };
-    const char* name = nullptr;
-    for (int i = 0; i < dimof(pdfPropNames) && !name; i++) {
-        if (pdfPropNames[i].prop == prop) {
-            name = pdfPropNames[i].name;
-        }
-    }
+    const char* name = GetMatchingString(pdfCreatorPropsMap, propName);
     if (!name) {
         return false;
     }
 
-    AutoFree val = strconv::WstrToUtf8(value);
+    const char* val = value;
 
-    pdf_obj* obj = nullptr;
-    fz_var(obj);
     fz_try(ctx) {
         pdf_obj* info = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Info));
         if (!info) {
@@ -306,31 +281,31 @@ bool PdfCreator::SetProperty(DocumentProperty prop, const WCHAR* value) {
         }
 
         // TODO: not sure if pdf_new_text_string() handles utf8
-        pdf_obj* valobj = pdf_new_text_string(ctx, val.Get());
+        pdf_obj* valobj = pdf_new_text_string(ctx, val);
         pdf_dict_puts_drop(ctx, info, name, valobj);
     }
     fz_catch(ctx) {
-        pdf_drop_obj(ctx, obj);
+        fz_report_error(ctx);
         return false;
     }
     return true;
 }
 
 // clang-format off
-static DocumentProperty propsToCopy[] = {
-    DocumentProperty::Title,
-    DocumentProperty::Author,
-    DocumentProperty::Subject,
-    DocumentProperty::Copyright,
-    DocumentProperty::ModificationDate,
-    DocumentProperty::CreatorApp
+static const char* propsToCopy[] = {
+    kPropTitle,
+    kPropAuthor,
+    kPropSubject,
+    kPropCopyright,
+    kPropModificationDate,
+    kPropCreatorApp
 };
 // clang-format on
 
-bool PdfCreator::CopyProperties(EngineBase* engine) {
+bool PdfCreator::CopyProperties(EngineBase* engine) const {
     bool ok;
     for (int i = 0; i < dimof(propsToCopy); i++) {
-        AutoFreeWstr value = engine->GetProperty(propsToCopy[i]);
+        TempStr value = engine->GetPropertyTemp(propsToCopy[i]);
         if (value) {
             ok = SetProperty(propsToCopy[i], value);
             if (!ok) {
@@ -361,13 +336,13 @@ const pdf_write_options pdf_default_write_options2 = {
     "", /* upwd_utf8[128] */
 };
 
-bool PdfCreator::SaveToFile(const char* filePath) {
+bool PdfCreator::SaveToFile(const char* filePath) const {
     if (!ctx || !doc) {
         return false;
     }
 
     if (gPdfProducer) {
-        SetProperty(DocumentProperty::PdfProducer, gPdfProducer);
+        SetProperty(kPropPdfProducer, gPdfProducer);
     }
 
     fz_try(ctx) {
@@ -377,6 +352,7 @@ bool PdfCreator::SaveToFile(const char* filePath) {
         pdf_save_document(ctx, doc, (const char*)filePath, &opts);
     }
     fz_catch(ctx) {
+        fz_report_error(ctx);
         return false;
     }
     return true;
@@ -392,7 +368,7 @@ bool PdfCreator::RenderToFile(const char* pdfFileName, EngineBase* engine, int d
         RenderedBitmap* bmp = engine->RenderPage(args);
         ok = false;
         if (bmp) {
-            ok = AddPageFromHBITMAP(c, bmp->GetBitmap(), bmp->Size(), dpi);
+            ok = AddPageFromHBITMAP(c, bmp->GetBitmap(), bmp->GetSize(), dpi);
         }
         delete bmp;
     }

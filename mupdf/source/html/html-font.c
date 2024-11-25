@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "html-imp.h"
 
@@ -20,7 +42,7 @@ fz_load_html_default_font(fz_context *ctx, fz_html_font_set *set, const char *fa
 		if (!data)
 			data = fz_lookup_builtin_font(ctx, backup_family, is_bold, is_italic, &size);
 		if (!data)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cannot load html font: %s", real_family);
+			fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "cannot load html font: %s", real_family);
 		set->fonts[idx] = fz_new_font_from_memory(ctx, NULL, data, size, 0, 1);
 		fz_font_flags(set->fonts[idx])->is_serif = !is_sans;
 	}
@@ -33,14 +55,25 @@ fz_add_html_font_face(fz_context *ctx, fz_html_font_set *set,
 	const char *src, fz_font *font)
 {
 	fz_html_font_face *custom = fz_malloc_struct(ctx, fz_html_font_face);
-	custom->font = fz_keep_font(ctx, font);
-	custom->src = fz_strdup(ctx, src);
-	custom->family = fz_strdup(ctx, family);
-	custom->is_bold = is_bold;
-	custom->is_italic = is_italic;
-	custom->is_small_caps = is_small_caps;
-	custom->next = set->custom;
-	set->custom = custom;
+
+	fz_try(ctx)
+	{
+		custom->font = fz_keep_font(ctx, font);
+		custom->src = fz_strdup(ctx, src);
+		custom->family = fz_strdup(ctx, family);
+		custom->is_bold = is_bold;
+		custom->is_italic = is_italic;
+		custom->is_small_caps = is_small_caps;
+		custom->next = set->custom;
+		set->custom = custom;
+	}
+	fz_catch(ctx)
+	{
+		fz_drop_font(ctx, custom->font);
+		fz_free(ctx, custom->src);
+		fz_free(ctx, custom->family);
+		fz_rethrow(ctx);
+	}
 }
 
 fz_font *
@@ -68,10 +101,15 @@ fz_load_html_font(fz_context *ctx, fz_html_font_set *set,
 			}
 		}
 	}
-	if (best_font)
+
+	// We found a perfect match!
+	if (best_font && best_score == 1 + 2 + 4)
 		return best_font;
 
+	// Try to load a perfect match.
 	data = fz_lookup_builtin_font(ctx, family, is_bold, is_italic, &size);
+	if (!data)
+		data = fz_lookup_builtin_font(ctx, family, 0, 0, &size);
 	if (data)
 	{
 		fz_font *font = fz_new_font_from_memory(ctx, NULL, data, size, 0, 0);
@@ -85,6 +123,11 @@ fz_load_html_font(fz_context *ctx, fz_html_font_set *set,
 		return font;
 	}
 
+	// Use the imperfect match from before.
+	if (best_font)
+		return best_font;
+
+	// Handle the "default" font aliases.
 	if (!strcmp(family, "monospace") || !strcmp(family, "sans-serif") || !strcmp(family, "serif"))
 		return fz_load_html_default_font(ctx, set, family, is_bold, is_italic);
 

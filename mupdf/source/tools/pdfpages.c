@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /*
  * Information tool.
  * Print information about pages of a pdf.
@@ -115,10 +137,21 @@ showpages(fz_context *ctx, pdf_document *doc, fz_output *out, const char *pageli
 	pagecount = pdf_count_pages(ctx, doc);
 	while ((pagelist = fz_parse_page_range(ctx, pagelist, &spage, &epage, pagecount)))
 	{
+		int fail;
 		if (spage > epage)
 			page = spage, spage = epage, epage = page;
 		for (page = spage; page <= epage; page++)
-			ret |= showpage(ctx, doc, out, page);
+		{
+			fail = showpage(ctx, doc, out, page);
+			/* On the first failure, check for the pagecount having changed. */
+			if (fail && !ret)
+			{
+				pagecount = pdf_count_pages(ctx, doc);
+				if (epage > pagecount)
+					epage = pagecount;
+			}
+			ret |= fail;
+		}
 	}
 
 	return ret;
@@ -149,7 +182,7 @@ pdfpages_pages(fz_context *ctx, fz_output *out, char *filename, char *password, 
 			doc = pdf_open_document(ctx, filename);
 			if (pdf_needs_password(ctx, doc))
 				if (!pdf_authenticate_password(ctx, doc, password))
-					fz_throw(ctx, FZ_ERROR_GENERIC, "cannot authenticate password: %s", filename);
+					fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot authenticate password: %s", filename);
 
 			state = NO_INFO_GATHERED;
 		}
@@ -202,7 +235,10 @@ int pdfpages_main(int argc, char **argv)
 	fz_try(ctx)
 		ret = pdfpages_pages(ctx, fz_stdout(ctx), filename, password, &argv[fz_optind], argc-fz_optind);
 	fz_catch(ctx)
+	{
+		fz_report_error(ctx);
 		ret = 1;
+	}
 	fz_drop_context(ctx);
 	return ret;
 }

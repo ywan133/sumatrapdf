@@ -1,9 +1,9 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 int DpiGetForHwnd(HWND);
 int DpiGet(HWND);
 int DpiScale(HWND, int);
-int DpiScale(int);
 void DpiScale(HWND, int&, int&);
-void DpiReset();
+
+int DpiScale(HDC, int x);

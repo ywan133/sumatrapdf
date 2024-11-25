@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kjk/u"
+	"github.com/kjk/minioutil"
 )
 
 // Format of auto-update file:
@@ -34,33 +34,45 @@ which must be then deployed.
 func validateVer(ver string) {
 	parts := strings.Split(ver, ".")
 	panicIf(len(parts) > 3)
-	for _, p := range parts {
+	for i, p := range parts {
 		n, err := strconv.Atoi(p)
-		panicIfErr(err)
+		must(err)
 		panicIf(n < 0 || n > 19)
+		panicIf(i == 0 && n != 3, "major version must be 3")
 	}
 }
 
 func updateAutoUpdateVer(ver string) {
 	validateVer(ver)
-	// TODO: verify it's bigger than the current vresion
+	// TODO: verify it's bigger than the current version
+	// TODO: add download links
 	s := fmt.Sprintf(`[SumatraPDF]
 Latest %s
 `, ver)
 	fmt.Printf("Content of update file:\n%s\n\n", s)
-	c := newS3Client()
-	{
-		remotePath := "sumatrapdf/sumpdf-update.txt"
-		err := c.UploadString(remotePath, s, true)
-		panicIfErr(err)
-	}
-	{
-		remotePath := "sumatrapdf/sumpdf-latest.txt"
-		err := c.UploadString(remotePath, s, true)
-		panicIfErr(err)
+	d := []byte(s)
+
+	uploadInfo := func(mc *minioutil.Client) {
+		{
+			remotePath := "sumatrapdf/sumpdf-update.txt"
+			_, err := mc.UploadData(remotePath, d, true)
+			must(err)
+		}
+		{
+			remotePath := "sumatrapdf/sumpdf-latest.txt"
+			_, err := mc.UploadData(remotePath, d, true)
+			must(err)
+		}
 	}
 
+	// TODO: anyone using those for update info?
+	//uploadInfo(newMinioSpacesClient())
+	//uploadInfo(newMinioS3Client())
+	uploadInfo(newMinioBackblazeClient())
+	uploadInfo(newMinioR2Client())
+
 	path := filepath.Join("website", "update-check-rel.txt")
-	u.WriteFileMust(path, []byte(s))
+	writeFileMust(path, []byte(s))
+
 	fmt.Printf("Don't forget to checkin file '%s' and deploy website\n", path)
 }

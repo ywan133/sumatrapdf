@@ -15,7 +15,7 @@ set -e
 # Set these variables based on the desired minimum deployment target.
 readonly IOS_MIN_VERSION=6.0
 readonly MACOSX_MIN_VERSION=10.15
-readonly MACOSX_CATALYST_MIN_VERSION=13.0
+readonly MACOSX_CATALYST_MIN_VERSION=14.0
 
 # Extract Xcode version.
 readonly XCODE=$(xcodebuild -version | grep Xcode | cut -d " " -f2)
@@ -48,6 +48,7 @@ PLATFORMS[$MACOS_CATALYST]="MacOSX-Catalyst-x86_64"
 if [[ "${XCODE%%.*}" -ge 12 ]]; then
   PLATFORMS[$MACOS]+=" MacOSX-arm64"
   PLATFORMS[$MACOS_CATALYST]+=" MacOSX-Catalyst-arm64"
+  PLATFORMS[$IOS_SIMULATOR]+=" iPhoneSimulator-arm64"
 elif [[ "${XCODE%%.*}" -eq 11 ]]; then
   cat << EOF
 WARNING: Xcode 12.0 or higher is required to build targets for
@@ -68,6 +69,7 @@ readonly TARGETDIR="${TOPDIR}/WebP.xcframework"
 readonly DECTARGETDIR="${TOPDIR}/WebPDecoder.xcframework"
 readonly MUXTARGETDIR="${TOPDIR}/WebPMux.xcframework"
 readonly DEMUXTARGETDIR="${TOPDIR}/WebPDemux.xcframework"
+readonly SHARPYUVTARGETDIR="${TOPDIR}/SharpYuv.xcframework"
 readonly DEVELOPER=$(xcode-select --print-path)
 readonly DEVROOT="${DEVELOPER}/Toolchains/XcodeDefault.xctoolchain"
 readonly PLATFORMSROOT="${DEVELOPER}/Platforms"
@@ -78,12 +80,40 @@ if [[ -z "${SDK[$IOS]}" ]] || [[ ${SDK[$IOS]%%.*} -lt 8 ]]; then
   exit 1
 fi
 
+#######################################
+# Moves Headers/*.h to Headers/<framework>/
+#
+# Places framework headers in a subdirectory to avoid Xcode errors when using
+# multiple frameworks:
+#   error: Multiple commands produce
+#     '.../Build/Products/Debug-iphoneos/include/types.h'
+# Arguments:
+#   $1 - path to framework
+#######################################
+update_headers_path() {
+  local framework_name="$(basename ${1%.xcframework})"
+  local subdir
+  for d in $(find "$1" -path "*/Headers"); do
+    subdir="$d/$framework_name"
+    if [[ -d "$subdir" ]]; then
+      # SharpYuv will have a sharpyuv subdirectory. macOS is case insensitive,
+      # but for consistency with the other frameworks, rename the directory to
+      # match the case of the framework name.
+      mv "$(echo ${subdir} | tr 'A-Z' 'a-z')" "$subdir"
+    else
+      mkdir "$subdir"
+      mv "$d/"*.h "$subdir"
+    fi
+  done
+}
+
 echo "Xcode Version: ${XCODE}"
 echo "iOS SDK Version: ${SDK[$IOS]}"
 echo "MacOS SDK Version: ${SDK[$MACOS]}"
 
 if [[ -e "${BUILDDIR}" || -e "${TARGETDIR}" || -e "${DECTARGETDIR}" \
-      || -e "${MUXTARGETDIR}" || -e "${DEMUXTARGETDIR}" ]]; then
+      || -e "${MUXTARGETDIR}" || -e "${DEMUXTARGETDIR}" \
+      || -e "${SHARPYUVTARGETDIR}" ]]; then
   cat << EOF
 WARNING: The following directories will be deleted:
 WARNING:   ${BUILDDIR}
@@ -91,12 +121,13 @@ WARNING:   ${TARGETDIR}
 WARNING:   ${DECTARGETDIR}
 WARNING:   ${MUXTARGETDIR}
 WARNING:   ${DEMUXTARGETDIR}
+WARNING:   ${SHARPYUVTARGETDIR}
 WARNING: The build will continue in 5 seconds...
 EOF
   sleep 5
 fi
 rm -rf ${BUILDDIR} ${TARGETDIR} ${DECTARGETDIR} \
-  ${MUXTARGETDIR} ${DEMUXTARGETDIR}
+  ${MUXTARGETDIR} ${DEMUXTARGETDIR} ${SHARPYUVTARGETDIR}
 
 if [[ ! -e ${SRCDIR}/configure ]]; then
   if ! (cd ${SRCDIR} && sh autogen.sh); then
@@ -104,7 +135,7 @@ if [[ ! -e ${SRCDIR}/configure ]]; then
 Error creating configure script!
 This script requires the autoconf/automake and libtool to build. MacPorts or
 Homebrew can be used to obtain these:
-http://www.macports.org/install.php
+https://www.macports.org/install.php
 https://brew.sh/
 EOF
     exit 1
@@ -116,6 +147,7 @@ for (( i = 0; i < $NUM_PLATFORMS; ++i )); do
   DECLIBLIST=()
   MUXLIBLIST=()
   DEMUXLIBLIST=()
+  SHARPYUVLIBLIST=()
 
   for PLATFORM in ${PLATFORMS[$i]}; do
     ROOTDIR="${BUILDDIR}/${PLATFORM}"
@@ -140,7 +172,9 @@ for (( i = 0; i < $NUM_PLATFORMS; ++i )); do
     CFLAGS="-pipe -isysroot ${SDKROOT} -O3 -DNDEBUG"
     case "${PLATFORM}" in
       iPhone*)
-        CFLAGS+=" -miphoneos-version-min=${IOS_MIN_VERSION} -fembed-bitcode"
+        CFLAGS+=" -fembed-bitcode"
+        CFLAGS+=" -target ${ARCH}-apple-ios${IOS_MIN_VERSION}"
+        [[ "${PLATFORM}" == *Simulator* ]] && CFLAGS+="-simulator"
         ;;
       MacOSX-Catalyst*)
         CFLAGS+=" -target"
@@ -163,28 +197,29 @@ for (( i = 0; i < $NUM_PLATFORMS; ++i )); do
       CFLAGS="${CFLAGS}"
     set +x
 
-    # run make only in the src/ directory to create libwebp.a/libwebpdecoder.a
-    cd src/
-    make V=0
-    make install
+    # Build only the libraries, skip the examples.
+    make V=0 -C sharpyuv install
+    make V=0 -C src install
 
     LIBLIST+=("${ROOTDIR}/lib/libwebp.a")
     DECLIBLIST+=("${ROOTDIR}/lib/libwebpdecoder.a")
     MUXLIBLIST+=("${ROOTDIR}/lib/libwebpmux.a")
     DEMUXLIBLIST+=("${ROOTDIR}/lib/libwebpdemux.a")
+    SHARPYUVLIBLIST+=("${ROOTDIR}/lib/libsharpyuv.a")
     # xcodebuild requires a directory for the -headers option, these will match
     # for all builds.
-    make install-data DESTDIR="${ROOTDIR}/lib-headers"
-    make install-commonHEADERS DESTDIR="${ROOTDIR}/dec-headers"
-    make -C demux install-data DESTDIR="${ROOTDIR}/demux-headers"
-    make -C mux install-data DESTDIR="${ROOTDIR}/mux-headers"
+    make -C src install-data DESTDIR="${ROOTDIR}/lib-headers"
+    make -C src install-commonHEADERS DESTDIR="${ROOTDIR}/dec-headers"
+    make -C src/demux install-data DESTDIR="${ROOTDIR}/demux-headers"
+    make -C src/mux install-data DESTDIR="${ROOTDIR}/mux-headers"
+    make -C sharpyuv install-data DESTDIR="${ROOTDIR}/sharpyuv-headers"
     LIB_HEADERS="${ROOTDIR}/lib-headers/${ROOTDIR}/include/webp"
     DEC_HEADERS="${ROOTDIR}/dec-headers/${ROOTDIR}/include/webp"
     DEMUX_HEADERS="${ROOTDIR}/demux-headers/${ROOTDIR}/include/webp"
     MUX_HEADERS="${ROOTDIR}/mux-headers/${ROOTDIR}/include/webp"
+    SHARPYUV_HEADERS="${ROOTDIR}/sharpyuv-headers/${ROOTDIR}/include/webp"
 
     make distclean
-    cd ..
 
     export PATH=${OLDPATH}
   done
@@ -199,16 +234,20 @@ for (( i = 0; i < $NUM_PLATFORMS; ++i )); do
   target_declib="${target_dir}/$(basename ${DECLIBLIST[0]})"
   target_demuxlib="${target_dir}/$(basename ${DEMUXLIBLIST[0]})"
   target_muxlib="${target_dir}/$(basename ${MUXLIBLIST[0]})"
+  target_sharpyuvlib="${target_dir}/$(basename ${SHARPYUVLIBLIST[0]})"
 
   mkdir -p "${target_dir}"
   ${LIPO} -create ${LIBLIST[@]} -output "${target_lib}"
   ${LIPO} -create ${DECLIBLIST[@]} -output "${target_declib}"
   ${LIPO} -create ${DEMUXLIBLIST[@]} -output "${target_demuxlib}"
   ${LIPO} -create ${MUXLIBLIST[@]} -output "${target_muxlib}"
+  ${LIPO} -create ${SHARPYUVLIBLIST[@]} -output "${target_sharpyuvlib}"
   FAT_LIBLIST+=(-library "${target_lib}" -headers "${LIB_HEADERS}")
   FAT_DECLIBLIST+=(-library "${target_declib}" -headers "${DEC_HEADERS}")
   FAT_DEMUXLIBLIST+=(-library "${target_demuxlib}" -headers "${DEMUX_HEADERS}")
   FAT_MUXLIBLIST+=(-library "${target_muxlib}" -headers "${MUX_HEADERS}")
+  FAT_SHARPYUVLIBLIST+=(-library "${target_sharpyuvlib}")
+  FAT_SHARPYUVLIBLIST+=(-headers "${SHARPYUV_HEADERS}")
 done
 
 # lipo will not put archives with the same architecture (e.g., x86_64
@@ -225,6 +264,13 @@ xcodebuild -create-xcframework "${FAT_DEMUXLIBLIST[@]}" \
   -output ${DEMUXTARGETDIR}
 xcodebuild -create-xcframework "${FAT_MUXLIBLIST[@]}" \
   -output ${MUXTARGETDIR}
+xcodebuild -create-xcframework "${FAT_SHARPYUVLIBLIST[@]}" \
+  -output ${SHARPYUVTARGETDIR}
+update_headers_path "${TARGETDIR}"
+update_headers_path "${DECTARGETDIR}"
+update_headers_path "${DEMUXTARGETDIR}"
+update_headers_path "${MUXTARGETDIR}"
+update_headers_path "${SHARPYUVTARGETDIR}"
 set +x
 
 echo  "SUCCESS"

@@ -38,7 +38,7 @@ struct hb_aat_map_t
 
   void init ()
   {
-    memset (this, 0, sizeof (*this));
+    hb_memset (this, 0, sizeof (*this));
     chain_flags.init ();
   }
   void fini () { chain_flags.fini (); }
@@ -52,8 +52,9 @@ struct hb_aat_map_builder_t
   public:
 
   HB_INTERNAL hb_aat_map_builder_t (hb_face_t *face_,
-				    const hb_segment_properties_t *props_ HB_UNUSED) :
-				      face (face_) {}
+				    const hb_segment_properties_t props_) :
+				      face (face_),
+				      props (props_) {}
 
   HB_INTERNAL void add_feature (hb_tag_t tag, unsigned int value=1);
 
@@ -64,24 +65,30 @@ struct hb_aat_map_builder_t
   {
     hb_aat_layout_feature_type_t  type;
     hb_aat_layout_feature_selector_t  setting;
+    bool is_exclusive;
     unsigned  seq; /* For stable sorting only. */
 
     HB_INTERNAL static int cmp (const void *pa, const void *pb)
     {
       const feature_info_t *a = (const feature_info_t *) pa;
       const feature_info_t *b = (const feature_info_t *) pb;
-      return (a->type != b->type) ? (a->type < b->type ? -1 : 1) :
-	     (a->seq < b->seq ? -1 : a->seq > b->seq ? 1 : 0);
+      if (a->type != b->type) return (a->type < b->type ? -1 : 1);
+      if (!a->is_exclusive &&
+	  (a->setting & ~1) != (b->setting & ~1)) return (a->setting < b->setting ? -1 : 1);
+	    return (a->seq < b->seq ? -1 : a->seq > b->seq ? 1 : 0);
     }
 
-    int cmp (hb_aat_layout_feature_type_t ty) const
+    /* compares type & setting only, not is_exclusive flag or seq number */
+    int cmp (const feature_info_t& f) const
     {
-      return (type != ty) ? (type < ty ? -1 : 1) : 0;
+      return (f.type != type) ? (f.type < type ? -1 : 1) :
+	     (f.setting != setting) ? (f.setting < setting ? -1 : 1) : 0;
     }
   };
 
   public:
   hb_face_t *face;
+  hb_segment_properties_t props;
 
   public:
   hb_sorted_vector_t<feature_info_t> features;

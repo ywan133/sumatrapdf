@@ -1,11 +1,12 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 // port of https://gitlab.com/stone.code/goey
 
 const int Inf = std::numeric_limits<int>::max();
 
-RECT RectToRECT(const Rect);
+void PositionRB(const Rect& container, Rect& r);
+void MoveXY(Rect& r, int x, int y);
 
 int Clamp(int v, int vmin, int vmax);
 int Scale(int v, i64 num, i64 den);
@@ -15,8 +16,8 @@ struct Constraints {
     Size min{};
     Size max{};
 
-    Size Constrain(const Size) const;
-    Size ConstrainAndAttemptToPreserveAspectRatio(const Size) const;
+    Size Constrain(Size) const;
+    Size ConstrainAndAttemptToPreserveAspectRatio(Size) const;
     int ConstrainHeight(int height) const;
     int ConstrainWidth(int width) const;
     bool HasBoundedHeight() const;
@@ -40,11 +41,11 @@ struct Constraints {
 Constraints ExpandInf();
 Constraints ExpandHeight(int width);
 Constraints ExpandWidth(int height);
-Constraints Loose(const Size size);
-Constraints Tight(const Size size);
+Constraints Loose(Size size);
+Constraints Tight(Size size);
 Constraints TightHeight(int height);
 
-typedef std::function<void()> NeedLayout;
+using NeedLayout = Func0;
 
 // works like css visibility property
 enum class Visibility {
@@ -56,19 +57,19 @@ enum class Visibility {
 };
 
 struct ILayout {
-    virtual ~ILayout(){};
+    virtual ~ILayout() = default;
     virtual Kind GetKind() = 0;
     virtual void SetVisibility(Visibility) = 0;
     virtual Visibility GetVisibility() = 0;
     virtual int MinIntrinsicHeight(int width) = 0;
     virtual int MinIntrinsicWidth(int height) = 0;
-    virtual Size Layout(const Constraints bc) = 0;
+    virtual Size Layout(Constraints bc) = 0;
     virtual void SetBounds(Rect) = 0;
 };
 
 bool IsCollapsed(ILayout*);
 
-struct LayoutBase : public ILayout {
+struct LayoutBase : ILayout {
     Kind kind = nullptr;
     // allows easy way to hide / show elements
     // without rebuilding the whole layout
@@ -77,11 +78,12 @@ struct LayoutBase : public ILayout {
     Rect lastBounds{};
 
     LayoutBase() = default;
-    LayoutBase(Kind);
+    explicit LayoutBase(Kind);
 
     Kind GetKind() override;
     void SetVisibility(Visibility) override;
     Visibility GetVisibility() override;
+    void SetBounds(Rect) override;
 };
 
 bool IsLayoutOfKind(ILayout*, Kind);
@@ -105,7 +107,9 @@ struct Padding : LayoutBase {
 
     Padding(ILayout*, const Insets&);
     ~Padding() override;
-    Size Layout(const Constraints bc) override;
+
+    // ILayout
+    Size Layout(Constraints bc) override;
     int MinIntrinsicHeight(int width) override;
     int MinIntrinsicWidth(int height) override;
     void SetBounds(Rect) override;
@@ -146,7 +150,7 @@ enum class CrossAxisAlign : u8 {
 
 struct boxElementInfo {
     ILayout* layout = nullptr;
-    Size size = {};
+    Size size{};
     int flex = 0;
 };
 
@@ -159,16 +163,18 @@ struct VBox : LayoutBase {
 
     VBox();
     ~VBox() override;
-    Size Layout(const Constraints bc) override;
+
+    // ILayout
+    Size Layout(Constraints bc) override;
     int MinIntrinsicHeight(int width) override;
     int MinIntrinsicWidth(int height) override;
     void SetBounds(Rect bounds) override;
 
-    void SetBoundsForChild(int i, ILayout* v, int posX, int posY, int posX2, int posY2);
+    void SetBoundsForChild(int i, ILayout* v, int posX, int posY, int posX2, int posY2) const;
 
     boxElementInfo& AddChild(ILayout* child);
     boxElementInfo& AddChild(ILayout* child, int flex);
-    int ChildrenCount();
+    int ChildrenCount() const;
     int NonCollapsedChildrenCount();
 };
 
@@ -182,15 +188,17 @@ struct HBox : LayoutBase {
     int totalFlex = 0;
 
     ~HBox() override;
-    Size Layout(const Constraints bc) override;
+
+    // ILayout
+    Size Layout(Constraints bc) override;
     int MinIntrinsicHeight(int width) override;
     int MinIntrinsicWidth(int height) override;
     void SetBounds(Rect bounds) override;
 
-    void SetBoundsForChild(int i, ILayout* v, int posX, int posY, int posX2, int posY2);
+    void SetBoundsForChild(int i, ILayout* v, int posX, int posY, int posX2, int posY2) const;
     boxElementInfo& AddChild(ILayout* child);
     boxElementInfo& AddChild(ILayout* child, int flex);
-    int ChildrenCount();
+    int ChildrenCount() const;
     int NonCollapsedChildrenCount();
 };
 
@@ -208,12 +216,14 @@ struct Align : LayoutBase {
     Alignment VAlign = AlignStart; // Vertical alignment of child widget.
     float WidthFactor = 0;         // If greater than zero, ratio of container width to child width.
     float HeightFactor = 0;        // If greater than zero, ratio of container height to child height.
-    ILayout* Child = 0;
+    ILayout* Child = nullptr;
     Size childSize{};
 
-    Align(ILayout*);
+    explicit Align(ILayout*);
     ~Align() override;
-    Size Layout(const Constraints bc) override;
+
+    // ILayout
+    Size Layout(Constraints bc) override;
     int MinIntrinsicHeight(int width) override;
     int MinIntrinsicWidth(int height) override;
     void SetBounds(Rect) override;
@@ -227,14 +237,48 @@ struct Spacer : LayoutBase {
 
     Spacer(int, int);
     ~Spacer() override;
-    Size Layout(const Constraints bc) override;
+
+    // ILayout
+    Size Layout(Constraints bc) override;
     int MinIntrinsicHeight(int width) override;
     int MinIntrinsicWidth(int height) override;
     void SetBounds(Rect) override;
 };
 
+// TODO: support global padding. Could use Inset but it's inefficient
+// for large tables to allocate additional object for each cell
+// TODO: support border width / height
+struct TableLayout : LayoutBase {
+    int cols = 0;
+    int rows = 0;
+
+    struct Cell {
+        ILayout* child;
+        // TODO: per-cell layout data
+        Size elSize;
+    };
+
+    Cell* cells = nullptr; // cols * rows
+    int* maxColWidths = nullptr;
+
+    explicit TableLayout();
+    ~TableLayout() override;
+
+    Size Layout(Constraints bc) override;
+    int MinIntrinsicHeight(int width) override;
+    int MinIntrinsicWidth(int height) override;
+    void SetBounds(Rect) override;
+
+    void SetSize(int rows, int cols);
+    void SetCell(int row, int col, ILayout* el);
+    ILayout* GetCell(int row, int col);
+
+    // private
+    int CellIdx(int row, int col);
+};
+
 void LayoutAndSizeToContent(ILayout* layout, int minDx, int minDy, HWND hwnd);
-Size LayoutToSize(ILayout* layout, const Size size);
+Size LayoutToSize(ILayout* layout, Size size);
 
 void dbglayoutf(const char* fmt, ...);
 void LogConstraints(Constraints c, const char* suffix);

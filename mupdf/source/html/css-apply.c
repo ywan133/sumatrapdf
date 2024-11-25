@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "html-imp.h"
 
@@ -68,6 +90,59 @@ static const char *list_style_type_kw[] = {
 static const char *list_style_position_kw[] = {
 	"inside",
 	"outside",
+};
+
+static const char *font_style_kw[] = {
+	"italic",
+	"oblique",
+};
+
+static const char *font_variant_kw[] = {
+	"small-caps",
+};
+
+static const char *font_weight_kw[] = {
+	"bold",
+	"bolder",
+	"lighter",
+};
+
+static const char *font_size_kw[] = {
+	"large",
+	"larger",
+	"medium",
+	"small",
+	"smaller",
+	"x-large",
+	"x-small",
+	"xx-large",
+	"xx-small",
+};
+
+/* Properties to ignore when scanning through font-family. We set font-family
+ * to the full font shorthand value list because Adobe generates DS strings
+ * where the font-family comes before the font-size (and not at the end as it's
+ * supposed to). This lets us scan the font shorthand list without trying to
+ * look up fonts named "bold", etc.
+ */
+static const char *font_family_ignore[] = {
+	",",
+	"/",
+	"bold",
+	"bolder",
+	"italic",
+	"large",
+	"larger",
+	"lighter",
+	"medium",
+	"oblique",
+	"small",
+	"small-caps",
+	"smaller",
+	"x-large",
+	"x-small",
+	"xx-large",
+	"xx-small",
 };
 
 static int
@@ -507,6 +582,72 @@ add_shorthand_list_style(fz_css_match *match, fz_css_value *value, int spec)
 	}
 }
 
+static fz_css_value static_value_normal = { CSS_KEYWORD, "normal", NULL, NULL };
+
+static fz_css_value *
+add_shorthand_font_size(fz_css_match *match, fz_css_value *value, int spec)
+{
+	/* font-size */
+	add_property(match, PRO_FONT_SIZE, value, spec);
+
+	/* / line-height */
+	if (value->next && value->next->next && !strcmp(value->next->data, "/"))
+	{
+		value = value->next->next;
+		add_property(match, PRO_LINE_HEIGHT, value, spec);
+	}
+
+	return value;
+}
+
+static void
+add_shorthand_font(fz_css_match *match, fz_css_value *value, int spec)
+{
+	fz_css_value *font_style = NULL;
+	fz_css_value *font_variant = NULL;
+	fz_css_value *font_weight = NULL;
+
+	/* add the start as font-family for most robust scanning of matching font names */
+	add_property(match, PRO_FONT_FAMILY, value, spec);
+
+	/* then look for known style/variant/weight keywords and font-size/line-height */
+	for (; value; value = value->next)
+	{
+		/* style/variant/weight/size */
+		if (value->type == CSS_KEYWORD)
+		{
+			if (keyword_in_list(value->data, font_style_kw, nelem(font_style_kw)))
+				font_style = value;
+			else if (keyword_in_list(value->data, font_variant_kw, nelem(font_variant_kw)))
+				font_variant = value;
+			else if (keyword_in_list(value->data, font_weight_kw, nelem(font_weight_kw)))
+				font_weight = value;
+			else if (keyword_in_list(value->data, font_size_kw, nelem(font_size_kw)))
+				value = add_shorthand_font_size(match, value, spec);
+		}
+		else if (value->type == CSS_NUMBER)
+			font_weight = value;
+		else if (value->type == CSS_LENGTH || value->type == CSS_PERCENT)
+			value = add_shorthand_font_size(match, value, spec);
+	}
+
+	/* set all properties to their initial values if not specified! */
+	if (font_style)
+		add_property(match, PRO_FONT_STYLE, font_style, spec);
+	else
+		add_property(match, PRO_FONT_STYLE, &static_value_normal, spec);
+
+	if (font_variant)
+		add_property(match, PRO_FONT_VARIANT, font_variant, spec);
+	else
+		add_property(match, PRO_FONT_VARIANT, &static_value_normal, spec);
+
+	if (font_weight)
+		add_property(match, PRO_FONT_WEIGHT, font_weight, spec);
+	else
+		add_property(match, PRO_FONT_WEIGHT, &static_value_normal, spec);
+}
+
 static void
 add_property(fz_css_match *match, int name, fz_css_value *value, int spec)
 {
@@ -546,7 +687,9 @@ add_property(fz_css_match *match, int name, fz_css_value *value, int spec)
 	case PRO_LIST_STYLE:
 		add_shorthand_list_style(match, value, spec);
 		return;
-	/* TODO: font */
+	case PRO_FONT:
+		add_shorthand_font(match, value, spec);
+		return;
 	/* TODO: background */
 	}
 
@@ -605,6 +748,8 @@ fz_match_css(fz_context *ctx, fz_css_match *match, fz_css_match *up, fz_css *css
 			}
 			fz_catch(ctx)
 			{
+				fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+				fz_report_error(ctx);
 				fz_warn(ctx, "ignoring style attribute");
 			}
 		}
@@ -649,6 +794,7 @@ fz_add_css_font_face(fz_context *ctx, fz_html_font_set *set, fz_archive *zip, co
 	fz_css_property *prop;
 	fz_font *font = NULL;
 	fz_buffer *buf = NULL;
+	fz_stream *stm = NULL;
 	int is_bold, is_italic, is_small_caps;
 	char path[2048];
 
@@ -678,7 +824,6 @@ fz_add_css_font_face(fz_context *ctx, fz_html_font_set *set, fz_archive *zip, co
 	fz_strlcat(path, "/", sizeof path);
 	fz_strlcat(path, src, sizeof path);
 	fz_urldecode(path);
-	fz_cleanname(path);
 
 	for (custom = set->custom; custom; custom = custom->next)
 		if (!strcmp(custom->src, path) && !strcmp(custom->family, family) &&
@@ -689,24 +834,33 @@ fz_add_css_font_face(fz_context *ctx, fz_html_font_set *set, fz_archive *zip, co
 
 	fz_var(buf);
 	fz_var(font);
+	fz_var(stm);
 
 	fz_try(ctx)
 	{
 		if (fz_has_archive_entry(ctx, zip, path))
 			buf = fz_read_archive_entry(ctx, zip, path);
 		else
-			buf = fz_read_file(ctx, src);
+		{
+			stm = fz_try_open_file(ctx, src);
+			if (stm == NULL)
+				fz_throw(ctx, FZ_ERROR_FORMAT, "cannot locate font '%s' specified by css", src);
+			buf = fz_read_all(ctx, stm, 0);
+		}
 		font = fz_new_font_from_buffer(ctx, NULL, buf, 0, 0);
 		fz_add_html_font_face(ctx, set, family, is_bold, is_italic, is_small_caps, path, font);
 	}
 	fz_always(ctx)
 	{
 		fz_drop_buffer(ctx, buf);
+		fz_drop_stream(ctx, stm);
 		fz_drop_font(ctx, font);
 	}
 	fz_catch(ctx)
 	{
 		fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+		fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+		fz_report_error(ctx);
 		fz_warn(ctx, "cannot load font-face: %s", src);
 	}
 }
@@ -746,12 +900,14 @@ is_inheritable_property(int name)
 		name == PRO_FONT_STYLE ||
 		name == PRO_FONT_VARIANT ||
 		name == PRO_FONT_WEIGHT ||
+		name == PRO_LEADING ||
 		name == PRO_LETTER_SPACING ||
 		name == PRO_LINE_HEIGHT ||
 		name == PRO_LIST_STYLE_IMAGE ||
 		name == PRO_LIST_STYLE_POSITION ||
 		name == PRO_LIST_STYLE_TYPE ||
 		name == PRO_ORPHANS ||
+		name == PRO_OVERFLOW_WRAP ||
 		name == PRO_QUOTES ||
 		name == PRO_TEXT_ALIGN ||
 		name == PRO_TEXT_INDENT ||
@@ -759,7 +915,11 @@ is_inheritable_property(int name)
 		name == PRO_VISIBILITY ||
 		name == PRO_WHITE_SPACE ||
 		name == PRO_WIDOWS ||
-		name == PRO_WORD_SPACING;
+		name == PRO_WORD_SPACING ||
+		// Strictly speaking, text-decoration is not an inherited property,
+		// but since when drawing an underlined element, all children are also underlined,
+		// we may as well make it inherited.
+		name == PRO_TEXT_DECORATION;
 }
 
 static fz_css_value *
@@ -806,6 +966,15 @@ make_number(float v, int u)
 	fz_css_number n;
 	n.value = v;
 	n.unit = u;
+	return n;
+}
+
+static fz_css_number
+make_undefined_number(void)
+{
+	fz_css_number n;
+	n.value = 0;
+	n.unit = N_UNDEFINED;
 	return n;
 }
 
@@ -939,6 +1108,11 @@ border_style_from_property(fz_css_match *match, int property)
 		else if (!strcmp(value->data, "solid")) return BS_SOLID;
 	}
 	return BS_NONE;
+}
+
+int fz_css_number_defined(fz_css_number number)
+{
+	return number.unit != N_UNDEFINED;
 }
 
 float
@@ -1132,6 +1306,16 @@ fz_get_css_match_display(fz_css_match *match)
 			return DIS_TABLE_ROW;
 		if (!strcmp(value->data, "table-cell"))
 			return DIS_TABLE_CELL;
+		if (!strcmp(value->data, "table-row-group"))
+			return DIS_TABLE_GROUP;
+		if (!strcmp(value->data, "table-header-group"))
+			return DIS_TABLE_GROUP;
+		if (!strcmp(value->data, "table-footer-group"))
+			return DIS_TABLE_GROUP;
+		if (!strcmp(value->data, "table-column-group"))
+			return DIS_NONE;
+		if (!strcmp(value->data, "table-column"))
+			return DIS_NONE;
 	}
 	return DIS_INLINE;
 }
@@ -1149,6 +1333,18 @@ white_space_from_property(fz_css_match *match)
 		else if (!strcmp(value->data, "pre-line")) return WS_PRE_LINE;
 	}
 	return WS_NORMAL;
+}
+
+static int
+text_decoration_from_property(fz_css_match *match)
+{
+	fz_css_value *value = value_from_property(match, PRO_TEXT_DECORATION);
+	if (value)
+	{
+		if (!strcmp(value->data, "underline")) return TD_UNDERLINE;
+		if (!strcmp(value->data, "line-through")) return TD_LINE_THROUGH;
+	}
+	return TD_NONE;
 }
 
 static int
@@ -1191,6 +1387,7 @@ fz_default_css_style(fz_context *ctx, fz_css_style *style)
 	style->font_size = make_number(1, N_SCALE);
 	style->width = make_number(0, N_AUTO);
 	style->height = make_number(0, N_AUTO);
+	style->leading = make_undefined_number();
 }
 
 void
@@ -1205,6 +1402,7 @@ fz_apply_css_style(fz_context *ctx, fz_html_font_set *set, fz_css_style *style, 
 
 	style->visibility = visibility_from_property(match);
 	style->white_space = white_space_from_property(match);
+	style->text_decoration = text_decoration_from_property(match);
 	style->page_break_before = page_break_from_property(match, PRO_PAGE_BREAK_BEFORE);
 	style->page_break_after = page_break_from_property(match, PRO_PAGE_BREAK_AFTER);
 
@@ -1232,6 +1430,7 @@ fz_apply_css_style(fz_context *ctx, fz_html_font_set *set, fz_css_style *style, 
 	value = value_from_property(match, PRO_FONT_SIZE);
 	if (value)
 	{
+		/* absolute-size */
 		if (!strcmp(value->data, "xx-large")) style->font_size = make_number(1.73f, N_SCALE);
 		else if (!strcmp(value->data, "x-large")) style->font_size = make_number(1.44f, N_SCALE);
 		else if (!strcmp(value->data, "large")) style->font_size = make_number(1.2f, N_SCALE);
@@ -1239,9 +1438,15 @@ fz_apply_css_style(fz_context *ctx, fz_html_font_set *set, fz_css_style *style, 
 		else if (!strcmp(value->data, "small")) style->font_size = make_number(0.83f, N_SCALE);
 		else if (!strcmp(value->data, "x-small")) style->font_size = make_number(0.69f, N_SCALE);
 		else if (!strcmp(value->data, "xx-small")) style->font_size = make_number(0.69f, N_SCALE);
+		/* relative-size */
 		else if (!strcmp(value->data, "larger")) style->font_size = make_number(1.2f, N_SCALE);
 		else if (!strcmp(value->data, "smaller")) style->font_size = make_number(1/1.2f, N_SCALE);
-		else style->font_size = number_from_value(value, 12, N_LENGTH);
+		/* percentage */
+		else if (value->type == CSS_PERCENT) style->font_size = number_from_value(value, 12, N_LENGTH);
+		/* length */
+		else if (value->type == CSS_LENGTH) style->font_size = number_from_value(value, 12, N_LENGTH);
+		/* default to 1em */
+		else style->font_size = make_number(1, N_SCALE);
 	}
 	else
 	{
@@ -1269,7 +1474,15 @@ fz_apply_css_style(fz_context *ctx, fz_html_font_set *set, fz_css_style *style, 
 		else if (!strcmp(value->data, "georgian")) style->list_style_type = LST_GEORGIAN;
 	}
 
+	value = value_from_property(match, PRO_OVERFLOW_WRAP);
+	if (value)
+	{
+		if (!strcmp(value->data, "break-word")) style->overflow_wrap = OVERFLOW_WRAP_BREAK_WORD;
+		else style->overflow_wrap = OVERFLOW_WRAP_NORMAL;
+	}
+
 	style->line_height = number_from_property(match, PRO_LINE_HEIGHT, 1.2f, N_SCALE);
+	style->leading = number_from_property(match, PRO_LEADING, 0, N_UNDEFINED);
 
 	style->text_indent = number_from_property(match, PRO_TEXT_INDENT, 0, N_LENGTH);
 
@@ -1288,6 +1501,8 @@ fz_apply_css_style(fz_context *ctx, fz_html_font_set *set, fz_css_style *style, 
 
 	style->color = color_from_property(match, PRO_COLOR, black);
 	style->background_color = color_from_property(match, PRO_BACKGROUND_COLOR, transparent);
+
+	style->border_spacing = number_from_property(match, PRO_BORDER_SPACING, 0, N_LENGTH);
 
 	style->border_style_0 = border_style_from_property(match, PRO_BORDER_TOP_STYLE);
 	style->border_style_1 = border_style_from_property(match, PRO_BORDER_RIGHT_STYLE);
@@ -1312,15 +1527,15 @@ fz_apply_css_style(fz_context *ctx, fz_html_font_set *set, fz_css_style *style, 
 		int is_italic = is_italic_from_font_style(font_style);
 		style->small_caps = !strcmp(font_variant, "small-caps");
 		value = value_from_property(match, PRO_FONT_FAMILY);
-		while (value)
+		for (; value; value = value->next)
 		{
-			if (strcmp(value->data, ",") != 0)
+			/* ignore numbers and keywords used in font short-hand syntax */
+			if (value->type == CSS_STRING || (value->type == CSS_KEYWORD && !keyword_in_list(value->data, font_family_ignore, nelem(font_family_ignore))))
 			{
 				style->font = fz_load_html_font(ctx, set, value->data, is_bold, is_italic, style->small_caps);
 				if (style->font)
 					break;
 			}
-			value = value->next;
 		}
 		if (!style->font)
 			style->font = fz_load_html_font(ctx, set, "serif", is_bold, is_italic, style->small_caps);
@@ -1510,6 +1725,7 @@ fz_css_enlist(fz_context *ctx, const fz_css_style *style, fz_css_style_splay **t
 
 	return &x->style;
 }
+
 /*
  * Pretty printing
  */

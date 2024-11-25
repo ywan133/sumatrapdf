@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "svg-imp.h"
 
@@ -22,7 +44,7 @@ svg_count_pages(fz_context *ctx, fz_document *doc_, int chapter)
 }
 
 static fz_rect
-svg_bound_page(fz_context *ctx, fz_page *page_)
+svg_bound_page(fz_context *ctx, fz_page *page_, fz_box_type box)
 {
 	svg_page *page = (svg_page*)page_;
 	svg_document *doc = page->doc;
@@ -53,7 +75,7 @@ svg_load_page(fz_context *ctx, fz_document *doc_, int chapter, int number)
 	svg_page *page;
 
 	if (number != 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find page %d", number);
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot find page %d", number);
 
 	page = fz_new_derived_page(ctx, svg_page, doc_);
 	page->super.bound_page = svg_bound_page;
@@ -78,7 +100,7 @@ svg_build_id_map(fz_context *ctx, svg_document *doc, fz_xml *root)
 }
 
 static fz_document *
-svg_open_document_with_xml(fz_context *ctx, fz_xml *xml, const char *base_uri, fz_archive *zip)
+svg_open_document_with_xml(fz_context *ctx, fz_xml_doc *xmldoc, fz_xml *xml, const char *base_uri, fz_archive *zip)
 {
 	svg_document *doc;
 
@@ -96,7 +118,10 @@ svg_open_document_with_xml(fz_context *ctx, fz_xml *xml, const char *base_uri, f
 
 	fz_try(ctx)
 	{
-		svg_build_id_map(ctx, doc, doc->root);
+		if (xmldoc)
+			svg_build_id_map(ctx, doc, fz_xml_root(xmldoc));
+		else
+			svg_build_id_map(ctx, doc, doc->root);
 	}
 	fz_catch(ctx)
 	{
@@ -138,12 +163,11 @@ svg_open_document_with_buffer(fz_context *ctx, fz_buffer *buf, const char *base_
 }
 
 static fz_document *
-svg_open_document_with_stream(fz_context *ctx, fz_stream *file)
+svg_open_document(fz_context *ctx, const fz_document_handler *handler, fz_stream *file, fz_stream *accel, fz_archive *zip, void *state)
 {
-	fz_buffer *buf;
+	fz_buffer *buf = fz_read_all(ctx, file, 0);
 	fz_document *doc = NULL;
 
-	buf = fz_read_all(ctx, file, 0);
 	fz_try(ctx)
 		doc = svg_open_document_with_buffer(ctx, buf, NULL, NULL);
 	fz_always(ctx)
@@ -176,12 +200,12 @@ fz_new_display_list_from_svg(fz_context *ctx, fz_buffer *buf, const char *base_u
 }
 
 fz_display_list *
-fz_new_display_list_from_svg_xml(fz_context *ctx, fz_xml *xml, const char *base_uri, fz_archive *zip, float *w, float *h)
+fz_new_display_list_from_svg_xml(fz_context *ctx, fz_xml_doc *xmldoc, fz_xml *xml, const char *base_uri, fz_archive *zip, float *w, float *h)
 {
 	fz_document *doc;
 	fz_display_list *list = NULL;
 
-	doc = svg_open_document_with_xml(ctx, xml, base_uri, zip);
+	doc = svg_open_document_with_xml(ctx, xmldoc, xml, base_uri, zip);
 	fz_try(ctx)
 	{
 		list = fz_new_display_list_from_page_number(ctx, doc, 0);
@@ -214,13 +238,13 @@ fz_new_image_from_svg(fz_context *ctx, fz_buffer *buf, const char *base_uri, fz_
 }
 
 fz_image *
-fz_new_image_from_svg_xml(fz_context *ctx, fz_xml *xml, const char *base_uri, fz_archive *zip)
+fz_new_image_from_svg_xml(fz_context *ctx, fz_xml_doc *xmldoc, fz_xml *xml, const char *base_uri, fz_archive *zip)
 {
 	fz_display_list *list;
 	fz_image *image = NULL;
 	float w, h;
 
-	list = fz_new_display_list_from_svg_xml(ctx, xml, base_uri, zip, &w, &h);
+	list = fz_new_display_list_from_svg_xml(ctx, xmldoc, xml, base_uri, zip, &w, &h);
 	fz_try(ctx)
 		image = fz_new_image_from_display_list(ctx, w, h, list);
 	fz_always(ctx)
@@ -242,13 +266,68 @@ static const char *svg_mimetypes[] =
 	NULL
 };
 
+static int
+svg_recognize_doc_content(fz_context *ctx, const fz_document_handler *handler, fz_stream *stm, fz_archive *dir, void **state, fz_document_recognize_state_free_fn **free_state)
+{
+	// A standalone SVG document is an XML document with an <svg> root element.
+	//
+	// Assume the document is ASCII or UTF-8.
+	//
+	// Parse the start of the file using a simplified XML parser, skipping
+	// processing instructions and comments, and stopping at the first
+	// element.
+	//
+	// Return failure on anything unexpected, or if the first element is not SVG.
+
+	int c;
+
+	if (state)
+		*state = NULL;
+	if (free_state)
+		*free_state = NULL;
+
+	if (stm == NULL)
+		return 0;
+
+parse_text:
+	// Skip whitespace until "<"
+	c = fz_read_byte(ctx, stm);
+	while (c == ' ' || c == '\r' || c == '\n' || c == '\t')
+		c = fz_read_byte(ctx, stm);
+	if (c == '<')
+		goto parse_element;
+	return 0;
+
+parse_element:
+	// Either "<?...>" or "<!...>" or "<svg" or not an SVG document.
+	c = fz_read_byte(ctx, stm);
+	if (c == '!' || c == '?')
+		goto parse_comment;
+	if (c != 's')
+		return 0;
+	c = fz_read_byte(ctx, stm);
+	if (c != 'v')
+		return 0;
+	c = fz_read_byte(ctx, stm);
+	if (c != 'g')
+		return 0;
+	return 100;
+
+parse_comment:
+	// Skip everything after "<?" or "<!" until ">"
+	c = fz_read_byte(ctx, stm);
+	while (c != EOF && c != '>')
+		c = fz_read_byte(ctx, stm);
+	if (c == '>')
+		goto parse_text;
+	return 0;
+}
+
 fz_document_handler svg_document_handler =
 {
 	NULL,
-	NULL,
-	svg_open_document_with_stream,
+	svg_open_document,
 	svg_extensions,
 	svg_mimetypes,
-	NULL,
-	NULL
+	svg_recognize_doc_content
 };

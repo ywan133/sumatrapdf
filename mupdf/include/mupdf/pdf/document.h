@@ -1,13 +1,42 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_PDF_DOCUMENT_H
 #define MUPDF_PDF_DOCUMENT_H
+
+#include "mupdf/fitz/export.h"
+#include "mupdf/fitz/document.h"
+#include "mupdf/fitz/hash.h"
+#include "mupdf/fitz/stream.h"
+#include "mupdf/fitz/xml.h"
+#include "mupdf/pdf/object.h"
 
 typedef struct pdf_xref pdf_xref;
 typedef struct pdf_ocg_descriptor pdf_ocg_descriptor;
 
 typedef struct pdf_page pdf_page;
 typedef struct pdf_annot pdf_annot;
-typedef struct pdf_annot pdf_widget;
 typedef struct pdf_js pdf_js;
+typedef struct pdf_document pdf_document;
 
 enum
 {
@@ -42,7 +71,83 @@ typedef struct pdf_doc_event pdf_doc_event;
 	the type of function via which the app receives
 	document events.
 */
-typedef void (pdf_doc_event_cb)(fz_context *ctx, pdf_document *doc, pdf_doc_event *event, void *data);
+typedef void (pdf_doc_event_cb)(fz_context *ctx, pdf_document *doc, pdf_doc_event *evt, void *data);
+
+/*
+	the type of function via which the app frees
+	the data provided to the event callback pdf_doc_event_cb.
+*/
+typedef void (pdf_free_doc_event_data_cb)(fz_context *ctx, void *data);
+
+typedef struct pdf_js_console pdf_js_console;
+
+/*
+	Callback called when the console is dropped because it
+	is being replaced or the javascript is being disabled
+	by a call to pdf_disable_js().
+*/
+typedef void (pdf_js_console_drop_cb)(pdf_js_console *console, void *user);
+
+/*
+	Callback signalling that a piece of javascript is asking
+	the javascript console to be displayed.
+*/
+typedef void (pdf_js_console_show_cb)(void *user);
+
+/*
+	Callback signalling that a piece of javascript is asking
+	the javascript console to be hidden.
+*/
+typedef void (pdf_js_console_hide_cb)(void *user);
+
+/*
+	Callback signalling that a piece of javascript is asking
+	the javascript console to remove all its contents.
+*/
+typedef void (pdf_js_console_clear_cb)(void *user);
+
+/*
+	Callback signalling that a piece of javascript is appending
+	the given message to the javascript console contents.
+*/
+typedef void (pdf_js_console_write_cb)(void *user, const char *msg);
+
+/*
+	The callback functions relating to a javascript console.
+*/
+typedef struct pdf_js_console {
+	pdf_js_console_drop_cb *drop;
+	pdf_js_console_show_cb *show;
+	pdf_js_console_hide_cb *hide;
+	pdf_js_console_clear_cb *clear;
+	pdf_js_console_write_cb *write;
+} pdf_js_console;
+
+/*
+	Retrieve the currently set javascript console, or NULL
+	if none is set.
+*/
+pdf_js_console *pdf_js_get_console(fz_context *ctx, pdf_document *doc);
+
+/*
+	Set a new javascript console.
+
+	console: A set of callback functions informing about
+	what pieces of executed js is trying to do
+	to the js console. The caller transfers ownership of
+	console when calling pdf_js_set_console(). Once it and
+	the corresponding user pointer are no longer needed
+	console->drop() will be called passing both the console
+	and the user pointer.
+
+	user: Opaque data that will be passed unchanged to all
+	js console callbacks when called. The caller ensures
+	that this is valid until either the js console is
+	replaced by calling pdf_js_set_console() again with a
+	new console, or pdf_disable_js() is called. In either
+	case the caller to ensures that the user data is freed.
+*/
+void pdf_js_set_console(fz_context *ctx, pdf_document *doc, pdf_js_console *console, void *user);
 
 /*
 	Open a PDF document.
@@ -97,6 +202,26 @@ pdf_document *pdf_specifics(fz_context *ctx, fz_document *doc);
 pdf_document *pdf_document_from_fz_document(fz_context *ctx, fz_document *ptr);
 pdf_page *pdf_page_from_fz_page(fz_context *ctx, fz_page *ptr);
 
+/*
+	Get a pdf_document handle from an fz_document handle.
+
+	This is superfically similar to pdf_document_from_fz_document
+	(and the older pdf_specifics).
+
+	For fz_documents that are actually pdf_documents, this will return
+	a kept version of the same pointer, just cast differently.
+
+	For fz_documents that have a pdf_document representation internally,
+	then you may get a kept version of a different pointer.
+
+	For fz_documents that have no pdf_document representation internally,
+	this will return NULL.
+
+	Note that this returns a kept pointer that the caller is responsible
+	for freeing, unlike pdf_specifics or pdf_document_from_fz_document.
+*/
+pdf_document *fz_new_pdf_document_from_fz_document(fz_context *ctx, fz_document *ptr);
+
 int pdf_needs_password(fz_context *ctx, pdf_document *doc);
 
 /*
@@ -113,9 +238,13 @@ int pdf_needs_password(fz_context *ctx, pdf_document *doc);
 int pdf_authenticate_password(fz_context *ctx, pdf_document *doc, const char *pw);
 
 int pdf_has_permission(fz_context *ctx, pdf_document *doc, fz_permission p);
-int pdf_lookup_metadata(fz_context *ctx, pdf_document *doc, const char *key, char *ptr, int size);
+int pdf_lookup_metadata(fz_context *ctx, pdf_document *doc, const char *key, char *ptr, size_t size);
 
 fz_outline *pdf_load_outline(fz_context *ctx, pdf_document *doc);
+
+fz_outline_iterator *pdf_new_outline_iterator(fz_context *ctx, pdf_document *doc);
+
+void pdf_invalidate_xfa(fz_context *ctx, pdf_document *doc);
 
 /*
 	Get the number of layer configurations defined in this document.
@@ -124,8 +253,13 @@ fz_outline *pdf_load_outline(fz_context *ctx, pdf_document *doc);
 */
 int pdf_count_layer_configs(fz_context *ctx, pdf_document *doc);
 
-void pdf_invalidate_xfa(fz_context *ctx, pdf_document *doc);
-
+/*
+	Configure visibility of individual layers in this document.
+*/
+int pdf_count_layers(fz_context *ctx, pdf_document *doc);
+const char *pdf_layer_name(fz_context *ctx, pdf_document *doc, int layer);
+int pdf_layer_is_enabled(fz_context *ctx, pdf_document *doc, int layer);
+void pdf_enable_layer(fz_context *ctx, pdf_document *doc, int layer, int enabled);
 
 typedef struct
 {
@@ -289,6 +423,7 @@ struct pdf_document
 	fz_stream *file;
 
 	int version;
+	int is_fdf;
 	int64_t startxref;
 	int64_t file_size;
 	pdf_crypt *crypt;
@@ -310,14 +445,17 @@ struct pdf_document
 	pdf_xref *saved_xref_sections;
 	int *xref_index;
 	int save_in_progress;
-	int has_xref_streams;
-	int has_old_style_xrefs;
+	int last_xref_was_old_style;
 	int has_linearization_object;
 
-	int rev_page_count;
+	int map_page_count;
 	pdf_rev_page_map *rev_page_map;
+	pdf_obj **fwd_page_map;
+	int page_tree_broken;
 
 	int repair_attempted;
+	int repair_in_progress;
+	int non_structural_change; /* True if we are modifying the document in a way that does not change the (page) structure */
 
 	/* State indicating which file parsing method we are using */
 	int file_reading_linearly;
@@ -363,10 +501,11 @@ struct pdf_document
 	pdf_js *js;
 
 	int recalculate;
-	int dirty;
 	int redacted;
+	int resynth_required;
 
 	pdf_doc_event_cb *event_cb;
+	pdf_free_doc_event_data_cb *free_event_data_cb;
 	void *event_cb_data;
 
 	int num_type3_fonts;
@@ -458,6 +597,7 @@ void pdf_graft_mapped_page(fz_context *ctx, pdf_graft_map *map, int page_to, pdf
 	pdf operations, together with a set of resources. This
 	sequence/set pair can then be used as the basis for
 	adding a page to the document (see pdf_add_page).
+	Returns a kept reference.
 
 	doc: The document for which these are intended.
 
@@ -470,6 +610,17 @@ void pdf_graft_mapped_page(fz_context *ctx, pdf_graft_map *map, int page_to, pdf
 	contents buffer.
 */
 fz_device *pdf_page_write(fz_context *ctx, pdf_document *doc, fz_rect mediabox, pdf_obj **presources, fz_buffer **pcontents);
+
+/*
+	Create a pdf device. Rendering to the device creates
+	new pdf content. WARNING: this device is work in progress. It doesn't
+	currently support all rendering cases.
+
+	Note that contents must be a stream (dictionary) to be updated (or
+	a reference to a stream). Callers should take care to ensure that it
+	is not an array, and that is it not shared with other objects/pages.
+*/
+fz_device *pdf_new_pdf_device(fz_context *ctx, pdf_document *doc, fz_matrix topctm, pdf_obj *resources, fz_buffer *contents);
 
 /*
 	Create a pdf_obj within a document that
@@ -503,9 +654,11 @@ pdf_obj *pdf_add_page(fz_context *ctx, pdf_document *doc, fz_rect mediabox, int 
 
 	doc: The document to insert into.
 
-	at: The page number to insert at. 0 inserts at the start.
-	negative numbers, or INT_MAX insert at the end. Otherwise
-	n inserts after page n.
+	at: The page number to insert at (pages numbered from 0).
+	0 <= n <= page_count inserts before page n. Negative numbers
+	or INT_MAX are treated as page count, and insert at the end.
+	0 inserts at the start. All existing pages are after the
+	insertion point are shuffled up.
 
 	page: The page to insert.
 */
@@ -536,6 +689,24 @@ void pdf_delete_page(fz_context *ctx, pdf_document *doc, int number);
 */
 void pdf_delete_page_range(fz_context *ctx, pdf_document *doc, int start, int end);
 
+/*
+	Get page label (string) from a page number (index).
+*/
+void pdf_page_label(fz_context *ctx, pdf_document *doc, int page, char *buf, size_t size);
+void pdf_page_label_imp(fz_context *ctx, fz_document *doc, int chapter, int page, char *buf, size_t size);
+
+typedef enum {
+	PDF_PAGE_LABEL_NONE = 0,
+	PDF_PAGE_LABEL_DECIMAL = 'D',
+	PDF_PAGE_LABEL_ROMAN_UC = 'R',
+	PDF_PAGE_LABEL_ROMAN_LC = 'r',
+	PDF_PAGE_LABEL_ALPHA_UC = 'A',
+	PDF_PAGE_LABEL_ALPHA_LC = 'a',
+} pdf_page_label_style;
+
+void pdf_set_page_labels(fz_context *ctx, pdf_document *doc, int index, pdf_page_label_style style, const char *prefix, int start);
+void pdf_delete_page_labels(fz_context *ctx, pdf_document *doc, int index);
+
 fz_text_language pdf_document_language(fz_context *ctx, pdf_document *doc);
 void pdf_set_document_language(fz_context *ctx, pdf_document *doc, fz_text_language lang);
 
@@ -563,9 +734,13 @@ typedef struct
 	int permissions; /* Document encryption permissions. */
 	char opwd_utf8[128]; /* Owner password. */
 	char upwd_utf8[128]; /* User password. */
+	int do_snapshot; /* Do not use directly. Use the snapshot functions. */
+	int do_preserve_metadata; /* When cleaning, preserve metadata unchanged. */
+	int do_use_objstms; /* Use objstms if possible */
+	int compression_effort; /* 0 for default. 100 = max, 1 = min. */
 } pdf_write_options;
 
-extern const pdf_write_options pdf_default_write_options;
+FZ_DATA extern const pdf_write_options pdf_default_write_options;
 
 /*
 	Parse option string into a pdf_write_options struct.
@@ -589,12 +764,26 @@ int pdf_has_unsaved_sigs(fz_context *ctx, pdf_document *doc);
 /*
 	Write out the document to an output stream with all changes finalised.
 */
-void pdf_write_document(fz_context *ctx, pdf_document *doc, fz_output *out, pdf_write_options *opts);
+void pdf_write_document(fz_context *ctx, pdf_document *doc, fz_output *out, const pdf_write_options *opts);
 
 /*
 	Write out the document to a file with all changes finalised.
 */
-void pdf_save_document(fz_context *ctx, pdf_document *doc, const char *filename, pdf_write_options *opts);
+void pdf_save_document(fz_context *ctx, pdf_document *doc, const char *filename, const pdf_write_options *opts);
+
+/*
+	Snapshot the document to a file. This does not cause the
+	incremental xref to be finalized, so the document in memory
+	remains (essentially) unchanged.
+*/
+void pdf_save_snapshot(fz_context *ctx, pdf_document *doc, const char *filename);
+
+/*
+	Snapshot the document to an output stream. This does not cause
+	the incremental xref to be finalized, so the document in memory
+	remains (essentially) unchanged.
+*/
+void pdf_write_snapshot(fz_context *ctx, pdf_document *doc, fz_output *out);
 
 char *pdf_format_write_options(fz_context *ctx, char *buffer, size_t buffer_len, const pdf_write_options *opts);
 
@@ -604,5 +793,81 @@ char *pdf_format_write_options(fz_context *ctx, char *buffer, size_t buffer_len,
 	impossible.
 */
 int pdf_can_be_saved_incrementally(fz_context *ctx, pdf_document *doc);
+
+/*
+	Write out the journal to an output stream.
+*/
+void pdf_write_journal(fz_context *ctx, pdf_document *doc, fz_output *out);
+
+/*
+	Write out the journal to a file.
+*/
+void pdf_save_journal(fz_context *ctx, pdf_document *doc, const char *filename);
+
+/*
+	Read a journal from a filename. Will do nothing if the journal
+	does not match. Will throw on a corrupted journal.
+*/
+void pdf_load_journal(fz_context *ctx, pdf_document *doc, const char *filename);
+
+/*
+	Read a journal from a stream. Will do nothing if the journal
+	does not match. Will throw on a corrupted journal.
+*/
+void pdf_read_journal(fz_context *ctx, pdf_document *doc, fz_stream *stm);
+
+/*
+	Minimize the memory used by a document.
+
+	We walk the in memory xref tables, evicting the PDF objects
+	therein that aren't in use.
+
+	This reduces the current memory use, but any subsequent use
+	of these objects will load them back into memory again.
+*/
+void pdf_minimize_document(fz_context *ctx, pdf_document *doc);
+
+/*
+	Map a pdf object representing a structure tag through
+	an optional role_map and convert to an fz_structure.
+*/
+fz_structure pdf_structure_type(fz_context *ctx, pdf_obj *role_map, pdf_obj *tag);
+
+/*
+	Run the document structure to a device.
+*/
+void pdf_run_document_structure(fz_context *ctx, pdf_document *doc, fz_device *dev, fz_cookie *cookie);
+
+/*
+	Return the count of the associated files on a document.
+	Note, that this is the count of files associated at the document
+	level and does not necessarily include files associated at other
+	levels.
+*/
+int pdf_count_document_associated_files(fz_context *ctx, pdf_document *doc);
+
+/*
+	Return a borrowed pointer to the PDF object that represents a
+	given associated file on a document.
+
+	Indexed from 0 to count-1.
+*/
+pdf_obj *pdf_document_associated_file(fz_context *ctx, pdf_document *doc, int idx);
+
+/*
+	Return the count of the associated files on a given page.
+	Note, that this is the count of files associated at the page
+	level and does not necessarily include files associated at other
+	levels.
+*/
+int pdf_count_page_associated_files(fz_context *ctx, pdf_page *page);
+
+/*
+	Return a borrowed pointer to the PDF object that represents a
+	given associated file on a page.
+
+	Indexed from 0 to count-1.
+*/
+pdf_obj *pdf_page_associated_file(fz_context *ctx, pdf_page *page, int idx);
 
 #endif

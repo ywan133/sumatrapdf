@@ -1,5 +1,5 @@
 
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
@@ -12,7 +12,6 @@
 
 Kind kindFilePDF = "filePDF";
 Kind kindFilePS = "filePS";
-Kind kindFileVbkm = "fileVbkm";
 Kind kindFileXps = "fileXPS";
 Kind kindFileDjVu = "fileDjVu";
 Kind kindFileChm = "fileChm";
@@ -36,13 +35,17 @@ Kind kindFileRar = "fileRar";
 Kind kindFile7Z = "file7Z";
 Kind kindFileTar = "fileTar";
 Kind kindFileFb2 = "fileFb2";
-Kind kindFileDir = "fileDir";
+Kind kindFileFb2z = "fileFb2z"; // fb2 but inside .zip file
+Kind kindDirectory = "directory";
 Kind kindFileEpub = "fileEpub";
 // TODO: introduce kindFileTealDoc?
 Kind kindFileMobi = "fileMobi";
 Kind kindFilePalmDoc = "filePalmDoc";
 Kind kindFileHTML = "fileHTML";
 Kind kindFileTxt = "fileTxt";
+Kind kindFileSvg = "fileSvg";
+Kind kindFileHeic = "fileHeic";
+Kind kindFileAvif = "fileAvif";
 
 // http://en.wikipedia.org/wiki/.nfo
 // http://en.wikipedia.org/wiki/FILE_ID.DIZ
@@ -51,88 +54,85 @@ Kind kindFileTxt = "fileTxt";
 
 // TODO: should .prc be kindFilePalmDoc instead of kindFileMobi?
 // .zip etc. are at the end so that .fb2.zip etc. is recognized at fb2
-#define DEF_EXT_KIND(V)             \
-    V(".txt\0", kindFileTxt)        \
-    V(".js\0", kindFileTxt)         \
-    V(".json\0", kindFileTxt)       \
-    V(".xml\0", kindFileTxt)        \
-    V(".log\0", kindFileTxt)        \
-    V("file_id.diz\0", kindFileTxt) \
-    V("read.me\0", kindFileTxt)     \
-    V(".nfo\0", kindFileTxt)        \
-    V(".tcr\0", kindFileTxt)        \
-    V(".ps\0", kindFilePS)          \
-    V(".ps.gz\0", kindFilePS)       \
-    V(".eps\0", kindFilePS)         \
-    V(".vbkm\0", kindFileVbkm)      \
-    V(".fb2\0", kindFileFb2)        \
-    V(".fb2z\0", kindFileFb2)       \
-    V(".zfb2\0", kindFileFb2)       \
-    V(".fb2.zip\0", kindFileFb2)    \
-    V(".cbz\0", kindFileCbz)        \
-    V(".cbr\0", kindFileCbr)        \
-    V(".cb7\0", kindFileCb7)        \
-    V(".cbt\0", kindFileCbt)        \
-    V(".pdf\0", kindFilePDF)        \
-    V(".xps\0", kindFileXps)        \
-    V(".oxps\0", kindFileXps)       \
-    V(".chm\0", kindFileChm)        \
-    V(".png\0", kindFilePng)        \
-    V(".jpg\0", kindFileJpeg)       \
-    V(".jpeg\0", kindFileJpeg)      \
-    V(".gif\0", kindFileGif)        \
-    V(".tif\0", kindFileTiff)       \
-    V(".tiff\0", kindFileTiff)      \
-    V(".bmp\0", kindFileBmp)        \
-    V(".tga\0", kindFileTga)        \
-    V(".jxr\0", kindFileJxr)        \
-    V(".hdp\0", kindFileHdp)        \
-    V(".wdp\0", kindFileWdp)        \
-    V(".webp\0", kindFileWebp)      \
-    V(".epub\0", kindFileEpub)      \
-    V(".mobi\0", kindFileMobi)      \
-    V(".prc\0", kindFileMobi)       \
-    V(".azw\0", kindFileMobi)       \
-    V(".azw1\0", kindFileMobi)      \
-    V(".azw3\0", kindFileMobi)      \
-    V(".pdb\0", kindFilePalmDoc)    \
-    V(".html\0", kindFileHTML)      \
-    V(".htm\0", kindFileHTML)       \
-    V(".xhtml\0", kindFileHTML)     \
-    V(".djvu\0", kindFileDjVu)      \
-    V(".jp2\0", kindFileJp2)        \
-    V(".zip\0", kindFileZip)        \
-    V(".rar\0", kindFileRar)        \
-    V(".7z\0", kindFile7Z)          \
-    V(".tar\0", kindFileTar)
+#define DEF_EXT_KIND(V)           \
+    V(".txt", kindFileTxt)        \
+    V(".js", kindFileTxt)         \
+    V(".json", kindFileTxt)       \
+    V(".xml", kindFileTxt)        \
+    V(".log", kindFileTxt)        \
+    V("file_id.diz", kindFileTxt) \
+    V("read.me", kindFileTxt)     \
+    V(".nfo", kindFileTxt)        \
+    V(".tcr", kindFileTxt)        \
+    V(".ps", kindFilePS)          \
+    V(".ps.gz", kindFilePS)       \
+    V(".eps", kindFilePS)         \
+    V(".fb2", kindFileFb2)        \
+    V(".fb2z", kindFileFb2z)      \
+    V(".fbz", kindFileFb2z)       \
+    V(".zfb2", kindFileFb2z)      \
+    V(".fb2.zip", kindFileFb2z)   \
+    V(".cbz", kindFileCbz)        \
+    V(".cbr", kindFileCbr)        \
+    V(".cb7", kindFileCb7)        \
+    V(".cbt", kindFileCbt)        \
+    V(".pdf", kindFilePDF)        \
+    V(".xps", kindFileXps)        \
+    V(".oxps", kindFileXps)       \
+    V(".chm", kindFileChm)        \
+    V(".png", kindFilePng)        \
+    V(".jpg", kindFileJpeg)       \
+    V(".jpeg", kindFileJpeg)      \
+    V(".gif", kindFileGif)        \
+    V(".tif", kindFileTiff)       \
+    V(".tiff", kindFileTiff)      \
+    V(".bmp", kindFileBmp)        \
+    V(".tga", kindFileTga)        \
+    V(".jxr", kindFileJxr)        \
+    V(".hdp", kindFileHdp)        \
+    V(".wdp", kindFileWdp)        \
+    V(".webp", kindFileWebp)      \
+    V(".epub", kindFileEpub)      \
+    V(".mobi", kindFileMobi)      \
+    V(".prc", kindFileMobi)       \
+    V(".azw", kindFileMobi)       \
+    V(".azw1", kindFileMobi)      \
+    V(".azw3", kindFileMobi)      \
+    V(".pdb", kindFilePalmDoc)    \
+    V(".html", kindFileHTML)      \
+    V(".htm", kindFileHTML)       \
+    V(".xhtml", kindFileHTML)     \
+    V(".svg", kindFileSvg)        \
+    V(".djvu", kindFileDjVu)      \
+    V(".jp2", kindFileJp2)        \
+    V(".zip", kindFileZip)        \
+    V(".rar", kindFileRar)        \
+    V(".7z", kindFile7Z)          \
+    V(".heic", kindFileHeic)      \
+    V(".avif", kindFileAvif)      \
+    V(".tar", kindFileTar)
 
-#define EXT(ext, kind) ext
+#define EXT(ext, kind) ext "\0"
 
 // .fb2.zip etc. must be first so that it isn't classified as .zip
-static const char* gFileExts = DEF_EXT_KIND(EXT) "\0";
+static const char* gFileExts = DEF_EXT_KIND(EXT);
 #undef EXT
 
 #define KIND(ext, kind) kind,
 static Kind gExtsKind[] = {DEF_EXT_KIND(KIND)};
 #undef KIND
 
-static Kind GetKindByFileExt(const WCHAR* path) {
-    AutoFree pathA = strconv::WstrToUtf8(path);
-    int idx = 0;
-    const char* curr = gFileExts;
-    while (curr && *curr) {
-        if (str::EndsWithI(pathA.Get(), curr)) {
-            int n = (int)dimof(gExtsKind);
-            CrashIf(idx >= n);
-            if (idx >= n) {
-                return nullptr;
-            }
-            return gExtsKind[idx];
-        }
-        curr = seqstrings::SkipStr(curr);
-        idx++;
+static Kind GetKindByFileExt(const char* path) {
+    char* ext = path::GetExtTemp(path);
+    int idx = seqstrings::StrToIdxIS(gFileExts, ext);
+    if (idx < 0) {
+        return nullptr;
     }
-    return nullptr;
+    int n = (int)dimof(gExtsKind);
+    if (idx >= n) {
+        return nullptr;
+    }
+    return gExtsKind[idx];
 }
 
 // ensure gFileExts and gExtsKind match
@@ -141,8 +141,8 @@ static void VerifyExtsMatch() {
     if (gDidVerifyExtsMatch) {
         return;
     }
-    CrashAlwaysIf(kindFileEpub != GetKindByFileExt(L"foo.epub"));
-    CrashAlwaysIf(kindFileJp2 != GetKindByFileExt(L"foo.JP2"));
+    ReportIf(kindFileEpub != GetKindByFileExt("foo.epub"));
+    ReportIf(kindFileJp2 != GetKindByFileExt("foo.JP2"));
     gDidVerifyExtsMatch = true;
 }
 
@@ -192,7 +192,7 @@ static FileSig gFileSigs[] = {FILE_SIGS(MK_SIG)};
 #undef MK_SIG
 
 // PDF files have %PDF-${ver} somewhere in the beginning of the file
-static bool IsPdfFileContent(std::span<u8> d) {
+static bool IsPdfFileContent(const ByteSlice& d) {
     if (d.size() < 8) {
         return false;
     }
@@ -213,7 +213,7 @@ static bool IsPdfFileContent(std::span<u8> d) {
     return false;
 }
 
-static bool IsPSFileContent(std::span<u8> d) {
+static bool IsPSFileContent(const ByteSlice& d) {
     char* header = (char*)d.data();
     size_t n = d.size();
     if (n < 64) {
@@ -240,9 +240,49 @@ static bool IsPSFileContent(std::span<u8> d) {
     return isPJL;
 }
 
+// https://github.com/file/file/blob/7449263e1d6167233b3b6abfc3e4c13407d6432c/magic/Magdir/animation#L265
+// https://nokiatech.github.io/heif/technical.html
+// TODO: need to figure out heif vs. heic
+static Kind DetectHicAndAvif(const ByteSlice& d) {
+    if (d.size() < 0x18) {
+        return nullptr;
+    }
+    char* s = (char*)d.data();
+    char* hdr = s + 4;
+    // ftyp values per https://github.com/strukturag/libheif/issues/83
+    /*
+        'heic': the usual HEIF images
+        'heix': 10bit images, or anything that uses h265 with range extension
+        'hevc', 'hevx': brands for image sequences
+        'heim': multiview
+        'heis': scalable
+        'hevm': multiview sequence
+        'hevs': scalable sequence
+
+        'mif1' also happens?
+    */
+    // TODO: support more ftyp types?
+    if (str::StartsWith(hdr, "ftypheic")) {
+        return kindFileHeic;
+    }
+    if (str::StartsWith(hdr, "ftypheix")) {
+        return kindFileHeic;
+    }
+    if (str::StartsWith(hdr, "ftypmif1")) {
+        return kindFileHeic;
+    }
+    if (str::StartsWith(hdr, "ftypavif")) {
+        return kindFileAvif;
+    }
+    hdr = s + 16;
+    if (str::StartsWith(hdr, "mif1heic")) {
+        return kindFileHeic;
+    }
+    return nullptr;
+}
+
 // detect file type based on file content
-// we don't support sniffing kindFileVbkm
-Kind GuessFileTypeFromContent(std::span<u8> d) {
+Kind GuessFileTypeFromContent(const ByteSlice& d) {
     // TODO: sniff .fb2 content
     u8* data = d.data();
     size_t len = d.size();
@@ -257,6 +297,10 @@ Kind GuessFileTypeFromContent(std::span<u8> d) {
         if ((len > sigMaxLen) && memeq(dat, sig, sigLen)) {
             return gFileSigs[i].kind;
         }
+    }
+    Kind kind = DetectHicAndAvif(d);
+    if (kind) {
+        return kind;
     }
 
     if (IsPdfFileContent(d)) {
@@ -274,65 +318,72 @@ Kind GuessFileTypeFromContent(std::span<u8> d) {
     return nullptr;
 }
 
-static bool IsEpubFile(const WCHAR* path) {
-    AutoDelete<MultiFormatArchive> archive = OpenZipArchive(path, true);
-    if (!archive.Get()) {
-        return false;
-    }
-
+static bool IsEpubArchive(MultiFormatArchive* archive) {
     // assume that if this file exists, this is a epub file
     // https://github.com/sumatrapdfreader/sumatrapdf/issues/1801
-    AutoFree container(archive->GetFileDataByName("META-INF/container.xml"));
-    if (container.data) {
+    ByteSlice container = archive->GetFileDataByName("META-INF/container.xml");
+    if (container) {
+        container.Free();
         return true;
     }
 
-    AutoFree mimetype(archive->GetFileDataByName("mimetype"));
-    if (!mimetype.data) {
+    ByteSlice mimeType = archive->GetFileDataByName("mimetype");
+    if (!mimeType) {
         return false;
     }
-    char* d = mimetype.data;
+    AutoFree mtFree(mimeType);
+
+    char* mt = (char*)mimeType.Get();
     // trailing whitespace is allowed for the mimetype file
-    for (size_t i = mimetype.size(); i > 0; i--) {
-        if (!str::IsWs(d[i - 1])) {
+    size_t n = mimeType.size();
+    for (size_t i = n; i > 0; i--) {
+        if (!str::IsWs(mt[i - 1])) {
             break;
         }
-        d[i - 1] = '\0';
+        mt[i - 1] = '\0';
     }
+
+#if 0
     // a proper EPUB document has a "mimetype" file with content
     // "application/epub+zip" as the first entry in its ZIP structure
-    /* cf. https://web.archive.org/web/20140201013228/http://forums.fofou.org:80/sumatrapdf/topic?id=2599331&comments=6
-    if (!str::Eq(zip.GetFileName(0), L"mimetype"))
-        return false; */
-    if (str::Eq(mimetype.data, "application/epub+zip")) {
+    // https://web.archive.org/web/20140201013228/http://forums.fofou.org:80/sumatrapdf/topic?id=2599331&comments=6
+    if (!str::Eq(archive.GetFileName(0), L"mimetype")) {
+        return false; 
+    }
+#endif
+    if (str::Eq(mt, "application/epub+zip")) {
         return true;
     }
     // also open renamed .ibooks files
-    // cf. http://en.wikipedia.org/wiki/IBooks#Formats
-    return str::Eq(mimetype.data, "application/x-ibooks+zip");
+    // http://en.wikipedia.org/wiki/IBooks#Formats
+    return str::Eq(mt, "application/x-ibooks+zip");
 }
 
 // check if a given file is a likely a .zip archive containing XPS
 // document
-static bool IsXpsArchive(const WCHAR* path) {
-    MultiFormatArchive* archive = OpenZipArchive(path, true);
-    if (!archive) {
-        return false;
-    }
-
+static bool IsXpsArchive(MultiFormatArchive* archive) {
     bool res = archive->GetFileId("_rels/.rels") != (size_t)-1 ||
                archive->GetFileId("_rels/.rels/[0].piece") != (size_t)-1 ||
                archive->GetFileId("_rels/.rels/[0].last.piece") != (size_t)-1;
-    delete archive;
     return res;
 }
 
-// detect file type based on file content
-Kind GuessFileTypeFromContent(const WCHAR* path) {
-    CrashIf(!path);
+// we expect 1 file ending with .fb2
+static bool IsFb2Archive(MultiFormatArchive* archive) {
+    auto files = archive->GetFileInfos();
+    if (files.size() != 1) {
+        return false;
+    }
+    auto fi = files[0];
+    auto name = fi->name;
+    return str::EndsWithI(name, ".fb2");
+}
 
+// detect file type based on file content
+Kind GuessFileTypeFromContent(const char* path) {
+    ReportIf(!path);
     if (path::IsDirectory(path)) {
-        AutoFreeWstr mimetypePath(path::Join(path, L"mimetype"));
+        char* mimetypePath = path::JoinTemp(path, "mimetype");
         if (file::StartsWith(mimetypePath, "application/epub+zip")) {
             return kindFileEpub;
         }
@@ -341,18 +392,27 @@ Kind GuessFileTypeFromContent(const WCHAR* path) {
     }
 
     // +1 for zero-termination
-    char buf[2048 + 1] = {0};
+    char buf[2048 + 1]{};
     int n = file::ReadN(path, buf, dimof(buf) - 1);
     if (n <= 0) {
         return nullptr;
     }
-    auto res = GuessFileTypeFromContent({(u8*)buf, (size_t)n});
+
+    ByteSlice d = {(u8*)buf, (size_t)n};
+    auto res = GuessFileTypeFromContent(d);
     if (res == kindFileZip) {
-        if (IsXpsArchive(path)) {
-            res = kindFileXps;
-        }
-        if (IsEpubFile(path)) {
-            res = kindFileEpub;
+        MultiFormatArchive* archive = OpenZipArchive(path, true);
+        if (archive) {
+            if (IsXpsArchive(archive)) {
+                res = kindFileXps;
+            }
+            if (IsEpubArchive(archive)) {
+                res = kindFileEpub;
+            }
+            if (IsFb2Archive(archive)) {
+                res = kindFileFb2z;
+            }
+            delete archive;
         }
     }
     return res;
@@ -360,13 +420,13 @@ Kind GuessFileTypeFromContent(const WCHAR* path) {
 
 // embedded PDF files have names like "c:/foo.pdf:${pdfStreamNo}"
 // return pointer starting at ":${pdfStream}"
-const WCHAR* FindEmbeddedPdfFileStreamNo(const WCHAR* path) {
-    const WCHAR* start = path;
-    const WCHAR* end = start + str::Len(start) - 1;
+const char* FindEmbeddedPdfFileStreamNo(const char* path) {
+    const char* start = path;
+    const char* end = start + str::Len(start) - 1;
 
     int nDigits = 0;
     while (end > start) {
-        WCHAR c = *end;
+        char c = *end;
         if (c == ':') {
             if (nDigits > 0) {
                 return end;
@@ -383,14 +443,14 @@ const WCHAR* FindEmbeddedPdfFileStreamNo(const WCHAR* path) {
     return nullptr;
 }
 
-Kind GuessFileTypeFromName(const WCHAR* path) {
+Kind GuessFileTypeFromName(const char* path) {
     VerifyExtsMatch();
 
     if (!path) {
         return nullptr;
     }
     if (path::IsDirectory(path)) {
-        return kindFileDir;
+        return kindDirectory;
     }
     Kind res = GetKindByFileExt(path);
     if (res != nullptr) {
@@ -405,7 +465,7 @@ Kind GuessFileTypeFromName(const WCHAR* path) {
     return nullptr;
 }
 
-Kind GuessFileType(const WCHAR* path, bool sniff) {
+Kind GuessFileType(const char* path, bool sniff) {
     if (sniff) {
         Kind kind = GuessFileTypeFromContent(path);
         if (kind) {
@@ -416,4 +476,61 @@ Kind GuessFileType(const WCHAR* path, bool sniff) {
         return GuessFileTypeFromName(path);
     }
     return GuessFileTypeFromName(path);
+}
+
+// clang-format off
+static const Kind gImageKinds[] = {
+    kindFilePng,
+    kindFileJpeg,
+    kindFileJpeg,
+    kindFileGif,
+    kindFileBmp,
+    kindFileTiff,
+    kindFileTiff,
+    kindFileTga,
+    kindFileJxr,
+    kindFileWebp,
+    kindFileJp2,
+    kindFileHeic,
+    kindFileAvif
+};
+
+static const char* gImageFormatExts =
+    ".png\0"
+    ".jpg\0"
+    ".jpeg\0"
+    ".gif\0"
+    ".bmp\0"
+    ".tif\0"
+    ".tiff\0"
+    ".tga\0"
+    ".jxr\0"
+    ".webp\0"
+    ".jp2\0"
+    ".heic\0"
+    ".avif\0"
+    "\0";
+// clang-format on
+
+static int FindImageKindIdx(Kind kind) {
+    int n = (int)dimof(gImageKinds);
+    for (int i = 0; i < n; i++) {
+        if (kind == gImageKinds[i]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+const char* GfxFileExtFromKind(Kind kind) {
+    int idx = FindImageKindIdx(kind);
+    if (idx >= 0) {
+        return seqstrings::IdxToStr(gImageFormatExts, idx);
+    }
+    return nullptr;
+}
+
+const char* GfxFileExtFromData(const ByteSlice& d) {
+    Kind kind = GuessFileTypeFromContent(d);
+    return GfxFileExtFromKind(kind);
 }

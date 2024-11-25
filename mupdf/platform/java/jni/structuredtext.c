@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* StructuredText interface */
 
 JNIEXPORT void JNICALL
@@ -15,9 +37,8 @@ FUN(StructuredText_search)(JNIEnv *env, jobject self, jstring jneedle)
 {
 	fz_context *ctx = get_context(env);
 	fz_stext_page *text = from_StructuredText(env, self);
-	fz_quad hits[256];
 	const char *needle = NULL;
-	int n = 0;
+	search_state state = { env, NULL, 0 };
 
 	if (!ctx || !text) return NULL;
 	if (!jneedle) jni_throw_arg(env, "needle must not be null");
@@ -25,14 +46,20 @@ FUN(StructuredText_search)(JNIEnv *env, jobject self, jstring jneedle)
 	needle = (*env)->GetStringUTFChars(env, jneedle, NULL);
 	if (!needle) return NULL;
 
+	state.hits = (*env)->NewObject(env, cls_ArrayList, mid_ArrayList_init);
+	if (!state.hits || (*env)->ExceptionCheck(env)) return NULL;
+
 	fz_try(ctx)
-		n = fz_search_stext_page(ctx, text, needle, hits, nelem(hits));
+		fz_search_stext_page_cb(ctx, text, needle, hit_callback, &state);
 	fz_always(ctx)
 		(*env)->ReleaseStringUTFChars(env, jneedle, needle);
 	fz_catch(ctx)
 		jni_rethrow(env, ctx);
 
-	return to_QuadArray_safe(ctx, env, hits, n);
+	if (state.error)
+		return NULL;
+
+	return (*env)->CallObjectMethod(env, state.hits, mid_ArrayList_toArray);
 }
 
 JNIEXPORT jobject JNICALL
@@ -117,6 +144,7 @@ FUN(StructuredText_walk)(JNIEnv *env, jobject self, jobject walker)
 	jobject jbbox = NULL;
 	jobject jtrm = NULL;
 	jobject jimage = NULL;
+	jobject jdir = NULL;
 	jobject jorigin = NULL;
 	jobject jfont = NULL;
 	jobject jquad = NULL;
@@ -159,9 +187,13 @@ FUN(StructuredText_walk)(JNIEnv *env, jobject self, jobject walker)
 				jbbox = to_Rect_safe(ctx, env, line->bbox);
 				if (!jbbox) return;
 
-				(*env)->CallVoidMethod(env, walker, mid_StructuredTextWalker_beginLine, jbbox, line->wmode);
+				jdir = to_Point_safe(ctx, env, line->dir);
+				if (!jdir) return;
+
+				(*env)->CallVoidMethod(env, walker, mid_StructuredTextWalker_beginLine, jbbox, line->wmode, jdir);
 				if ((*env)->ExceptionCheck(env)) return;
 
+				(*env)->DeleteLocalRef(env, jdir);
 				(*env)->DeleteLocalRef(env, jbbox);
 
 				for (ch = line->first_char; ch; ch = ch->next)

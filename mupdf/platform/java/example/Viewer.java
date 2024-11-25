@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2022 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 package example;
 
 import com.artifex.mupdf.fitz.*;
@@ -8,18 +30,83 @@ import java.awt.image.*;
 
 import java.io.File;
 import java.io.FilenameFilter;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.lang.reflect.Field;
 import java.util.Vector;
 
-public class Viewer extends Frame implements WindowListener, ActionListener, ItemListener, KeyListener, MouseWheelListener
+public class Viewer extends Frame implements WindowListener, ActionListener, ItemListener, KeyListener, MouseWheelListener, Context.Log, ViewerCore.Callback
 {
-	protected String documentPath;
-	protected Document doc;
+	protected Worker worker;
+	protected ViewerCore doc;
+	protected Location location;
+	protected int chapterNumber;
+	protected int pageNumber;
+	protected ViewerCore.OutlineItem[] outline;
+
+	protected int layoutWidth = 450;
+	protected int layoutHeight = 600;
+	protected int layoutEm = 12;
+
+	protected String title;
+	protected String author;
+	protected String format;
+	protected String encryption;
+	protected boolean print;
+	protected boolean copy;
+	protected boolean edit;
+	protected boolean annotate;
+	protected boolean form;
+	protected boolean accessibility;
+	protected boolean assemble;
+	protected boolean printHq;
+	protected boolean reflowable;
+	protected boolean linearized;
+	protected int updates;
+	protected int firstUpdate;
+	protected int chapters;
+	protected int pages;
+
+	protected Pixmap pixmap;
+	protected Rect bbox;
+	protected Rect[] links;
+	protected String[] linkURIs;
+	protected Quad[][] hits;
+
+	protected int pixmapWidth;
+	protected int pixmapHeight;
+	protected float pixelScale;
+	protected int screenDPI;
+	protected Dimension screenSize;
+
+	protected int searchDirection = 1;
+	protected String searchNeedle = null;
+
+	protected final int MIN_ZOOM_DPI = 18;
+	protected final int MAX_ZOOM_DPI = 288;
+	protected int[] zoomList = {
+		18, 24, 36, 54, 72, 96, 120, 144, 180, 216, 288
+	};
+	protected boolean customZoom = false;
+	protected int currentDPI = 72;
+
+	protected int rotate = 0;
+	protected boolean icc = true;
+	protected int antialias = 8;
+	protected boolean invert = false;
+	protected boolean tint = false;
+	protected int tintBlack = 0x303030;
+	protected int tintWhite = 0xFFFFF0;
+	protected boolean showLinks = false;
+	protected boolean isFullscreen = false;
 
 	protected ScrollPane pageScroll;
 	protected Panel pageHolder;
-	protected ImageCanvas pageCanvas;
-	protected Matrix pageCTM;
+	protected PageCanvas pageCanvas;
 
 	protected Button firstButton, prevButton, nextButton, lastButton;
 	protected TextField pageField;
@@ -32,38 +119,14 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 
 	protected TextField searchField;
 	protected Button searchPrevButton, searchNextButton;
-	protected int searchDirection = 1;
-	protected Location searchPage = null;
-	protected Location searchHitPage = null;
-	protected Quad[] searchHits = new Quad[0];
-	protected EventQueue eq = null;
-	protected SearchTask searchTask = null;
+	protected Panel searchStatusPanel;
+	protected Label searchStatus;
 
 	protected Panel outlinePanel;
 	protected List outlineList;
-	protected Vector<Outline> flatOutline;
 
-	protected int pageCount;
-	protected int chapterCount;
-	protected Location currentPage = null;
-
-	protected int zoomLevel = 5;
-	protected int layoutWidth = 450;
-	protected int layoutHeight = 600;
-	protected int layoutEm = 12;
-	protected float pixelScale;
-	protected boolean currentInvert = false;
-	protected boolean currentICC = true;
-	protected int currentAA = 8;
-	protected boolean isFullscreen;
-	protected boolean currentTint = false;
-	protected int tintBlack = 0x303030;
-	protected int tintWhite = 0xFFFFF0;
-	protected int currentRotate = 0;
-	protected boolean currentOutline = false;
-	protected boolean currentLinks = false;
-	protected Link[] links = null;
-	protected Rect pageBounds;
+	protected OCRProgressmeter OCRmeter;
+	protected RenderProgressmeter renderMeter;
 
 	protected int number = 0;
 
@@ -80,49 +143,6 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 	protected int futureCount = 0;
 	protected Mark[] future = new Mark[256];
 	protected Mark[] marks = new Mark[10];
-
-	protected static final int[] zoomList = {
-		18, 24, 36, 54, 72, 96, 120, 144, 180, 216, 288
-	};
-
-	protected static BufferedImage imageFromPixmap(Pixmap pixmap) {
-		int w = pixmap.getWidth();
-		int h = pixmap.getHeight();
-		BufferedImage image = new BufferedImage(w, h, BufferedImage.TYPE_3BYTE_BGR);
-		image.setRGB(0, 0, w, h, pixmap.getPixels(), 0, w);
-		return image;
-	}
-
-	protected static BufferedImage imageFromPage(Page page, Matrix ctm, boolean invert, boolean icc, int aa, boolean tint, int tintBlack, int tintWhite, int rotate) {
-		Matrix trm = new Matrix(ctm).rotate(rotate);
-		Rect bbox = page.getBounds().transform(trm);
-		Pixmap pixmap = new Pixmap(ColorSpace.DeviceBGR, bbox, true);
-		pixmap.clear(255);
-
-		if (icc)
-			Context.enableICC();
-		else
-			Context.disableICC();
-		Context.setAntiAliasLevel(aa);
-
-		DrawDevice dev = new DrawDevice(pixmap);
-		page.run(dev, trm, null);
-		dev.close();
-		dev.destroy();
-
-		if (invert) {
-			pixmap.invertLuminance();
-			pixmap.gamma(1 / 1.4f);
-		}
-
-		if (tint) {
-			pixmap.tint(tintBlack, tintWhite);
-		}
-
-		BufferedImage image = imageFromPixmap(pixmap);
-		pixmap.destroy();
-		return image;
-	}
 
 	protected static void messageBox(Frame owner, String title, String message) {
 		final Dialog box = new Dialog(owner, title, true);
@@ -141,8 +161,8 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		box.dispose();
 	}
 
-	protected static String passwordDialog(Frame owner) {
-		final Dialog box = new Dialog(owner, "Password", true);
+	protected static String passwordDialog(Frame owner, String title) {
+		final Dialog box = new Dialog(owner, title, true);
 		final TextField textField = new TextField(20);
 		textField.setEchoChar('*');
 		Panel buttonPane = new Panel(new FlowLayout());
@@ -173,59 +193,71 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		return pwd;
 	}
 
-	protected class ImageCanvas extends Canvas
-	{
-		protected BufferedImage image;
+	public class LogDialog extends Dialog implements ActionListener, KeyListener{
+		TextArea info = new TextArea("");
+		Button okay = new Button("Okay");
 
-		public void setImage(BufferedImage image_) {
-			image = image_;
-			repaint();
-		}
+		public LogDialog(Frame parent, String title, String message) {
+			super(parent, title, true);
 
-		public Dimension getPreferredSize() {
-			if (image == null)
-				return new Dimension(600, 700);
+			setLayout(new GridLayout(2, 1));
+			info.setText(message);
+			info.setEnabled(false);
+			add(info);
 
-			return new Dimension(image.getWidth(), image.getHeight());
-		}
-
-		public void paint(Graphics g) {
-			float imageScale = 1 / pixelScale;
-			final Graphics2D g2d = (Graphics2D)g.create(0, 0, image.getWidth(), image.getHeight());
-			g2d.scale(imageScale, imageScale);
-			g2d.drawImage(image, 0, 0, null);
-
-			if (currentPage.equals(searchHitPage) && searchHits != null) {
-				g2d.setColor(new Color(1, 0, 0, 0.4f));
-				for (int i = 0; i < searchHits.length; ++i) {
-					Rect hit = new Rect(searchHits[i]).transform(pageCTM);
-					g2d.fillRect((int)hit.x0, (int)hit.y0, (int)(hit.x1-hit.x0), (int)(hit.y1-hit.y0));
-				}
+			Panel buttonPanel = new Panel(new FlowLayout(FlowLayout.CENTER));
+			{
+				okay.addActionListener(this);
+				okay.addKeyListener(this);
+				buttonPanel.add(okay);
 			}
+			add(buttonPanel);
 
-			if (links != null) {
-				g2d.setColor(new Color(0, 0, 1, 0.1f));
-				for (int i = 0; i < links.length; ++i) {
-					Rect hit = new Rect(links[i].bounds).transform(pageCTM);
-					g2d.fillRect((int)hit.x0, (int)hit.y0, (int)(hit.x1-hit.x0), (int)(hit.y1-hit.y0));
-				}
-			}
-
-			g2d.dispose();
+			pack();
+			setResizable(false);
+			okay.requestFocusInWindow();
+			setLocationRelativeTo(parent);
+			setVisible(true);
 		}
 
-		public Dimension getMinimumSize() { return getPreferredSize(); }
-		public Dimension getMaximumSize() { return getPreferredSize(); }
-		public void update(Graphics g) { paint(g); }
+		public void actionPerformed(ActionEvent e) {
+			if (e.getSource() == okay)
+				dispose();
+		}
+
+		public void keyPressed(KeyEvent e) { }
+		public void keyReleased(KeyEvent e) { }
+
+		public void keyTyped(KeyEvent e) {
+			if (e.getKeyChar() == '\u001b')
+				dispose();
+		}
+	}
+
+	public void exception(Throwable t) {
+		StringWriter sw = new StringWriter();
+		PrintWriter pw = new PrintWriter(sw);
+		t.printStackTrace(pw);
+		System.out.println("Exception: " + sw.toString());
+		LogDialog ld = new LogDialog(this, "Exception!", "Exception: " + sw.toString());
+	}
+
+	public void error(String message) {
+		LogDialog ld = new LogDialog(this, "Error!", "Error: " + message);
+	}
+
+	public void warning(String message) {
+		LogDialog ld = new LogDialog(this, "Warning!", "Warning: " + message);
 	}
 
 	public Viewer(String documentPath) {
-		this.documentPath = documentPath;
-
 		pixelScale = getRetinaScale();
+		screenDPI = getScreenDPI();
+		screenSize = getScreenSize();
+
+		currentDPI = zoomList[findNextLargerZoomLevel(screenDPI - 1)];
+
 		setTitle("MuPDF: ");
-		pageCount = 0;
-		chapterCount = 0;
 
 		outlinePanel = new Panel(new BorderLayout());
 		{
@@ -258,7 +290,7 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 					lastButton.addActionListener(this);
 					pageField = new TextField(4);
 					pageField.addActionListener(this);
-					pageLabel = new Label("/ " + pageCount);
+					pageLabel = new Label("/ " + pages);
 
 					toolbar.add(firstButton);
 					toolbar.add(prevButton);
@@ -278,9 +310,11 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 					zoomInButton.addActionListener(this);
 
 					zoomChoice = new Choice();
-					for (int i = 0; i < zoomList.length; ++i)
+					for (int i = 0; i < zoomList.length; ++i) {
 						zoomChoice.add(String.valueOf(zoomList[i]));
-					zoomChoice.select(zoomLevel);
+						if (zoomList[i] == currentDPI)
+							zoomChoice.select(i);
+					}
 					zoomChoice.addItemListener(this);
 
 					toolbar.add(zoomOutButton);
@@ -321,17 +355,26 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 				searchField.addKeyListener(this);
 				c.gridy += 1;
 				toolpane.add(toolbar, c);
+
+				searchStatusPanel = new Panel(new FlowLayout(FlowLayout.LEFT));
+				{
+					searchStatus = new Label();
+
+					searchStatusPanel.add(searchStatus);
+				}
+				c.gridy += 1;
+				toolpane.add(searchStatusPanel, c);
 			}
 			rightPanel.add(toolpane, BorderLayout.NORTH);
 		}
 		this.add(rightPanel, BorderLayout.EAST);
 
-		pageScroll = new ScrollPane(ScrollPane.SCROLLBARS_AS_NEEDED);
+		pageScroll = new ScrollPane(ScrollPane.SCROLLBARS_NEVER);
 		{
 			pageHolder = new Panel(new GridBagLayout());
 			{
 				pageHolder.setBackground(Color.gray);
-				pageCanvas = new ImageCanvas();
+				pageCanvas = new PageCanvas(pixelScale);
 				pageHolder.add(pageCanvas);
 			}
 			pageCanvas.addKeyListener(this);
@@ -343,51 +386,26 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		addWindowListener(this);
 
 		Toolkit toolkit = Toolkit.getDefaultToolkit();
-		eq = toolkit.getSystemEventQueue();
+		EventQueue eq = toolkit.getSystemEventQueue();
+		worker = new Worker(eq);
+		worker.start();
 
 		pack();
-
-		reload();
-	}
-
-	public void dispose() {
-		cancelSearch();
-		super.dispose();
-	}
-
-	public void reload() {
-		clearSearch();
 
 		pageCanvas.requestFocusInWindow();
 
-		String acceleratorPath = getAcceleratorPath(documentPath);
-		if (acceleratorValid(documentPath, acceleratorPath))
-			doc = Document.openDocument(documentPath, acceleratorPath);
-		else
-			doc = Document.openDocument(documentPath);
+		doc = new ViewerCore(worker, this, documentPath);
+		doc.openDocument(new ViewerCore.OnException() {
+			public void run(Throwable t) {
+				exception(t);
+			}
+		});
+	}
 
-		if (doc.needsPassword()) {
-			String pwd;
-			do {
-				pwd = passwordDialog(null);
-				if (pwd == null)
-					dispose();
-			} while (!doc.authenticatePassword(pwd));
-		}
-
-		doc.layout(layoutWidth, layoutHeight, layoutEm);
-		currentPage = doc.locationFromPageNumber(0);
-		pageCount = doc.countPages();
-		chapterCount = doc.countChapters();
-		doc.saveAccelerator(acceleratorPath);
-
-		setTitle("MuPDF: " + doc.getMetaData(Document.META_INFO_TITLE));
-		pageLabel.setText("/ " + pageCount);
-		reflowPanel.setVisible(doc.isReflowable());
-
-		updateOutline();
-		updatePageCanvas();
-		pack();
+	public void dispose() {
+		doc.cancelSearch(null);
+		doc.worker.stop();
+		super.dispose();
 	}
 
 	public void keyPressed(KeyEvent e) {
@@ -406,8 +424,8 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 			case KeyEvent.VK_UP: pan(0, -10); break;
 			case KeyEvent.VK_DOWN: pan(0, +10); break;
 
-			case KeyEvent.VK_PAGE_UP: flipPage(-1, number); break;
-			case KeyEvent.VK_PAGE_DOWN: flipPage(+1, number); break;
+			case KeyEvent.VK_PAGE_UP: doc.flipPages(-number, null); break;
+			case KeyEvent.VK_PAGE_DOWN: doc.flipPages(+number, null); break;
 			}
 		}
 	}
@@ -422,6 +440,7 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 	protected void searchFieldKeyTyped(KeyEvent e) {
 		if (e.getExtendedKeyCodeForChar(e.getKeyChar()) == java.awt.event.KeyEvent.VK_ESCAPE)
 			clearSearch();
+
 	}
 
 	protected void canvasKeyTyped(KeyEvent e) {
@@ -429,8 +448,9 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 
 		switch(c)
 		{
-		case 'r': reload(); break;
+		case 'r': doc.reloadDocument(null); break;
 		case 'q': dispose(); break;
+		case 'S': save(); break;
 
 		case 'f': toggleFullscreen(); break;
 
@@ -438,12 +458,12 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		case 't': jumpHistoryBack(number); break;
 		case 'T': jumpHistoryForward(number); break;
 
-		case '>': relayout(number > 0 ? number : layoutEm + 1); break;
-		case '<': relayout(number > 0 ? number : layoutEm - 1); break;
+		case '>': relayout(number > 0 ? number : +1); break;
+		case '<': relayout(number > 0 ? number : -1); break;
 
 		case 'I': toggleInvert(); break;
 		case 'E': toggleICC(); break;
-		case 'A': toggleAA(); break;
+		case 'A': toggleAntiAlias(); break;
 		case 'C': toggleTint(); break;
 		case 'o': toggleOutline(); break;
 		case 'L': toggleLinks(); break;
@@ -452,9 +472,14 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		case '[': rotate(-90); break;
 		case ']': rotate(+90); break;
 
-		case '+': zoom(false, +1); break;
-		case '-': zoom(false, -1); break;
-		case 'z': zoom(true, number); break;
+		case '+': zoomIn(); break;
+		case '-': zoomOut(); break;
+		case 'z': zoomToDPI(number); break;
+
+		case 'w': shrinkWrap(); break;
+		case 'W': fitWidth(); break;
+		case 'H': fitHeight(); break;
+		case 'Z': fitPage(); break;
 
 		case 'k': pan(0, pageCanvas != null ? pageCanvas.getHeight() / -10 : -10); break;
 		case 'j': pan(0, pageCanvas != null ? pageCanvas.getWidth() / +10 : +10); break;
@@ -464,16 +489,16 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		case 'b': smartMove(-1, number); break;
 		case ' ': smartMove(+1, number); break;
 
-		case ',': flipPage(-1, number); break;
-		case '.': flipPage(+1, number); break;
+		case ',': flipPages(-number); break;
+		case '.': flipPages(+number); break;
 
-		case 'g': jumpToPage(number - 1); break;
-		case 'G': jumpToPage(pageCount - 1); break;
+		case 'g': gotoPage(number); break;
+		case 'G': gotoLastPage(); break;
 
 		case '/': editSearchNeedle(+1); break;
 		case '?': editSearchNeedle(-1); break;
-		case 'N': search(searchField.getText(), -1); break;
-		case 'n': search(searchField.getText(), +1); break;
+		case 'N': search(-1); break;
+		case 'n': search(+1); break;
 		case '\u001b': clearSearch(); break;
 		}
 
@@ -484,14 +509,14 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 	}
 
 	public void mouseWheelMoved(MouseWheelEvent e) {
-		int mod = e.getModifiers();
+		int mod = e.getModifiersEx();
 		int rot = e.getWheelRotation();
-		if (mod == MouseWheelEvent.CTRL_MASK) {
+		if ((mod & MouseWheelEvent.CTRL_DOWN_MASK) != 0) {
 			if (rot < 0)
-				zoom(false, +1);
+				zoomIn();
 			else
-				zoom(false, -1);
-		} else if (mod == MouseWheelEvent.SHIFT_MASK) {
+				zoomOut();
+		} else if ((mod & MouseWheelEvent.SHIFT_DOWN_MASK) != 0) {
 			if (rot < 0)
 				pan(pageCanvas != null ? pageCanvas.getHeight() / -10 : -10, 0);
 			else
@@ -504,88 +529,6 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		}
 	}
 
-	protected void selectOutlineItem(int pagenum) {
-		int best = -1;
-
-		if (flatOutline != null) {
-			for (int i = 0; i < flatOutline.size(); ++i) {
-				Outline node = flatOutline.elementAt(i);
-				int linkPage = doc.pageNumberFromLocation(doc.resolveLink(node));
-				 if (linkPage >= 0 && linkPage <= pagenum)
-					 best = i;
-			}
-		}
-
-		if (best >= 0) {
-			outlineList.select(best);
-			outlineList.makeVisible(best);
-		} else {
-			int selected = outlineList.getSelectedIndex();
-			if (selected >= 0)
-				outlineList.deselect(selected);
-		}
-	}
-
-	protected void addOutline(Outline[] outline, String indent) {
-		for (int i = 0; i < outline.length; ++i) {
-			Outline node = outline[i];
-			if (node.title != null) {
-				flatOutline.add(node);
-				outlineList.add(indent + node.title);
-			}
-			if (node.down != null)
-				addOutline(node.down, indent + "    ");
-		}
-	}
-
-	protected void updateOutline() {
-		Outline[] outline = null;
-		try {
-			if (doc != null)
-				outline = doc.loadOutline();
-		} catch (Exception ex) {
-		}
-		outlineList.removeAll();
-		if (outline != null) {
-			flatOutline = new Vector<Outline>();
-			addOutline(outline, "");
-			currentOutline = true;
-		} else  {
-			currentOutline = false;
-		}
-		outlinePanel.setVisible(currentOutline);
-	}
-
-	protected void updatePageCanvas() {
-		int pageNumber = doc.pageNumberFromLocation(currentPage);
-		pageField.setText(String.valueOf(pageNumber + 1));
-
-		pageCTM = new Matrix().scale(zoomList[zoomLevel] / 72.0f * pixelScale);
-		if (doc != null) {
-			Page page = doc.loadPage(pageNumber);
-
-			pageBounds = page.getBounds();
-
-			if (currentLinks)
-				links = page.getLinks();
-			else
-				links = null;
-
-
-			BufferedImage image = imageFromPage(page, pageCTM, currentInvert, currentICC, currentAA, currentTint, tintBlack, tintWhite, currentRotate);
-			pageCanvas.setImage(image);
-
-			selectOutlineItem(pageNumber);
-		}
-
-		Dimension size = pageHolder.getPreferredSize();
-		size.width += 40;
-		size.height += 40;
-		pageScroll.setPreferredSize(size);
-		pageCanvas.invalidate();
-		validate();
-	}
-
 	protected void editSearchNeedle(int direction) {
 		clearSearch();
 		searchDirection = direction;
@@ -593,227 +536,261 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 	}
 
 	protected void cancelSearch() {
-		if (searchTask != null) {
-			searchTask.cancel();
-			searchTask = null;
-		}
+		doc.cancelSearch(null);
 	}
 
 	protected void clearSearch() {
 		cancelSearch();
 		searchField.setText("");
-		pageCanvas.requestFocusInWindow();
+		searchStatus.setText("");
+		searchStatusPanel.validate();
 		validate();
+		hits = null;
+		redraw();
 	}
 
-	protected void search(String needle, int direction) {
-		boolean done = false;
-
-		if (doc == null || needle == null || needle.length() <= 0)
-		{
+	public void search(int direction) {
+		if (searchField.isEnabled()) {
+			cancelSearch();
+			searchField.setEnabled(false);
+			searchNextButton.setEnabled(false);
+			searchPrevButton.setEnabled(false);
 			pageCanvas.requestFocusInWindow();
-			validate();
+			doc.search(searchField.getText(), direction, new ViewerCore.OnException() {
+					public void run(Throwable t) {
+						exception(t);
+					}
+			});
+		}
+	}
+
+	protected void render() {
+		if (bbox == null)
 			return;
-		}
 
-		if (searchTask != null) {
-			searchTask.cancel();
-			searchTask = null;
-		}
+		float width = bbox.x1 - bbox.x0;
+		float height = bbox.y1 - bbox.y0;
+		float scaleX = (float) Math.floor(width * (currentDPI/72.0f) * pixelScale + 0.5f) / width;
+		float scaleY = (float) Math.floor(height * (currentDPI/72.0f) * pixelScale + 0.5f) / height;
+		Matrix ctm = new Matrix().scale(scaleX, scaleY).rotate(rotate);
 
-		if (currentPage.equals(searchHitPage)) {
-			Location finalPage = searchDirection > 0 ? doc.lastPage() : doc.locationFromPageNumber(0);
-			searchPage = searchDirection > 0 ? doc.nextPage(currentPage) : doc.previousPage(currentPage);
-			if (searchPage.equals(finalPage))
-				done = true;
-		} else {
-			searchPage = currentPage;
-		}
+		Rect atOrigin = new Rect(bbox).transform(ctm);
+		ctm.e -= atOrigin.x0;
+		ctm.f -= atOrigin.y0;
+		Rect bounds = new Rect(bbox).transform(ctm);
 
+		Cookie cookie = new Cookie();
+
+		renderMeter = new RenderProgressmeter(this, "Rendering...", cookie, 250);
+		renderMeter.setLocationRelativeTo(this);
 		pageCanvas.requestFocusInWindow();
-		validate();
 
-		searchHits = null;
-		searchHitPage = null;
-
-		if (chapterCount > 1)
-			searchField.setText("Searching " + (searchPage.chapter + 1) + "/" + chapterCount + "-" + searchPage.page + "/" + pageCount);
-		else
-			searchField.setText("Searching " + searchPage.page + "/" + pageCount);
-		searchField.setEditable(false);
-		searchField.setEnabled(false);
-		searchPrevButton.setEnabled(false);
-		searchNextButton.setEnabled(false);
-
-		searchTask = new SearchTask(needle, direction);
-		eq.invokeLater(searchTask);
-	}
-
-	protected class SearchTask implements Runnable {
-		protected boolean cancel;
-		protected String needle;
-		protected int direction;
-		protected Location finalPage;
-
-		protected SearchTask(String needle, int direction) {
-			this.needle = needle;
-			this.direction = direction;
-			this.finalPage = searchDirection > 0 ? doc.lastPage() : doc.locationFromPageNumber(0);
-			this.cancel = false;
-		}
-
-		private synchronized void requestCancellation() {
-			cancel = true;
-		}
-
-		protected void cancel() {
-			requestCancellation();
-			while (!isCancelled()) {
-				try {
-					wait();
-				} catch (InterruptedException e) {
+		doc.renderPage(ctm, bounds, icc, antialias, invert, tint, tintBlack, tintWhite, cookie,
+			new ViewerCore.OnException() {
+				public void run(Throwable t) {
+					if (!renderMeter.cancelled)
+						exception(t);
 				}
 			}
-		}
-
-		protected synchronized boolean isCancelled() {
-			return cancel;
-		}
-
-		protected synchronized void cancelled() {
-			notify();
-		}
-
-		public void run() {
-			long executionUntil = System.currentTimeMillis() + 100;
-			boolean done = false;
-
-			while (!done && !isCancelled() && System.currentTimeMillis() < executionUntil) {
-				searchHits = doc.search(searchPage.chapter, searchPage.page, needle);
-				if (searchHits != null && searchHits.length > 0) {
-					searchHitPage = new Location(searchPage, searchHits[0].ul_x, searchHits[0].ul_y);
-					jumpToLocation(searchHitPage);
-					done = true;
-				}
-				else if (finalPage.equals(searchPage))
-					done = true;
-				else if (searchDirection > 0)
-					searchPage = doc.nextPage(searchPage);
-				else
-					searchPage = doc.previousPage(searchPage);
-			}
-
-			if (isCancelled()) {
-				searchField.setText(needle);
-				searchField.setEditable(true);
-				searchField.setEnabled(true);
-				searchHits = null;
-				searchHitPage = null;
-				searchPrevButton.setEnabled(true);
-				searchNextButton.setEnabled(true);
-				cancelled();
-			} else if (done) {
-				searchField.setText(needle);
-				searchField.setEditable(true);
-				searchField.setEnabled(true);
-				updatePageCanvas();
-				pageCanvas.requestFocusInWindow();
-				searchPrevButton.setEnabled(true);
-				searchNextButton.setEnabled(true);
-			} else {
-				if (chapterCount > 1)
-					searchField.setText("Searching " + (searchPage.chapter + 1) + "/" + chapterCount + "-" + searchPage.page + "/" + pageCount);
-				else
-					searchField.setText("Searching " + searchPage.page + "/" + pageCount);
-
-				eq.invokeLater(this);
-			}
-		}
+		);
 	}
 
-	protected void zoom(boolean absolute, int number) {
-		int newZoomLevel;
+	protected int findExactZoomLevel(int dpi) {
+		for (int level = 0; level < zoomList.length - 1; level++)
+			if (zoomList[level] == dpi)
+				return level;
+		return -1;
+	}
 
-		if (absolute) {
-			if (number == 0)
-				newZoomLevel = 5;
-			else
-				newZoomLevel = number - 1;
-		} else {
-			if (number == 0)
-				newZoomLevel = 5;
-			else
-				newZoomLevel = zoomLevel + number;
-		}
+	protected int findNextSmallerZoomLevel(int dpi) {
+		for (int level = zoomList.length - 1; level >= 0; level--)
+			if (zoomList[level] < dpi)
+				return level;
+		return 0;
+	}
 
-		if (newZoomLevel < 0)
-			newZoomLevel = 0;
-		if (newZoomLevel >= zoomList.length)
-			newZoomLevel = zoomList.length - 1;
+	protected int findNextLargerZoomLevel(int dpi) {
+		for (int level = 0; level < zoomList.length - 1; level++)
+			if (zoomList[level] > dpi)
+				return level;
+		return zoomList.length - 1;
+	}
 
-		if (newZoomLevel == zoomLevel)
+	protected void zoomToDPI(int newDPI) {
+		if (newDPI == 0)
+			newDPI = screenDPI;
+		if (newDPI < MIN_ZOOM_DPI)
+			newDPI = MIN_ZOOM_DPI;
+		if (newDPI > MAX_ZOOM_DPI)
+			newDPI = MAX_ZOOM_DPI;
+
+		if (newDPI == currentDPI)
 			return;
 
-		zoomLevel = newZoomLevel;
-		zoomChoice.select(newZoomLevel);
-		updatePageCanvas();
-	}
-
-	protected void toggleInvert() {
-		currentInvert = !currentInvert;
-		updatePageCanvas();
-	}
-
-	protected boolean flipPage(int direction, int pages) {
-		cancelSearch();
-
-		if (pages < 1)
-			pages = 1;
-
-		Location loc = currentPage;
-		for (int i = 0; i < pages; i++) {
-			if (direction > 0)
-				loc = doc.nextPage(loc);
-			else
-				loc = doc.previousPage(loc);
+		int level = findExactZoomLevel(newDPI);
+		if (level < 0) {
+			if (customZoom)
+				zoomChoice.remove(0);
+			customZoom = true;
+			zoomChoice.insert(String.valueOf(newDPI), 0);
+			zoomChoice.select(0);
+		} else {
+			if (customZoom) {
+				customZoom = false;
+				zoomChoice.remove(0);
+			}
+			zoomChoice.select(level);
 		}
 
-		if (currentPage.equals(loc))
-			return false;
+		currentDPI = newDPI;
+		render();
+	}
 
-		currentPage = loc;
-		updatePageCanvas();
-		return true;
+	protected void zoomToLevel(int level) {
+		if (level < 0)
+			level = 0;
+		if (level >= zoomList.length - 1)
+			level = zoomList.length - 1;
+		zoomToDPI(zoomList[level]);
+	}
+
+	protected void zoomIn() {
+		zoomToLevel(findNextLargerZoomLevel(currentDPI));
+	}
+
+	protected void zoomOut() {
+		zoomToLevel(findNextSmallerZoomLevel(currentDPI));
+	}
+
+	protected void zoomToScale(float newZoom) {
+		zoomToDPI((int)(newZoom * 72));
+	}
+
+	protected void fit(float desired, float unscaled) {
+		zoomToScale(desired / unscaled);
+	}
+
+	protected float unscaledWidth() {
+		return bbox != null ? bbox.x1 - bbox.x0 : 0;
+	}
+
+	protected float unscaledHeight() {
+		return bbox != null ? bbox.y1 - bbox.y0 : 0;
+	}
+
+	protected void fitWidth() {
+		fit(pageScroll.getSize().width, unscaledWidth());
+	}
+
+	protected void fitHeight() {
+		fit(pageScroll.getSize().height, unscaledHeight());
+	}
+
+	protected void fitPage() {
+		Dimension size = pageScroll.getSize();
+		float width = bbox != null ? bbox.x1 - bbox.x0 : 0;
+		float height = bbox != null ? bbox.y1 - bbox.y0 : 0;
+		float pageAspect = (width == 0 || height == 0) ? 0 : (width / height);
+		float canvasAspect = (float) size.width / (float) size.height;
+		if (pageAspect > canvasAspect)
+			fitWidth();
+		else
+			fitHeight();
+	}
+
+	protected void rotate(int change) {
+		int newRotate = rotate + change;
+		while (newRotate < 0) newRotate += 360;
+		while (newRotate >= 360) newRotate -= 360;
+
+		if (newRotate - rotate == 0)
+			return;
+		rotate = newRotate;
+
+		render();
+	}
+
+	protected void toggleAntiAlias() {
+		int newAntialias = number != 0 ? number : (antialias == 8 ? 0 : 8);
+		if (newAntialias - antialias == 0)
+			return;
+
+		antialias = newAntialias;
+		render();
 	}
 
 	protected void toggleICC() {
-		currentICC = !currentICC;
-		updatePageCanvas();
+		icc = !icc;
+		render();
 	}
 
-	protected void toggleAA() {
-		currentAA = number != 0 ? number : (currentAA == 8 ? 0 : 8);
-		updatePageCanvas();
+	protected void toggleInvert() {
+		invert = !invert;
+		render();
 	}
 
 	protected void toggleTint() {
-		currentTint = !currentTint;
-		updatePageCanvas();
+		tint = !tint;
+		render();
 	}
 
 	protected void toggleOutline() {
 		if (outlineList.getItemCount() <= 0)
 			return;
 
-		currentOutline = !currentOutline;
-		outlinePanel.setVisible(currentOutline);
+		outlinePanel.setVisible(!outlinePanel.isVisible());
 		pack();
 		validate();
 	}
 
 	protected void toggleLinks() {
-		currentLinks = !currentLinks;
-		updatePageCanvas();
+		showLinks = !showLinks;
+		redraw();
+	}
+
+	protected boolean isShrinkWrapped(int oldPixmapWidth, int oldPixmapHeight) {
+		Dimension size = pageScroll.getSize();
+		if (oldPixmapWidth == 0 && oldPixmapHeight == 0)
+			return true;
+		if (oldPixmapWidth + 4 == size.width && oldPixmapHeight + 4 == size.height)
+			return true;
+		return false;
+	}
+
+	protected void shrinkWrap() {
+		Dimension newSize = new Dimension(pixmapWidth, pixmapHeight);
+		newSize.width += 4;
+		newSize.height += 4;
+
+		if (newSize.width > screenSize.width)
+			newSize.width = screenSize.width;
+		if (newSize.height > screenSize.height)
+			newSize.height = screenSize.height;
+
+		pageScroll.setPreferredSize(newSize);
+		pack();
+	}
+
+	protected void redraw() {
+		boolean wasShrinkWrapped = isShrinkWrapped(pixmapWidth, pixmapHeight);
+
+		if (pixmap != null) {
+			pixmapWidth = pixmap.getWidth();
+			pixmapHeight = pixmap.getHeight();
+			BufferedImage image = new BufferedImage(pixmapWidth, pixmapHeight, BufferedImage.TYPE_3BYTE_BGR);
+			image.setRGB(0, 0, pixmapWidth, pixmapHeight, pixmap.getPixels(), 0, pixmapWidth);
+			pageCanvas.setPage(image, showLinks ? links : null, hits);
+		} else {
+			pixmapWidth = 0;
+			pixmapHeight = 0;
+			pageCanvas.setPage(null, null, null);
+		}
+
+		if (wasShrinkWrapped)
+			shrinkWrap();
+
+		pageCanvas.invalidate();
+		validate();
 	}
 
 	protected static String paperSizeName(int w, int h)
@@ -863,7 +840,7 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 			"L - highlight links",
 			//"F - highlight form fields",
 			"r - reload file",
-			//"S - save file (only for PDF)",
+			"S - save file",
 			"q - quit",
 			"",
 			"< - decrease E-book font size",
@@ -875,10 +852,10 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 			//"e - toggle spot color emulation",
 			"",
 			"f - fullscreen window",
-			//"w - shrink wrap window",
-			//"W - fit to width",
-			//"H - fit to height",
-			//"Z - fit to page",
+			"w - shrink wrap window",
+			"W - fit to width",
+			"H - fit to height",
+			"Z - fit to page",
 			"z - reset zoom",
 			"[number] z - set zoom resolution in DPI",
 			"plus - zoom in",
@@ -960,6 +937,8 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 	protected void showInfo() {
 		StringBuffer buffer;
 
+		cancelSearch();
+
 		final Dialog box = new Dialog(this, "Document info", true);
 		box.addWindowListener(new WindowListener() {
 			public void windowActivated(WindowEvent event) { }
@@ -977,40 +956,40 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		Panel infoPanel = new Panel();
 		int rows = 0;
 
-		String title = doc.getMetaData(Document.META_INFO_TITLE);
 		if (title != null) rows++;
 
-		String author = doc.getMetaData(Document.META_INFO_AUTHOR);
 		if (author != null) rows++;
 
-		String format = doc.getMetaData(Document.META_FORMAT);
 		if (format != null) rows++;
 
-		String encryption = doc.getMetaData(Document.META_ENCRYPTION);
 		if (encryption != null) rows++;
 
 		buffer = new StringBuffer();
-		if (doc.hasPermission(Document.PERMISSION_PRINT))
+		if (print)
 			buffer.append("print, ");
-		if (doc.hasPermission(Document.PERMISSION_COPY))
+		if (copy)
 			buffer.append("copy, ");
-		if (doc.hasPermission(Document.PERMISSION_EDIT))
+		if (edit)
 			buffer.append("edit, ");
-		if (doc.hasPermission(Document.PERMISSION_ANNOTATE))
+		if (annotate)
 			buffer.append("annotate, ");
+		if (form)
+			buffer.append("form, ");
+		if (accessibility)
+			buffer.append("accessibility, ");
+		if (assemble)
+			buffer.append("assemble, ");
+		if (printHq)
+			buffer.append("print-hq, ");
 		if (buffer.length() > 2)
 			buffer.delete(buffer.length() - 2, buffer.length());
 		String permissions = buffer.length() > 0 ? buffer.toString() : null;
 		if (permissions != null) rows++;
 
 		buffer = new StringBuffer();
-		if (doc.isPDF()) {
-			PDFDocument pdf = (PDFDocument) doc;
-			int updates = pdf.countVersions();
-			boolean linear = pdf.wasLinearized();
-
+		if (doc.equals("PDF")) {
 			buffer.append("PDF ");
-			if (linear)
+			if (linearized)
 				buffer.append("linearized ");
 			buffer.append("document with ");
 			buffer.append(updates);
@@ -1023,21 +1002,17 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		if (versions != null) rows++;
 
 		buffer = new StringBuffer();
-		if (doc.isPDF()) {
-			PDFDocument pdf = (PDFDocument) doc;
-			int updates = pdf.countVersions();
-
+		if (doc.equals("PDF")) {
 			if (updates > 1) {
-				int n = pdf.validateChangeHistory();
-				if (n == 0)
-					buffer.append("Change history seems valid.");
-				else if (n == 1)
+				if (firstUpdate == 0)
+					buffer.append("Change firstUpdate seems valid.");
+				else if (firstUpdate == 1)
 					buffer.append("Invalid changes made to the document in the last update.");
-				else if (n == 2)
+				else if (firstUpdate == 2)
 					buffer.append("Invalid changes made to the document in the penultimate update.");
 				else {
 					buffer.append("Invalid changes made to the document ");
-					buffer.append(n);
+					buffer.append(firstUpdate);
 					buffer.append(" updates ago.");
 				}
 			}
@@ -1046,8 +1021,12 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		if (validation != null) rows++;
 
 		buffer = new StringBuffer();
-		int w = (int)(pageBounds.x1 - pageBounds.x0 + 0.5f);
-		int h = (int)(pageBounds.y1 - pageBounds.y0 + 0.5f);
+		int w = 0;
+		int h = 0;
+		if (bbox != null) {
+			w = (int)(bbox.x1 - bbox.x0 + 0.5f);
+			h = (int)(bbox.y1 - bbox.y0 + 0.5f);
+		}
 		buffer.append(w);
 		buffer.append(" x ");
 		buffer.append(h);
@@ -1060,13 +1039,16 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		if (paperSize != null) rows++;
 
 		buffer = new StringBuffer();
-		buffer.append(doc.pageNumberFromLocation(currentPage) + 1);
+		buffer.append(pageNumber + 1);
 		buffer.append(" / ");
-		buffer.append(pageCount);
+		buffer.append(pages);
 		String page = buffer.length() > 0 ? buffer.toString() : null;
 		if (page != null) rows++;
 
-		String icc = currentICC ? "on" : "off";
+		String iccstring = icc ? "on" : "off";
+		rows++;
+
+		String antialiasstring = Integer.toString(antialias);
 		rows++;
 
 		infoPanel.setLayout(new GridLayout(rows, 1));
@@ -1080,7 +1062,8 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		if (validation != null) infoPanel.add(new Label(validation));
 		infoPanel.add(new Label("Size: " + paperSize));
 		infoPanel.add(new Label("Page: " + page));
-		infoPanel.add(new Label("ICC rendering: " + icc));
+		infoPanel.add(new Label("ICC rendering: " + iccstring));
+		infoPanel.add(new Label("Antialias rendering: " + antialiasstring));
 
 		Button button = new Button("OK");
 		button.addActionListener(new ActionListener() {
@@ -1132,12 +1115,8 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 			setExtendedState(Frame.NORMAL);
 	}
 
-	protected void rotate(int rotate) {
-		currentRotate += rotate;
-		updatePageCanvas();
-	}
-
 	protected void mark(int number) {
+		cancelSearch();
 		if (number == 0)
 			pushHistory();
 		else if (number > 0 && number < marks.length)
@@ -1145,17 +1124,16 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 	}
 
 	protected void jumpHistoryBack(int number) {
+		cancelSearch();
 		if (number == 0) {
 			if (historyCount > 0)
 				popHistory();
-		} else if (number > 0 && number < marks.length) {
-			int page = doc.pageNumberFromLocation(marks[number].loc);
+		} else if (number > 0 && number < marks.length)
 			restoreMark(marks[number]);
-			jumpToPage(page);
-		}
 	}
 
 	protected void jumpHistoryForward(int number) {
+		cancelSearch();
 		if (number == 0) {
 			if (futureCount > 0) {
 				popFuture();
@@ -1164,16 +1142,18 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 	}
 
 	protected Mark saveMark() {
-		return new Mark(currentPage);
+		return new Mark(location);
 	}
 
 	protected void restoreMark(Mark mark) {
-		currentPage = mark.loc;
-		updatePageCanvas();
+		if (mark != null) {
+			doc.gotoLocation(mark.loc, null);
+			pageCanvas.requestFocusInWindow();
+		}
 	}
 
 	protected void pushHistory() {
-		if (historyCount > 0 && currentPage.equals(history[historyCount - 1].loc))
+		if (historyCount > 0 && location.equals(history[historyCount - 1].loc))
 		{
 			return;
 		}
@@ -1202,56 +1182,17 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 	}
 
 	protected void popHistory() {
-		Location here = currentPage;
+		Location here = location;
 		pushFuture();
-		while (historyCount > 0 && currentPage.equals(here))
+		while (historyCount > 0 && location.equals(here))
 			restoreMark(history[--historyCount]);
 	}
 
 	protected void popFuture() {
-		Location here = currentPage;
+		Location here = location;
 		pushHistory();
-		while (futureCount > 0 && currentPage.equals(here))
+		while (futureCount > 0 && location.equals(here))
 			restoreMark(future[--futureCount]);
-	}
-
-	protected void jumpToLocation(Location loc) {
-		clearFuture();
-		pushHistory();
-
-		currentPage = loc;
-
-		int page = doc.pageNumberFromLocation(currentPage);
-		pageField.setText(String.valueOf(page));
-		updatePageCanvas();
-
-		pushHistory();
-	}
-
-	protected boolean jumpToPage(int page) {
-		cancelSearch();
-
-		clearFuture();
-		pushHistory();
-
-		if (page < 0)
-			page = 0;
-		if (page >= pageCount)
-			page = pageCount - 1;
-
-		if (doc.pageNumberFromLocation(currentPage) == page) {
-			pushHistory();
-			return false;
-		}
-
-		currentPage = doc.locationFromPageNumber(page);
-
-		pageField.setText(String.valueOf(page));
-		updatePageCanvas();
-		pageCanvas.requestFocusInWindow();
-
-		pushHistory();
-		return true;
 	}
 
 	protected void pan(int panx, int pany) {
@@ -1308,7 +1249,8 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 					if (value > hadj.getMaximum())
 						value = hadj.getMaximum();
 					hadj.setValue(value);
-				} else if (flipPage(+1, 1)) {
+				} else {
+					doc.flipPages(+1, null);
 					vadj.setValue(vadj.getMinimum());
 					hadj.setValue(hadj.getMinimum());
 				}
@@ -1327,7 +1269,8 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 					if (value < hadj.getMinimum())
 						value = hadj.getMinimum();
 					hadj.setValue(value);
-				} else if (flipPage(-1, 1)) {
+				} else {
+					doc.flipPages(-1, null);
 					vadj.setValue(vadj.getMaximum());
 					hadj.setValue(hadj.getMaximum());
 				}
@@ -1335,74 +1278,83 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 		}
 	}
 
-	protected void relayout(int em) {
-		if (em < 6)
-			em = 6;
-		if (em > 36)
-			em = 36;
+	protected void flipPages(int number) {
+		cancelSearch();
+		doc.flipPages(number, null);
+	}
 
-		if (em == layoutEm)
+	protected void gotoPage(int number) {
+		cancelSearch();
+		doc.gotoPage(number - 1, null);
+	}
+
+	protected void gotoLastPage() {
+		cancelSearch();
+		doc.gotoLastPage(null);
+	}
+
+	protected void relayout(int change) {
+		int newEm = layoutEm + change;
+		if (newEm < 6)
+			newEm = 6;
+		if (newEm > 36)
+			newEm = 36;
+
+		if (newEm == layoutEm)
 			return;
 
-		fontSizeLabel.setText(String.valueOf(em));
-
-		layoutEm = em;
-		long mark = doc.makeBookmark(currentPage);
-		doc.layout(layoutWidth, layoutHeight, layoutEm);
-		updateOutline();
-		pageCount = doc.countPages();
-		pageLabel.setText("/ " + pageCount);
-		currentPage = doc.findBookmark(mark);
-		updatePageCanvas();
+		layoutEm = newEm;
+		fontSizeLabel.setText(String.valueOf(layoutEm));
+		doc.relayoutDocument(layoutWidth, layoutHeight, layoutEm, null);
 	}
 
 	public void actionPerformed(ActionEvent event) {
 		Object source = event.getSource();
-		int oldLayoutEm = layoutEm;
-		int oldZoomLevel = zoomLevel;
 
 		if (source == firstButton)
-			jumpToPage(0);
+			doc.gotoFirstPage(null);
 		if (source == lastButton)
-			jumpToLocation(doc.lastPage());
+			doc.gotoLastPage(null);
 		if (source == prevButton)
-			jumpToLocation(doc.previousPage(currentPage));
+			doc.flipPages(-1, null);
 		if (source == nextButton)
-			jumpToLocation(doc.nextPage(currentPage));
-		if (source == pageField)
-			jumpToPage(Integer.parseInt(pageField.getText()) - 1);
+			doc.flipPages(+1, null);
+		if (source == pageField) {
+			doc.gotoPage(Integer.parseInt(pageField.getText()) - 1, null);
+			pageCanvas.requestFocusInWindow();
+		}
 
 		if (source == searchField)
-			search(searchField.getText(), +1);
+			search(searchDirection);
 		if (source == searchNextButton)
-			search(searchField.getText(), +1);
+			search(+1);
 		if (source == searchPrevButton)
-			search(searchField.getText(), -1);
+			search(-1);
 
-		if (source == fontIncButton && doc != null && doc.isReflowable())
-			relayout(layoutEm + 1);
-		if (source == fontDecButton && doc != null && doc.isReflowable())
-			relayout(layoutEm - 1);
+		if (source == fontIncButton && doc != null && reflowable)
+			relayout(+1);
+		if (source == fontDecButton && doc != null && reflowable)
+			relayout(-1);
 
-		if (source == zoomOutButton)
-			zoom(false, -1);
-		if (source == zoomInButton)
-			zoom(false, +1);
+		if (source == zoomOutButton) {
+			zoomOut();
+			pageCanvas.requestFocusInWindow();
+		}
+		if (source == zoomInButton) {
+			zoomIn();
+			pageCanvas.requestFocusInWindow();
+		}
 	}
 
 	public void itemStateChanged(ItemEvent event) {
 		Object source = event.getSource();
 		if (source == zoomChoice) {
-			int oldZoomLevel = zoomLevel;
-			zoomLevel = zoomChoice.getSelectedIndex();
-			if (zoomLevel != oldZoomLevel)
-				updatePageCanvas();
+			zoomToLevel(zoomChoice.getSelectedIndex());
+			pageCanvas.requestFocusInWindow();
 		}
 		if (source == outlineList) {
 			int i = outlineList.getSelectedIndex();
-			Outline node = flatOutline.elementAt(i);
-			Location loc = doc.resolveLink(node);
-			jumpToLocation(loc);
+			doc.gotoLocation(outline[i].location, null);
 			pageCanvas.requestFocusInWindow();
 		}
 	}
@@ -1415,19 +1367,517 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 	public void windowOpened(WindowEvent event) { }
 	public void windowClosed(WindowEvent event) { }
 
-	protected static String getAcceleratorPath(String documentPath) {
-		String acceleratorName = documentPath.substring(1);
-		acceleratorName = acceleratorName.replace(File.separatorChar, '%');
-		acceleratorName = acceleratorName.replace('\\', '%');
-		acceleratorName = acceleratorName.replace(':', '%');
-		String tmpdir = System.getProperty("java.io.tmpdir");
-		return new StringBuffer(tmpdir).append(File.separatorChar).append(acceleratorName).append(".accel").toString();
+	public void save() {
+		cancelSearch();
+
+		SaveOptionsDialog dialog = new SaveOptionsDialog(this);
+		dialog.populate();
+		dialog.setLocationRelativeTo(this);
+		dialog.setVisible(true);
+		dialog.dispose();
+
+		final String options = dialog.getOptions();
+		if (options == null)
+		{
+			pageCanvas.requestFocusInWindow();
+			return;
+		}
+
+		FileDialog fileDialog = new FileDialog(this, "MuPDF Save File", FileDialog.SAVE);
+		fileDialog.setDirectory(System.getProperty("user.dir"));
+		fileDialog.setFilenameFilter(new FilenameFilter() {
+			public boolean accept(File dir, String name) {
+				return Document.recognize(name);
+			}
+		});
+		fileDialog.setFile(doc.documentPath);
+		fileDialog.setVisible(true);
+		fileDialog.dispose();
+
+		if (fileDialog.getFile() == null)
+		{
+			pageCanvas.requestFocusInWindow();
+			return;
+		}
+
+		final String selectedPath = new StringBuffer(fileDialog.getDirectory()).append(File.separatorChar).append(fileDialog.getFile()).toString();
+		OCRmeter = new OCRProgressmeter(this, "Saving...", pages);
+		OCRmeter.setLocationRelativeTo(this);
+		OCRmeter.setVisible(true);
+		pageCanvas.requestFocusInWindow();
+
+		if (options.indexOf("ocr-language=") < 0)
+			doc.save(selectedPath, options, OCRmeter, new ViewerCore.OnException() {
+				public void run(Throwable t) {
+					if (t instanceof IOException)
+						exception(t);
+					else if (t instanceof RuntimeException && !OCRmeter.cancelled)
+						exception(t);
+				}
+			});
+		else
+		{
+			try {
+				FileStream fs = new FileStream(selectedPath, "rw");
+				doc.save(fs, options, OCRmeter, new ViewerCore.OnException() {
+					public void run(Throwable t) {
+						if (t instanceof RuntimeException && !OCRmeter.cancelled)
+							exception(t);
+					}
+				});
+			} catch (IOException e) {
+				exception(e);
+			}
+		}
 	}
 
-	protected static boolean acceleratorValid(String documentPath, String acceleratorPath) {
-		long documentModified = new File(documentPath).lastModified();
-		long acceleratorModified = new File(acceleratorPath).lastModified();
-		return acceleratorModified != 0 && acceleratorModified > documentModified;
+	public void onSaveComplete() {
+		if (OCRmeter != null)
+			OCRmeter.done();
+	}
+
+	class SaveOptionsDialog extends Dialog implements ActionListener, ItemListener, KeyListener {
+		Checkbox snapShot = new Checkbox("Snapshot", false);
+		Checkbox highSecurity = new Checkbox("High security", false);
+		Choice resolution = new Choice();
+		TextField language = new TextField("eng");
+		Checkbox incremental = new Checkbox("Incremental", false);
+
+		Checkbox prettyPrint = new Checkbox("Pretty print", false);
+		Checkbox ascii = new Checkbox("Ascii", false);
+		Checkbox decompress = new Checkbox("Decompress", false);
+		Checkbox compress = new Checkbox("Compress", true);
+		Checkbox compressImages = new Checkbox("Compress images", true);
+		Checkbox compressFonts = new Checkbox("Compress fonts", true);
+
+		Checkbox linearize = new Checkbox("Linearize", false);
+		Checkbox garbageCollect = new Checkbox("Garbage collect", false);
+		Checkbox cleanSyntax = new Checkbox("Clean syntax", false);
+		Checkbox sanitizeSyntax = new Checkbox("Sanitize syntax", false);
+
+		Choice encryption = new Choice();
+		TextField userPassword = new TextField();
+		TextField ownerPassword = new TextField();
+
+		Button cancel = new Button("Cancel");
+		Button save = new Button("Save");
+
+		String options = null;
+
+		public SaveOptionsDialog(Frame parent) {
+			super(parent, "MuPDF Save Options", true);
+
+			resolution.add("200dpi");
+			resolution.add("300dpi");
+			resolution.add("600dpi");
+			resolution.add("1200dpi");
+
+			encryption.add("Keep");
+			encryption.add("None");
+			encryption.add("RC4, 40bit");
+			encryption.add("RC4, 128bit");
+			encryption.add("AES, 128bit");
+			encryption.add("AES, 256bit");
+
+			snapShot.addItemListener(this);
+			highSecurity.addItemListener(this);
+			resolution.addItemListener(this);
+			language.addActionListener(this);
+			incremental.addItemListener(this);
+			prettyPrint.addItemListener(this);
+			ascii.addItemListener(this);
+			decompress.addItemListener(this);
+			compress.addItemListener(this);
+			compressImages.addItemListener(this);
+			compressFonts.addItemListener(this);
+			linearize.addItemListener(this);
+			garbageCollect.addItemListener(this);
+			cleanSyntax.addItemListener(this);
+			sanitizeSyntax.addItemListener(this);
+
+			encryption.addItemListener(this);
+			userPassword.addActionListener(this);
+			ownerPassword.addActionListener(this);
+
+			cancel.addActionListener(this);
+			save.addActionListener(this);
+			save.addKeyListener(this);
+
+			calculateOptions();
+		}
+
+		void populate(Container container, GridBagConstraints c, Component component) {
+			GridBagLayout gbl = (GridBagLayout) container.getLayout();
+			gbl.setConstraints(component, c);
+			container.add(component);
+		}
+
+		void populate() {
+			GridBagConstraints c = new GridBagConstraints();
+
+			c.fill = GridBagConstraints.BOTH;
+			c.weightx = 1.0;
+			c.gridwidth = GridBagConstraints.REMAINDER;
+
+			GridBagLayout gbl = new GridBagLayout();
+			setLayout(gbl);
+
+			Panel left = new Panel();
+			Panel right = new Panel();
+			GridBagLayout lgbl = new GridBagLayout();
+			GridBagLayout rgbl = new GridBagLayout();
+			left.setLayout(lgbl);
+			right.setLayout(rgbl);
+
+			populate(left, c, snapShot);
+			populate(left, c, highSecurity);
+			populate(left, c, resolution);
+			populate(left, c, language);
+			populate(left, c, incremental);
+
+			c.weighty = 1.5;
+			populate(left, c, new Panel());
+			c.weighty = 0.0;
+
+			populate(left, c, prettyPrint);
+			populate(left, c, ascii);
+			populate(left, c, decompress);
+			populate(left, c, compress);
+			populate(left, c, compressImages);
+			populate(left, c, compressFonts);
+
+			populate(right, c, linearize);
+			populate(right, c, garbageCollect);
+			populate(right, c, cleanSyntax);
+			populate(right, c, sanitizeSyntax);
+
+			c.weighty = 1.5;
+			populate(right, c, new Panel());
+			c.weighty = 0.0;
+
+			populate(right, c, new Label("Encryption"));
+			populate(right, c, encryption);
+			populate(right, c, new Label("User password"));
+			populate(right, c, userPassword);
+			populate(right, c, new Label("Owner password"));
+			populate(right, c, ownerPassword);
+
+			c.gridwidth = GridBagConstraints.REMAINDER;
+			populate(this, c, new Panel());
+
+			c.gridwidth = 1;
+			populate(this, c, left);
+			c.gridwidth = GridBagConstraints.REMAINDER;
+			populate(this, c, right);
+
+			c.gridwidth = GridBagConstraints.REMAINDER;
+			populate(this, c, new Panel());
+
+			c.gridwidth = 1;
+			populate(this, c, cancel);
+			c.gridwidth = GridBagConstraints.REMAINDER;
+			populate(this, c, save);
+
+			pack();
+			setResizable(false);
+			save.requestFocusInWindow();
+		}
+
+		public void keyPressed(KeyEvent e) { }
+		public void keyReleased(KeyEvent e) { }
+
+		public void keyTyped(KeyEvent e) {
+			if (e.getKeyChar() == '\u001b')
+				cancel();
+			else if (e.getKeyChar() == '\n')
+				save();
+		}
+
+		public void actionPerformed(ActionEvent e) {
+			if (e.getSource() == cancel)
+				cancel();
+			else if (e.getSource() == save)
+				save();
+		}
+
+		void cancel() {
+			options = null;
+			setVisible(false);
+		}
+
+		void save() {
+			setVisible(false);
+		}
+
+		public void itemStateChanged(ItemEvent e) {
+			calculateOptions();
+		}
+
+		void calculateOptions() {
+			boolean isPDF = false;
+			boolean canBeSavedIncrementally = false;
+			boolean isRedacted = false;
+
+			if (isPDF && !canBeSavedIncrementally)
+				incremental.setState(false);
+
+			if (highSecurity.getState()) {
+				incremental.setState(false);
+				prettyPrint.setState(false);
+				ascii.setState(false);
+				decompress.setState(false);
+				compress.setState(true);
+				compressImages.setState(false);
+				compressFonts.setState(false);
+				linearize.setState(false);
+				garbageCollect.setState(false);
+				cleanSyntax.setState(false);
+				sanitizeSyntax.setState(false);
+				encryption.select("None");
+				userPassword.setText("");
+				ownerPassword.setText("");
+			} else if (incremental.getState()) {
+				linearize.setState(false);
+				garbageCollect.setState(false);
+				cleanSyntax.setState(false);
+				sanitizeSyntax.setState(false);
+				encryption.select("Keep");
+				userPassword.setText("");
+				ownerPassword.setText("");
+			}
+
+			highSecurity.setEnabled(snapShot.getState() == false);
+			resolution.setEnabled(snapShot.getState() == false && highSecurity.getState() == true);
+			language.setEnabled(snapShot.getState() == false && highSecurity.getState() == true);
+			incremental.setEnabled(snapShot.getState() == false && highSecurity.getState() == false && isPDF && canBeSavedIncrementally);
+			prettyPrint.setEnabled(snapShot.getState() == false && highSecurity.getState() == false);
+			ascii.setEnabled(snapShot.getState() == false && highSecurity.getState() == false);
+			decompress.setEnabled(snapShot.getState() == false && highSecurity.getState() == false);
+			compress.setEnabled(snapShot.getState() == false && highSecurity.getState() == false);
+			compressImages.setEnabled(snapShot.getState() == false && highSecurity.getState() == false);
+			compressFonts.setEnabled(snapShot.getState() == false && highSecurity.getState() == false);
+			linearize.setEnabled(snapShot.getState() == false && highSecurity.getState() == false && incremental.getState() == false);
+			garbageCollect.setEnabled(snapShot.getState() == false && highSecurity.getState() == false && incremental.getState() == false);
+			cleanSyntax.setEnabled(snapShot.getState() == false && highSecurity.getState() == false && incremental.getState() == false);
+			sanitizeSyntax.setEnabled(snapShot.getState() == false && highSecurity.getState() == false && incremental.getState() == false);
+			encryption.setEnabled(snapShot.getState() == false && highSecurity.getState() == false && incremental.getState() == false);
+			userPassword.setEnabled(snapShot.getState() == false && highSecurity.getState() == false && incremental.getState() == false && encryption.getSelectedItem() != "Keep" && encryption.getSelectedItem() != "None");
+			ownerPassword.setEnabled(snapShot.getState() == false && highSecurity.getState() == false && incremental.getState() == false && encryption.getSelectedItem() != "Keep" && encryption.getSelectedItem() != "None");
+
+			if (incremental.getState()) {
+				garbageCollect.setState(false);
+				linearize.setState(false);
+				cleanSyntax.setState(false);
+				sanitizeSyntax.setState(false);
+				encryption.select("Keep");
+			}
+
+			StringBuilder opts = new StringBuilder();
+			if (highSecurity.getState()) {
+				opts.append(",compression=flate");
+				opts.append(",resolution=");
+				opts.append(resolution.getSelectedItem());
+				opts.append(",ocr-language=");
+				opts.append(language.getText());
+			} else {
+				if (decompress.getState()) opts.append(",decompress=yes");
+				if (compress.getState()) opts.append(",compress=yes");
+				if (compressFonts.getState()) opts.append(",compress-fonts=yes");
+				if (compressImages.getState()) opts.append(",compress-images=yes");
+				if (ascii.getState()) opts.append(",ascii=yes");
+				if (prettyPrint.getState()) opts.append(",pretty=yes");
+				if (linearize.getState()) opts.append(",linearize=yes");
+				if (cleanSyntax.getState()) opts.append(",clean=yes");
+				if (sanitizeSyntax.getState()) opts.append(",sanitize=yes");
+				if (encryption.getSelectedItem() == "None") opts.append(",decrypt=yes");
+				if (encryption.getSelectedItem() == "Keep") opts.append(",decrypt=no");
+				if (encryption.getSelectedItem() == "None") opts.append(",encrypt=no");
+				if (encryption.getSelectedItem() == "Keep") opts.append(",encrypt=keep");
+				if (encryption.getSelectedItem() == "RC4, 40bit") opts.append(",encrypt=rc4-40");
+				if (encryption.getSelectedItem() == "RC4, 128bit") opts.append(",encrypt=rc4-128");
+				if (encryption.getSelectedItem() == "AES, 128bit") opts.append(",encrypt=aes-128");
+				if (encryption.getSelectedItem() == "AES, 256bit") opts.append(",encrypt=aes-256");
+				if (userPassword.getText().length() > 0) {
+					opts.append(",user-password=");
+					opts.append(userPassword.getText());
+				}
+				if (ownerPassword.getText().length() > 0) {
+					opts.append(",owner-password=");
+					opts.append(ownerPassword.getText());
+				}
+				opts.append(",permissions=-1");
+				if (garbageCollect.getState() && isPDF && isRedacted)
+					opts.append(",garbage=yes");
+				else
+					opts.append(",garbage=compact");
+			}
+
+			if (opts.charAt(0) == ',')
+				opts.deleteCharAt(0);
+
+			options = opts.toString();
+		}
+
+		String getOptions() {
+			return options;
+		}
+	}
+
+	class Progressmeter extends Dialog implements ActionListener, KeyListener {
+		Label info = new Label("", Label.CENTER);
+		Button cancel = new Button("Cancel");
+		boolean cancelled = false;
+		boolean done = false;
+
+		public Progressmeter(Frame parent, String title, boolean modal, String initialText) {
+			super(parent, title, modal);
+
+			setLayout(new GridLayout(2, 1));
+
+			info.setText(initialText);
+			add(info);
+
+			cancel.addActionListener(this);
+			cancel.addKeyListener(this);
+			add(cancel);
+
+			pack();
+			setResizable(false);
+			cancel.requestFocusInWindow();
+		}
+
+		public void actionPerformed(ActionEvent e) {
+			if (e.getSource() == cancel)
+				cancel();
+		}
+
+		public void keyPressed(KeyEvent e) { }
+		public void keyReleased(KeyEvent e) { }
+
+		public void keyTyped(KeyEvent e) {
+			if (e.getKeyChar() == '\u001b')
+				cancel();
+		}
+
+		public void cancel() {
+			cancelled = true;
+		}
+
+		public void done() {
+			done = true;
+		}
+
+		public boolean progress(String text) {
+			info.setText(text);
+			return cancelled || done;
+		}
+	}
+
+	class OCRProgressmeter extends Progressmeter implements DocumentWriter.OCRListener {
+		int pages;
+
+		public OCRProgressmeter(Frame parent, String title, int pages) {
+			super(parent, title, true, "Progress: Page 65535/65535: 100%");
+			this.pages = pages;
+			progress(-1, 0);
+			setVisible(true);
+		}
+
+		public void done() {
+			super.done();
+			setVisible(false);
+			dispose();
+		}
+
+		public boolean progress(int page, int percent) {
+			StringBuilder text = new StringBuilder();
+
+			if (page >= 0 || pages >= 0) {
+				text.append("Page ");
+				if (page >= 0)
+					text.append(page + 1);
+				else
+					text.append("?");
+			}
+			if (pages >= 0) {
+				text.append("/");
+				text.append(pages);
+				text.append(": ");
+			}
+
+			text.append(percent);
+			text.append("%");
+
+			return progress(text.toString());
+		}
+	}
+
+	class RenderProgressmeter extends Progressmeter {
+		Cookie cookie;
+
+		public RenderProgressmeter(Frame parent, String title, Cookie cookie, final int update) {
+			super(parent, title, false, "Progress: 100%");
+			this.cookie = cookie;
+
+			(new Thread() {
+				public void run() {
+					try {
+						int slept = 0;
+						while (!progress(slept))
+						{
+							sleep(update);
+							slept += update;
+						}
+					} catch (InterruptedException e) {
+					}
+				}
+			}).start();
+		}
+
+		public void cancel() {
+			super.cancel();
+			cookie.abort();
+		}
+
+		public boolean progress(int slept) {
+			int progress = cookie.getProgress();
+			int max = cookie.getProgressMax();
+
+			if (max <= 0 && progress < 100)
+				max = 100;
+			else if (max <= 0 && progress > 100)
+			{
+				int v = progress;
+				max = 10;
+				while (v > 10)
+				{
+					v /= 10;
+					max *= 10;
+				}
+			}
+
+			if (progress >= max)
+				done = true;
+
+			int percent = (int) ((float) progress / max * 100.0f);
+
+			StringBuilder text = new StringBuilder();
+			text.append("Progress: ");
+			text.append(percent);
+			text.append("%");
+
+			if (slept > 0)
+				setVisible(true);
+
+			if (progress(text.toString()))
+			{
+				setVisible(false);
+				dispose();
+				return true;
+			}
+
+			return false;
+		}
 	}
 
 	public static void main(String[] args) {
@@ -1471,9 +1921,8 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 				if (field != null) {
 					field.setAccessible(true);
 					Object scale = field.get(device);
-					if (scale instanceof Integer && ((Integer)scale).intValue() == 2) {
+					if (scale instanceof Integer && ((Integer)scale).intValue() == 2)
 						return 2.0f;
-					}
 				}
 			}
 			catch (Exception ignore) {
@@ -1483,10 +1932,154 @@ public class Viewer extends Frame implements WindowListener, ActionListener, Ite
 
 		// try Apple VM
 		final Float scaleFactor = (Float)Toolkit.getDefaultToolkit().getDesktopProperty("apple.awt.contentScaleFactor");
-		if (scaleFactor != null && scaleFactor.intValue() == 2) {
+		if (scaleFactor != null && scaleFactor.intValue() == 2)
 			return 2.0f;
-		}
 
 		return 1.0f;
+	}
+
+	public int getScreenDPI() {
+		try {
+			return Toolkit.getDefaultToolkit().getScreenResolution();
+		} catch (HeadlessException e) {
+			return 72;
+		}
+	}
+
+	public Dimension getScreenSize() {
+		try {
+			return Toolkit.getDefaultToolkit().getScreenSize();
+		} catch (HeadlessException e) {
+			return new Dimension(1920, 1080);
+		}
+	}
+
+	protected static class OutlineItem {
+		protected String title;
+		protected String uri;
+		protected int page;
+		public OutlineItem(String title, String uri, int page) {
+			this.title = title;
+			this.uri = uri;
+			this.page = page;
+		}
+		public String toString() {
+			return title;
+		}
+	}
+
+	public String askPassword() {
+		return passwordDialog(null, "Password");
+	}
+	public void onChapterCountChange(int chapters) {
+		this.chapters = chapters;
+	}
+	public void onPageCountChange(int pages) {
+		this.pages = pages;
+		pageLabel.setText("/ " + pages);
+	}
+	public void onPageChange(Location page, int chapterNumber, int pageNumber, Rect bbox) {
+		this.location = page;
+		this.chapterNumber = chapterNumber;
+		this.pageNumber = pageNumber;
+		this.bbox = bbox;
+		if (pageNumber >= 0 && pageNumber < pages)
+			pageField.setText(String.valueOf(pageNumber + 1));
+		else
+			pageField.setText("");
+		render();
+	}
+	public void onReflowableChange(boolean reflowable) {
+		this.reflowable = reflowable;
+		fontIncButton.setEnabled(reflowable);
+		fontDecButton.setEnabled(reflowable);
+		fontSizeLabel.setEnabled(reflowable);
+	}
+	public void onLayoutChange(int width, int height, int em) {
+	}
+	public void onOutlineChange(ViewerCore.OutlineItem[] outline) {
+		boolean hadOutline = this.outline != null;
+		this.outline = outline;
+		outlineList.removeAll();
+		if (outline != null)
+			for (int i = 0; i < outline.length; i++)
+				outlineList.add(outline[i].title);
+		if (hadOutline)
+			outlinePanel.setVisible(outline != null);
+	}
+	public void onPageContentsChange(Pixmap pixmap, Rect[] links, String[] linkURIs, Quad[][] hits) {
+		this.pixmap = pixmap;
+		this.links = links;
+		this.linkURIs = linkURIs;
+		this.hits = hits;
+		redraw();
+		if (renderMeter != null)
+			renderMeter.done();
+	}
+	public void onSearchStart(Location startPage, Location finalPage, int direction, String needle) {
+		searchField.setEnabled(false);
+	}
+	public void onSearchPage(Location page, String needle) {
+		String text;
+		if (chapters > 1)
+			text = "Searching " + (page.chapter + 1) + "/" + chapters + "-" + page.page + "/" + pages;
+		else
+			text = "Searching " + page.page + "/" + pages;
+		searchStatus.setText(text);
+		searchStatusPanel.validate();
+	}
+	public void onSearchStop(String needle, Location page) {
+		searchField.setEnabled(true);
+		searchNextButton.setEnabled(true);
+		searchPrevButton.setEnabled(true);
+		if (page != null) {
+			doc.gotoLocation(page, null);
+			searchStatus.setText("");
+		} else if (needle != null)
+			searchStatus.setText("Search text not found.");
+		else
+			searchStatus.setText("");
+		searchStatusPanel.validate();
+		pageCanvas.requestFocusInWindow();
+	}
+	public void onSearchCancelled() {
+		searchField.setEnabled(true);
+		searchNextButton.setEnabled(true);
+		searchPrevButton.setEnabled(true);
+		searchStatus.setText("");
+		searchStatusPanel.validate();
+	}
+	public void onOutlineItemChange(int index) {
+		if (index == -1) {
+			int selected = outlineList.getSelectedIndex();
+			if (selected >= 0)
+				outlineList.deselect(selected);
+		} else {
+			outlineList.makeVisible(index);
+			outlineList.select(index);
+		}
+	}
+	public void onMetadataChange(String title, String author, String format, String encryption) {
+		this.title = title;
+		this.author = author;
+		this.format = format;
+		this.encryption = encryption;
+	}
+	public void onPermissionsChange(boolean print, boolean copy, boolean edit, boolean annotate, boolean form, boolean accessibility, boolean assemble, boolean printHq) {
+		this.print = print;
+		this.copy = copy;
+		this.edit = edit;
+		this.annotate = annotate;
+		this.form = form;
+		this.accessibility = accessibility;
+		this.assemble = assemble;
+		this.printHq = printHq;
+	}
+	public void onLinearizedChange(boolean linearized) {
+		this.linearized = linearized;
+	}
+	public void onUpdatesChange(int updates, int firstUpdate) {
+		this.updates = updates;
+		this.firstUpdate = firstUpdate;
 	}
 }

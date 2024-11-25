@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "xps-imp.h"
 
@@ -37,7 +59,7 @@ xps_find_image_brush_source_part(fz_context *ctx, xps_document *doc, char *base_
 
 	image_source_att = fz_xml_att(root, "ImageSource");
 	if (!image_source_att)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find image source attribute");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cannot find image source attribute");
 
 	/* "{ColorConvertedBitmap /Resources/Image.tiff /Resources/Profile.icc}" */
 	if (strstr(image_source_att, "{ColorConvertedBitmap") == image_source_att)
@@ -68,7 +90,7 @@ xps_find_image_brush_source_part(fz_context *ctx, xps_document *doc, char *base_
 	}
 
 	if (!image_name)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find image source");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cannot find image source");
 
 	if (image_part)
 	{
@@ -104,10 +126,19 @@ xps_parse_image_brush(fz_context *ctx, xps_document *doc, fz_matrix ctm, fz_rect
 		if (fz_caught(ctx) == FZ_ERROR_TRYLATER)
 		{
 			if (doc->cookie)
+			{
 				doc->cookie->incomplete = 1;
+				fz_ignore_error(ctx);
+			}
+			else
+				fz_rethrow(ctx);
 		}
 		else
+		{
+			fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+			fz_report_error(ctx);
 			fz_warn(ctx, "cannot find image source");
+		}
 		return;
 	}
 
@@ -121,6 +152,8 @@ xps_parse_image_brush(fz_context *ctx, xps_document *doc, fz_matrix ctm, fz_rect
 	}
 	fz_catch(ctx)
 	{
+		fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+		fz_report_error(ctx);
 		fz_warn(ctx, "cannot decode image resource");
 		return;
 	}

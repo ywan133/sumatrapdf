@@ -21,47 +21,70 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <bin2coff__ttf_ Include="..\..\resources\fonts\droid\DroidSansFallback.ttf">
-      <Filter>fonts\droid</Filter>
-    </bin2coff__ttf_>
-    <bin2coff__ttf_ Include="..\..\resources\fonts\droid\DroidSansFallbackFull.ttf">
-      <Filter>fonts\droid</Filter>
-    </bin2coff__ttf_>
-    <bin2coff__ttf_ Include="..\..\resources\fonts\noto\NotoEmoji-Regular.ttf">
-      <Filter>fonts\noto</Filter>
-    </bin2coff__ttf_>
-    <bin2coff__ttf_ Include="..\..\resources\fonts\noto\NotoKufiArabic-Regular.ttf">
-      <Filter>fonts\noto</Filter>
-    </bin2coff__ttf_>
-    <bin2coff__ttf_ Include="..\..\resources\fonts\noto\NotoNaskhArabic-Regular.ttf">
-      <Filter>fonts\noto</Filter>
-    </bin2coff__ttf_>
-    <bin2coff__ttf_ Include="..\..\resources\fonts\noto\NotoSansOriya-Regular.ttf">
-      <Filter>fonts\noto</Filter>
-    </bin2coff__ttf_>
-    <bin2coff__ttf_ Include="..\..\resources\fonts\noto\NotoSansTaiTham-Regular.ttf">
-      <Filter>fonts\noto</Filter>
-    </bin2coff__ttf_>
-    <bin2coff__ttf_ Include="..\..\resources\fonts\noto\NotoSerifBengali-Regular.ttf">
-      <Filter>fonts\noto</Filter>
-    </bin2coff__ttf_>
-    <bin2coff__ttf_ Include="..\..\resources\fonts\noto\NotoSerifDevanagari-Regular.ttf">
-      <Filter>fonts\noto</Filter>
-    </bin2coff__ttf_>
-    <bin2coff__ttf_ Include="..\..\resources\fonts\noto\NotoSerifMalayalam-Regular.ttf">
-      <Filter>fonts\noto</Filter>
-    </bin2coff__ttf_>
-    <bin2coff__ttf_ Include="..\..\resources\fonts\noto\NotoSerifTelugu-Regular.ttf">
-      <Filter>fonts\noto</Filter>
-    </bin2coff__ttf_>
-  </ItemGroup>
-  <ItemGroup>
-    <bin2coff__ttc_ Include="..\..\resources\fonts\han\SourceHanSerif-Regular.ttc">
-      <Filter>fonts\han</Filter>
-    </bin2coff__ttc_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\Dingbats.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusMonoPS-Bold.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusMonoPS-BoldItalic.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusMonoPS-Italic.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusMonoPS-Regular.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusRoman-Bold.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusRoman-BoldItalic.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusRoman-Italic.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusRoman-Regular.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusSans-Bold.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusSans-BoldItalic.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusSans-Italic.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusSans-Regular.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\StandardSymbolsPS.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\sil\CharisSIL-Bold.cff">
+      <Filter>fonts\sil</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\sil\CharisSIL-BoldItalic.cff">
+      <Filter>fonts\sil</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\sil\CharisSIL-Italic.cff">
+      <Filter>fonts\sil</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\sil\CharisSIL.cff">
+      <Filter>fonts\sil</Filter>
+    </bin2coff__cff_>
+    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusBoxes-Regular.cff">
+      <Filter>fonts\urw</Filter>
+    </bin2coff__cff_>
+    <!-- DUMP:CFF -->
   </ItemGroup>
   <ItemGroup>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoMusic-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoNaskhArabic-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoNastaliqUrdu-Regular.otf">
@@ -74,9 +97,6 @@
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansAnatolianHieroglyphs-Regular.otf">
-      <Filter>fonts\noto</Filter>
-    </bin2coff__otf_>
-    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansArabic-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansAvestan-Regular.otf">
@@ -142,13 +162,19 @@
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansElbasan-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansElymaic-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansGlagolitic-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansGothic-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
-    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansGrantha-Regular.otf">
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansGunjalaGondi-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansHanifiRohingya-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansHanunoo-Regular.otf">
@@ -176,9 +202,6 @@
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansKharoshthi-Regular.otf">
-      <Filter>fonts\noto</Filter>
-    </bin2coff__otf_>
-    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansKhojki-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansKhudawadi-Regular.otf">
@@ -217,7 +240,13 @@
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansMarchen-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansMasaramGondi-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansMath-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansMedefaidrin-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansMeeteiMayek-Regular.otf">
@@ -256,6 +285,9 @@
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansNewa-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansNushu-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansOgham-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
@@ -277,10 +309,16 @@
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansOldPersian-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansOldSogdian-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansOldSouthArabian-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansOldTurkic-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansOriya-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansOsage-Regular.otf">
@@ -328,7 +366,13 @@
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansSiddham-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansSogdian-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansSoraSompeng-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansSoyombo-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansSundanese-Regular.otf">
@@ -355,6 +399,9 @@
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansTaiLe-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansTaiTham-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansTaiViet-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
@@ -376,10 +423,16 @@
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansVai-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansWancho-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansWarangCiti-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansYi-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSansZanabazarSquare-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerif-Regular.otf">
@@ -394,10 +447,22 @@
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifBalinese-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifBengali-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifDevanagari-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifDogra-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifEthiopic-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifGeorgian-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifGrantha-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifGujarati-Regular.otf">
@@ -415,10 +480,19 @@
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifKhmer-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifKhojki-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifLao-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifMalayalam-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifMyanmar-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifNyiakengPuachueHmong-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifSinhala-Regular.otf">
@@ -430,68 +504,37 @@
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifTangut-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifTelugu-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifThai-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
     <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifTibetan-Regular.otf">
       <Filter>fonts\noto</Filter>
     </bin2coff__otf_>
+    <bin2coff__otf_ Include="..\..\resources\fonts\noto\NotoSerifYezidi-Regular.otf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__otf_>
+    <!-- DUMP:OTF -->
   </ItemGroup>
   <ItemGroup>
-    <bin2coff__cff_ Include="..\..\resources\fonts\sil\CharisSIL.cff">
-      <Filter>fonts\sil</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\sil\CharisSIL-Bold.cff">
-      <Filter>fonts\sil</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\sil\CharisSIL-BoldItalic.cff">
-      <Filter>fonts\sil</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\sil\CharisSIL-Italic.cff">
-      <Filter>fonts\sil</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\Dingbats.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusMonoPS-Bold.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusMonoPS-BoldItalic.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusMonoPS-Italic.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusMonoPS-Regular.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusRoman-Bold.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusRoman-BoldItalic.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusRoman-Italic.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusRoman-Regular.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusSans-Bold.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusSans-BoldItalic.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusSans-Italic.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\NimbusSans-Regular.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
-    <bin2coff__cff_ Include="..\..\resources\fonts\urw\StandardSymbolsPS.cff">
-      <Filter>fonts\urw</Filter>
-    </bin2coff__cff_>
+    <bin2coff__ttc_ Include="..\..\resources\fonts\han\SourceHanSerif-Regular.ttc">
+      <Filter>fonts\han</Filter>
+    </bin2coff__ttc_>
+    <!-- DUMP:TTC -->
+  </ItemGroup>
+  <ItemGroup>
+    <bin2coff__ttf_ Include="..\..\resources\fonts\droid\DroidSansFallback.ttf">
+      <Filter>fonts\droid</Filter>
+    </bin2coff__ttf_>
+    <bin2coff__ttf_ Include="..\..\resources\fonts\droid\DroidSansFallbackFull.ttf">
+      <Filter>fonts\droid</Filter>
+    </bin2coff__ttf_>
+    <bin2coff__ttf_ Include="..\..\resources\fonts\noto\NotoEmoji-Regular.ttf">
+      <Filter>fonts\noto</Filter>
+    </bin2coff__ttf_>
+    <!-- DUMP:TTF -->
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dummy.c" />

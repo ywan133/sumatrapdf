@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_STREAM_H
 #define MUPDF_FITZ_STREAM_H
 
@@ -33,6 +55,20 @@ typedef struct fz_stream fz_stream;
 */
 fz_stream *fz_open_file(fz_context *ctx, const char *filename);
 
+/**
+	Do the same as fz_open_file, but delete the file upon close.
+*/
+fz_stream *fz_open_file_autodelete(fz_context *ctx, const char *filename);
+
+/**
+	Open the named file and wrap it in a stream.
+
+	Does the same as fz_open_file, but in the event the file
+	does not open, it will return NULL rather than throw an
+	exception.
+*/
+fz_stream *fz_try_open_file(fz_context *ctx, const char *name);
+
 #ifdef _WIN32
 /**
 	Open the named file and wrap it in a stream.
@@ -44,6 +80,14 @@ fz_stream *fz_open_file(fz_context *ctx, const char *filename);
 */
 fz_stream *fz_open_file_w(fz_context *ctx, const wchar_t *filename);
 #endif /* _WIN32 */
+
+/**
+	Return the filename (UTF-8 encoded) from which a stream was opened.
+
+	Returns NULL if the filename is not available (or the stream was
+	opened from a source other than a file).
+*/
+const char *fz_stream_filename(fz_context *ctx, fz_stream *stm);
 
 /**
 	Open a block of memory as a stream.
@@ -114,6 +158,10 @@ int64_t fz_tell(fz_context *ctx, fz_stream *stm);
 	offset: The offset to seek to.
 
 	whence: From where the offset is measured (see fseek).
+	SEEK_SET - start of stream.
+	SEEK_CUR - current position.
+	SEEK_END - end of stream.
+
 */
 void fz_seek(fz_context *ctx, fz_stream *stm, int64_t offset, int whence);
 
@@ -159,6 +207,14 @@ fz_buffer *fz_read_all(fz_context *ctx, fz_stream *stm, size_t initial);
 fz_buffer *fz_read_file(fz_context *ctx, const char *filename);
 
 /**
+	Read all the contents of a file into a buffer.
+
+	Returns NULL if the file does not exist, otherwise
+	behaves exactly as fz_read_file.
+*/
+fz_buffer *fz_try_read_file(fz_context *ctx, const char *filename);
+
+/**
 	fz_read_[u]int(16|24|32|64)(_le)?
 
 	Read a 16/32/64 bit signed/unsigned integer from stream,
@@ -194,6 +250,27 @@ float fz_read_float(fz_context *ctx, fz_stream *stm);
 	string including the terminator into the buffer).
 */
 void fz_read_string(fz_context *ctx, fz_stream *stm, char *buffer, int len);
+
+/**
+	Read a utf-8 rune from a stream.
+
+	In the event of encountering badly formatted utf-8 codes
+	(such as a leading code with an unexpected number of following
+	codes) no error/exception is given, but undefined values may be
+	returned.
+*/
+int fz_read_rune(fz_context *ctx, fz_stream *in);
+
+/**
+	Read a utf-16 rune from a stream. (little endian and
+	big endian respectively).
+
+	In the event of encountering badly formatted utf-16 codes
+	(mismatched surrogates) no error/exception is given, but
+	undefined values may be returned.
+*/
+int fz_read_utf16_le(fz_context *ctx, fz_stream *stm);
+int fz_read_utf16_be(fz_context *ctx, fz_stream *stm);
 
 /**
 	A function type for use when implementing
@@ -275,9 +352,12 @@ fz_stream *fz_new_stream(fz_context *ctx, void *state, fz_stream_next_fn *next, 
 
 	truncated: Flag to store success/failure indication in.
 
+	worst_case: 0 for unknown, otherwise an upper bound for the
+	size of the stream.
+
 	Returns a buffer created from reading from the stream.
 */
-fz_buffer *fz_read_best(fz_context *ctx, fz_stream *stm, size_t initial, int *truncated);
+fz_buffer *fz_read_best(fz_context *ctx, fz_stream *stm, size_t initial, int *truncated, size_t worst_case);
 
 /**
 	Read a line from stream into the buffer until either a
@@ -288,6 +368,18 @@ fz_buffer *fz_read_best(fz_context *ctx, fz_stream *stm, size_t initial, int *tr
 	no characters have been read.
 */
 char *fz_read_line(fz_context *ctx, fz_stream *stm, char *buf, size_t max);
+
+/**
+	Skip over a given string in a stream. Return 0 if successfully
+	skipped, non-zero otherwise. As many characters will be skipped
+	over as matched in the string.
+*/
+int fz_skip_string(fz_context *ctx, fz_stream *stm, const char *str);
+
+/**
+	Skip over whitespace (bytes <= 32) in a stream.
+*/
+void fz_skip_space(fz_context *ctx, fz_stream *stm);
 
 /**
 	Ask how many bytes are available immediately from
@@ -319,6 +411,7 @@ static inline size_t fz_available(fz_context *ctx, fz_stream *stm, size_t max)
 	fz_catch(ctx)
 	{
 		fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+		fz_report_error(ctx);
 		fz_warn(ctx, "read error; treating as end of file");
 		stm->error = 1;
 		c = EOF;
@@ -353,6 +446,7 @@ static inline int fz_read_byte(fz_context *ctx, fz_stream *stm)
 	fz_catch(ctx)
 	{
 		fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+		fz_report_error(ctx);
 		fz_warn(ctx, "read error; treating as end of file");
 		stm->error = 1;
 		c = EOF;
@@ -387,6 +481,7 @@ static inline int fz_peek_byte(fz_context *ctx, fz_stream *stm)
 	fz_catch(ctx)
 	{
 		fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+		fz_report_error(ctx);
 		fz_warn(ctx, "read error; treating as end of file");
 		stm->error = 1;
 		c = EOF;

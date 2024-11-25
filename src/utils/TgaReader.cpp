@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "BaseUtil.h"
@@ -71,7 +71,9 @@ static_assert(sizeof(TgaFooter) == 26, "wrong size of TgaFooter structure");
 static_assert(sizeof(TgaExtArea) == 495, "wrong size of TgaExtArea structure");
 
 static u16 readLE16(u8* data) {
-    return data[0] | (data[1] << 8);
+    u16 v0 = *data++;
+    u16 v1 = (u16)*data << 8;
+    return v0 | v1;
 }
 
 static u16 convLE(u16 x) {
@@ -80,7 +82,11 @@ static u16 convLE(u16 x) {
 }
 
 static u32 readLE32(u8* data) {
-    return data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+    u32 v0 = *data++;
+    u32 v1 = (u32)*data++ << 8;
+    u32 v2 = (u32)*data++ << 16;
+    u32 v3 = (u32)*data << 24;
+    return v0 | v1 | v2 | v3;
 }
 
 static u32 convLE(u32 x) {
@@ -175,7 +181,7 @@ static ImageAlpha GetAlphaType(const u8* data, size_t len) {
 }
 
 // checks whether this could be data for a TGA image
-bool HasSignature(std::span<u8> d) {
+bool HasSignature(const ByteSlice& d) {
     size_t len = d.size();
     const u8* data = (const u8*)d.data();
     if (HasVersion2Footer(data, len)) {
@@ -205,7 +211,7 @@ static void SetImageProperty(Gdiplus::Bitmap* bmp, PROPID id, const char* asciiV
     item.value = (void*)asciiValue;
     item.length = (ULONG)(str::Len(asciiValue) + 1);
     Gdiplus::Status ok = bmp->SetPropertyItem(&item);
-    CrashIf(ok != Gdiplus::Ok);
+    ReportIf(ok != Gdiplus::Ok);
 }
 
 static bool IsFieldSet(const char* field, size_t len, bool isBinary = false) {
@@ -283,7 +289,7 @@ static inline void CopyPixel(u8* dst, const u8* src, int n) {
             *(u32*)dst = *(u32*)src;
             break;
         default:
-            CrashIf(true);
+            ReportIf(true);
     }
 }
 
@@ -322,7 +328,7 @@ static void ReadPixel(ReadState& s, u8* dst) {
     }
 }
 
-Gdiplus::Bitmap* ImageFromData(std::span<u8> d) {
+Gdiplus::Bitmap* ImageFromData(const ByteSlice& d) {
     size_t len = d.size();
     const u8* data = (const u8*)d.data();
 
@@ -330,7 +336,7 @@ Gdiplus::Bitmap* ImageFromData(std::span<u8> d) {
         return nullptr;
     }
 
-    ReadState s = {0};
+    ReadState s = {nullptr};
     const TgaHeader* headerLE = (const TgaHeader*)d.data();
     s.data = data + sizeof(TgaHeader) + headerLE->idLength;
     s.end = data + len;
@@ -374,7 +380,6 @@ Gdiplus::Bitmap* ImageFromData(std::span<u8> d) {
         return nullptr;
     }
     CopyMetadata(data, len, &bmp);
-    // hack to avoid the use of ::new (because there won't be a corresponding ::delete)
     return bmp.Clone(0, 0, w, h, format);
 }
 
@@ -382,7 +387,7 @@ inline bool memeq3(const char* pix1, const char* pix2) {
     return *(WORD*)pix1 == *(WORD*)pix2 && pix1[2] == pix2[2];
 }
 
-std::span<u8> SerializeBitmap(HBITMAP hbmp) {
+ByteSlice SerializeBitmap(HBITMAP hbmp) {
     BITMAP bmpInfo;
     GetObject(hbmp, sizeof(BITMAP), &bmpInfo);
     if ((ULONG)bmpInfo.bmWidth > USHRT_MAX || (ULONG)bmpInfo.bmHeight > USHRT_MAX) {
@@ -392,12 +397,12 @@ std::span<u8> SerializeBitmap(HBITMAP hbmp) {
     WORD w = (WORD)bmpInfo.bmWidth;
     WORD h = (WORD)bmpInfo.bmHeight;
     int stride = ((w * 3 + 3) / 4) * 4;
-    AutoFree bmpData((char*)malloc(stride * h));
+    char* bmpData = AllocArrayTemp<char>(stride * h);
     if (!bmpData) {
         return {};
     }
 
-    BITMAPINFO bmi = {0};
+    BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
     bmi.bmiHeader.biWidth = w;
     bmi.bmiHeader.biHeight = h;
@@ -412,7 +417,7 @@ std::span<u8> SerializeBitmap(HBITMAP hbmp) {
     }
     ReleaseDC(nullptr, hDC);
 
-    TgaHeader headerLE = {0};
+    TgaHeader headerLE{};
     headerLE.imageType = Type_Truecolor_RLE;
     headerLE.width = convLE(w);
     headerLE.height = convLE(h);

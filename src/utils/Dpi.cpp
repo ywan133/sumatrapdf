@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2024 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
@@ -20,43 +20,21 @@ Per-Monitor DPI Aware:
  (as indicated by the WM_DPICHANGED window message).
 */
 
-/*
-If you have HWND, call DpiScaleX(HWND, x) or DpiScaleY(HWND, y).
-If we don't have dpi information for this HWND, we'll create it.
+#include <shellscalingapi.h>
 
-On WM_DPICHANGED call DpiUpdate(HWND) so that we can update
-dpi information for that window.
-
-On WM_DESTROY call DpiRemove(HWND) so that we remove it.
-
-For even faster access you can cache struct Dpi somewhere.
-
-Note: maybe I don't need keep a per-HWND cache and instead
-always call GetDpiXY() ?
-*/
-
-static HWND gLastHwndParent = nullptr;
-static HWND gLastHwnd = nullptr;
-static uint gLastDpi = 0;
-
-void DpiReset() {
-    gLastHwndParent = nullptr;
-    gLastHwnd = nullptr;
-    gLastDpi = 0;
-}
-
-// Uncached getting of dpi
+// get uncached dpi
 int DpiGetForHwnd(HWND hwnd) {
+    // GetDpiForWindow() returns defult 96 DPI for desktop window
+    // (most likely desktop has DPI_AWARENESS set to UNAWARE)
+    if (!hwnd || (hwnd == HWND_DESKTOP) || (hwnd == GetDesktopWindow())) {
+        goto GetGlobalDpi;
+    }
+
     if (DynGetDpiForWindow) {
-        // HWND_DESKTOP is 0 and not really HWND
-        // GetDpiForWindow(HWND_DESKTOP) returns 0
-        if (hwnd == HWND_DESKTOP) {
-            hwnd = GetDesktopWindow();
-        }
         uint dpi = DynGetDpiForWindow(hwnd);
-        // returns 0 for HWND_DESKTOP,
+        // returns 0 for HWND_DESKTOP
         if (dpi > 0) {
-            CrashIf(dpi < 72);
+            ReportIf(dpi < 72);
             return (int)dpi;
         }
     }
@@ -65,49 +43,22 @@ int DpiGetForHwnd(HWND hwnd) {
     // TODO: only available in 8.1
     uint dpiX = 96, dpiY = 96;
     HMONITOR h = MonitorFromWindow(hwnd, 0);
-    if (h != nullptr ) {
-        HRESULT hr = GetDpiForMonitor(h, 0 /* MDT_Effective_DPI */, &dpiX, &dpiY);
+    if (h != nullptr) {
+        HRESULT hr = GetDpiForMonitor(h, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
         if (hr == S_OK) {
-            scaleX = (int)dpiX;
-            scaleY = (int)dpiY;
-            return;
+            return (int)dpiX;
         }
+    }
 #endif
-
+GetGlobalDpi:
     ScopedGetDC dc(hwnd);
     int dpi = GetDeviceCaps(dc, LOGPIXELSX);
     return dpi;
 }
 
 int DpiGet(HWND hwnd) {
-    if (hwnd == nullptr) {
-        hwnd = GetDesktopWindow();
-        CrashIf(!hwnd);
-    }
-    if (hwnd == gLastHwnd) {
-        CrashIf(gLastDpi == 0);
-        return gLastDpi;
-    }
-
-    HWND hwndParent = hwnd;
-    // TODO: not sure if it's worth, perf-wise, to go up level
-    while (true) {
-        HWND p = GetParent(hwndParent);
-        if (p == nullptr) {
-            break;
-        }
-        hwndParent = p;
-    }
-    if (hwndParent == gLastHwndParent) {
-        CrashIf(gLastDpi == 0);
-        return gLastDpi;
-    }
-
     int dpi = DpiGetForHwnd(hwnd);
     dpi = RoundUp(dpi, 4);
-    gLastDpi = dpi;
-    gLastHwnd = hwnd;
-    gLastHwndParent = hwndParent;
     return dpi;
 }
 
@@ -125,11 +76,8 @@ void DpiScale(HWND hwnd, int& x1, int& x2) {
     x2 = nx2;
 }
 
-int DpiScale(int x) {
-    int dpi = gLastDpi;
-    if (dpi == 0) {
-        HWND hwnd = GetDesktopWindow();
-        dpi = DpiGetForHwnd(hwnd);
-    }
-    return MulDiv(x, dpi, 96);
+int DpiScale(HDC hdc, int x) {
+    int dpi = GetDeviceCaps(hdc, LOGPIXELSX);
+    int res = MulDiv(x, dpi, 96);
+    return res;
 }

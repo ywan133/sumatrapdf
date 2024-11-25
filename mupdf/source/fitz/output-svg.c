@@ -1,10 +1,28 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <limits.h>
-
-#ifndef PATH_MAX
-#define PATH_MAX 4096
-#endif
 
 typedef struct
 {
@@ -36,8 +54,17 @@ svg_begin_page(fz_context *ctx, fz_document_writer *wri_, fz_rect mediabox)
 
 	wri->count += 1;
 
-	fz_format_output_path(ctx, path, sizeof path, wri->path, wri->count);
-	wri->out = fz_new_output_with_path(ctx, path, 0);
+	if (wri->path)
+	{
+		fz_format_output_path(ctx, path, sizeof path, wri->path, wri->count);
+		wri->out = fz_new_output_with_path(ctx, path, 0);
+	}
+	else
+	{
+		if (!wri->out)
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot write multiple pages to a single SVG output");
+	}
+
 	return fz_new_svg_device_with_id(ctx, wri->out, w, h, wri->text_format, wri->reuse_images, &wri->id);
 }
 
@@ -91,6 +118,38 @@ fz_new_svg_writer(fz_context *ctx, const char *path, const char *args)
 			if (fz_option_eq(val, "yes"))
 				wri->reuse_images = 0;
 		wri->path = fz_strdup(ctx, path ? path : "out-%04d.svg");
+	}
+	fz_catch(ctx)
+	{
+		fz_free(ctx, wri);
+		fz_rethrow(ctx);
+	}
+
+	return (fz_document_writer*)wri;
+}
+
+fz_document_writer *
+fz_new_svg_writer_with_output(fz_context *ctx, fz_output *out, const char *args)
+{
+	const char *val;
+	fz_svg_writer *wri = fz_new_derived_document_writer(ctx, fz_svg_writer, svg_begin_page, svg_end_page, NULL, svg_drop_writer);
+
+	wri->text_format = FZ_SVG_TEXT_AS_PATH;
+	wri->reuse_images = 1;
+
+	fz_try(ctx)
+	{
+		if (fz_has_option(ctx, args, "text", &val))
+		{
+			if (fz_option_eq(val, "text"))
+				wri->text_format = FZ_SVG_TEXT_AS_TEXT;
+			else if (fz_option_eq(val, "path"))
+				wri->text_format = FZ_SVG_TEXT_AS_PATH;
+		}
+		if (fz_has_option(ctx, args, "no-reuse-images", &val))
+			if (fz_option_eq(val, "yes"))
+				wri->reuse_images = 0;
+		wri->out = out;
 	}
 	fz_catch(ctx)
 	{

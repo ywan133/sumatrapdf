@@ -1,35 +1,33 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 #include "utils/BaseUtil.h"
 #include "utils/ScopedWin.h"
+#include "utils/WinUtil.h"
 #include "utils/FileUtil.h"
 #include "utils/SettingsUtil.h"
-#include "utils/Log.h"
 
-#include "wingui/TreeModel.h"
-
-#include "Annotation.h"
-#include "EngineBase.h"
-#include "DisplayMode.h"
 #define INCLUDE_SETTINGSSTRUCTS_METADATA
-#include "SettingsStructs.h"
+#include "Settings.h"
+
 #include "GlobalPrefs.h"
+
+#include "utils/Log.h"
 
 GlobalPrefs* gGlobalPrefs = nullptr;
 
-DisplayState* NewDisplayState(const WCHAR* filePath) {
-    DisplayState* ds = (DisplayState*)DeserializeStruct(&gFileStateInfo, nullptr);
-    str::ReplacePtr(&ds->filePath, filePath);
-    return ds;
+FileState* NewDisplayState(const char* filePath) {
+    FileState* fs = (FileState*)DeserializeStruct(&gFileStateInfo, nullptr);
+    SetFileStatePath(fs, filePath);
+    return fs;
 }
 
-void DeleteDisplayState(DisplayState* ds) {
-    delete ds->thumbnail;
-    FreeStruct(&gFileStateInfo, ds);
+void DeleteDisplayState(FileState* fs) {
+    delete fs->thumbnail;
+    FreeStruct(&gFileStateInfo, fs);
 }
 
-Favorite* NewFavorite(int pageNo, const WCHAR* name, const WCHAR* pageLabel) {
+Favorite* NewFavorite(int pageNo, const char* name, const char* pageLabel) {
     Favorite* fav = (Favorite*)DeserializeStruct(&gFavoriteInfo, nullptr);
     fav->pageNo = pageNo;
     fav->name = str::Dup(name);
@@ -46,10 +44,11 @@ GlobalPrefs* NewGlobalPrefs(const char* data) {
 }
 
 // prevData is used to preserve fields that exists in prevField but not in GlobalPrefs
-std::span<u8> SerializeGlobalPrefs(GlobalPrefs* prefs, const char* prevData) {
+// caller has to free()
+ByteSlice SerializeGlobalPrefs(GlobalPrefs* prefs, const char* prevData) {
     if (!prefs->rememberStatePerDocument || !prefs->rememberOpenedFiles) {
-        for (DisplayState* ds : *prefs->fileStates) {
-            ds->useDefaultState = true;
+        for (FileState* fs : *prefs->fileStates) {
+            fs->useDefaultState = true;
         }
         // prevent unnecessary settings from being written out
         u16 fieldCount = 0;
@@ -63,7 +62,7 @@ std::span<u8> SerializeGlobalPrefs(GlobalPrefs* prefs, const char* prevData) {
         gFileStateInfo.fieldCount = fieldCount;
     }
 
-    std::span<u8> serialized = SerializeStruct(&gGlobalPrefsInfo, prefs, prevData);
+    ByteSlice serialized = SerializeStruct(&gGlobalPrefsInfo, prefs, prevData);
 
     if (!prefs->rememberStatePerDocument || !prefs->rememberOpenedFiles) {
         gFileStateInfo.fieldCount = dimof(gFileStateFields);
@@ -77,7 +76,7 @@ void DeleteGlobalPrefs(GlobalPrefs* gp) {
         return;
     }
 
-    for (DisplayState* ds : *gp->fileStates) {
+    for (FileState* ds : *gp->fileStates) {
         delete ds->thumbnail;
     }
     FreeStruct(&gGlobalPrefsInfo, gp);
@@ -87,22 +86,21 @@ SessionData* NewSessionData() {
     return (SessionData*)DeserializeStruct(&gSessionDataInfo, nullptr);
 }
 
-TabState* NewTabState(DisplayState* ds) {
+TabState* NewTabState(FileState* fs) {
     TabState* state = (TabState*)DeserializeStruct(&gTabStateInfo, nullptr);
-    AutoFreeStr dsFilePathA = strconv::WstrToUtf8(ds->filePath);
-    str::ReplacePtr(&state->filePath, dsFilePathA.Get());
-    str::ReplacePtr(&state->displayMode, ds->displayMode);
-    state->pageNo = ds->pageNo;
-    str::ReplacePtr(&state->zoom, ds->zoom);
-    state->rotation = ds->rotation;
-    state->scrollPos = ds->scrollPos;
-    state->showToc = ds->showToc;
-    *state->tocState = *ds->tocState;
+    str::ReplaceWithCopy(&state->filePath, fs->filePath);
+    str::ReplaceWithCopy(&state->displayMode, fs->displayMode);
+    state->pageNo = fs->pageNo;
+    str::ReplaceWithCopy(&state->zoom, fs->zoom);
+    state->rotation = fs->rotation;
+    state->scrollPos = fs->scrollPos;
+    state->showToc = fs->showToc;
+    *state->tocState = *fs->tocState;
     return state;
 }
 
 void ResetSessionState(Vec<SessionData*>* sessionData) {
-    CrashIf(!sessionData);
+    ReportIf(!sessionData);
     if (!sessionData) {
         return;
     }
@@ -110,4 +108,39 @@ void ResetSessionState(Vec<SessionData*>* sessionData) {
         FreeStruct(&gSessionDataInfo, data);
     }
     sessionData->Reset();
+}
+
+ParsedColor* GetParsedColor(const char* s, ParsedColor& parsed) {
+    if (parsed.wasParsed) {
+        return &parsed;
+    }
+    ParseColor(parsed, s);
+    return &parsed;
+}
+
+COLORREF GetParsedCOLORREF(const char* s, ParsedColor& parsed, COLORREF def) {
+    if (parsed.wasParsed) {
+        return parsed.col;
+    }
+    ParseColor(parsed, s);
+    if (parsed.wasParsed) {
+        return parsed.col;
+    }
+    return def;
+}
+
+void SetFileStatePath(FileState* fs, const char* path) {
+    if (fs->filePath && str::EqI(fs->filePath, path)) {
+        return;
+    }
+    str::ReplaceWithCopy(&fs->filePath, path);
+}
+
+void SetFileStatePath(FileState* fs, const WCHAR* path) {
+    char* pathA = ToUtf8Temp(path);
+    SetFileStatePath(fs, pathA);
+}
+
+Themes* ParseThemes(const char* data) {
+    return (Themes*)DeserializeStruct(&gThemesInfo, data);
 }

@@ -6,9 +6,9 @@ if (scriptArgs.length != 1 && scriptArgs.length != 3) {
 	quit();
 }
 
-var doc = new PDFDocument(scriptArgs[0]);
+var doc = Document.openDocument(scriptArgs[0]);
 var Root = doc.getTrailer().Root;
-if (!("EmbeddedFiles" in Root.Names)) {
+if (Root.Names == undefined || !("EmbeddedFiles" in Root.Names)) {
 	print("Document has no embedded files!");
 	quit();
 }

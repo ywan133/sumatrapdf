@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /*
  * mudraw -- command line tool for drawing and converting documents
  */
@@ -12,12 +34,15 @@
 #include "mupdf/helpers/mu-threads.h"
 #endif
 
+#ifdef HAVE_SMARTOFFICE
+#include "sodochandler.h"
+#endif
+
 #include <string.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <sys/stat.h>
-#ifdef _MSC_VER
+#ifdef _WIN32
 struct timeval;
 struct timezone;
 int gettimeofday(struct timeval *tv, struct timezone *tz);
@@ -28,11 +53,8 @@ int gettimeofday(struct timeval *tv, struct timezone *tz);
 #include <windows.h>
 #include <direct.h> /* for getcwd */
 #else
+#include <sys/stat.h> /* for mkdir */
 #include <unistd.h> /* for getcwd */
-#endif
-
-#ifndef PATH_MAX
-#define PATH_MAX 4096
 #endif
 
 /* Allow for windows stdout being made binary */
@@ -63,6 +85,7 @@ enum {
 	OUT_PGM,
 	OUT_PKM,
 	OUT_PNG,
+	OUT_J2K,
 	OUT_PNM,
 	OUT_PPM,
 	OUT_PS,
@@ -107,6 +130,9 @@ static const suffix_t suffix_table[] =
 	{ ".stext.json", OUT_STEXT_JSON, 0 },
 
 	/* And the 'single extension' ones go last. */
+#if FZ_ENABLE_JPX
+	{ ".j2k", OUT_J2K, 0 },
+#endif
 	{ ".png", OUT_PNG, 0 },
 	{ ".pgm", OUT_PGM, 0 },
 	{ ".ppm", OUT_PPM, 0 },
@@ -169,6 +195,7 @@ typedef struct
 static const format_cs_table_t format_cs_table[] =
 {
 	{ OUT_PNG, CS_RGB, { CS_GRAY, CS_GRAY_ALPHA, CS_RGB, CS_RGB_ALPHA, CS_ICC } },
+	{ OUT_J2K, CS_RGB, { CS_GRAY, CS_RGB } },
 	{ OUT_PPM, CS_RGB, { CS_GRAY, CS_RGB } },
 	{ OUT_PNM, CS_GRAY, { CS_GRAY, CS_RGB } },
 	{ OUT_PAM, CS_RGB_ALPHA, { CS_GRAY, CS_GRAY_ALPHA, CS_RGB, CS_RGB_ALPHA, CS_CMYK, CS_CMYK_ALPHA } },
@@ -202,17 +229,6 @@ static const format_cs_table_t format_cs_table[] =
 	{ OUT_OCR_STEXT_JSON, CS_GRAY, { CS_GRAY } },
 	{ OUT_OCR_TRACE, CS_GRAY, { CS_GRAY } },
 };
-
-time_t
-stat_mtime(const char *path)
-{
-	struct stat info;
-
-	if (stat(path, &info) < 0)
-		return 0;
-
-	return info.st_mtime;
-}
 
 /*
 	In the presence of pthreads or Windows threads, we can offer
@@ -298,6 +314,7 @@ static int res_specified = 0;
 static int width = 0;
 static int height = 0;
 static int fit = 0;
+static int page_box = FZ_CROP_BOX;
 
 static float layout_w = FZ_DEFAULT_LAYOUT_W;
 static float layout_h = FZ_DEFAULT_LAYOUT_H;
@@ -327,6 +344,7 @@ fz_colorspace *proof_cs = NULL;
 static const char *icc_filename = NULL;
 static float gamma_value = 1;
 static int invert = 0;
+static int s_kill = 0; /* Using `kill` causes problems on Android. */
 static int band_height = 0;
 static int lowmemory = 0;
 
@@ -348,9 +366,19 @@ static worker_t *workers;
 static fz_band_writer *bander = NULL;
 
 static const char *layer_config = NULL;
+static int layer_list = 0;
+static int layer_on[1000];
+static int layer_off[1000];
+static int layer_on_len;
+static int layer_off_len;
+
+static int skew_correct;
+static float skew_angle;
+static int skew_border;
 
 static const char ocr_language_default[] = "eng";
 static const char *ocr_language = ocr_language_default;
+static const char *ocr_datadir = NULL;
 
 static struct {
 	int active;
@@ -386,13 +414,12 @@ static struct {
 static int usage(void)
 {
 	fprintf(stderr,
-		"mudraw version " FZ_VERSION "\n"
-		"Usage: mudraw [options] file [pages]\n"
+		"usage: mudraw [options] file [pages]\n"
 		"\t-p -\tpassword\n"
 		"\n"
 		"\t-o -\toutput file name (%%d for page number)\n"
 		"\t-F -\toutput format (default inferred from output file name)\n"
-		"\t\traster: png, pnm, pam, pbm, pkm, pwg, pcl, ps\n"
+		"\t\traster: png, pnm, pam, pbm, pkm, pwg, pcl, ps, pdf, j2k\n"
 		"\t\tvector: svg, pdf, trace, ocr.trace\n"
 		"\t\ttext: txt, html, xhtml, stext, stext.json\n"
 #ifndef OCR_DISABLED
@@ -413,7 +440,8 @@ static int usage(void)
 		"\t-r -\tresolution in dpi (default: 72)\n"
 		"\t-w -\twidth (in pixels) (maximum width if -r is specified)\n"
 		"\t-h -\theight (in pixels) (maximum height if -r is specified)\n"
-		"\t-f -\tfit width and/or height exactly; ignore original aspect ratio\n"
+		"\t-f\tfit width and/or height exactly; ignore original aspect ratio\n"
+		"\t-b -\tuse named page box (MediaBox, CropBox, BleedBox, TrimBox, or ArtBox)\n"
 		"\t-B -\tmaximum band_height (pXm, pcl, pclm, ocr.pdf, ps, psd and png output only)\n"
 #ifndef DISABLE_MUTHREADS
 		"\t-T -\tnumber of threads to use for rendering (banded mode only)\n"
@@ -436,8 +464,11 @@ static int usage(void)
 		"\t-A -\tnumber of bits of antialiasing (0 to 8)\n"
 		"\t-A -/-\tnumber of bits of antialiasing (0 to 8) (graphics, text)\n"
 		"\t-l -\tminimum stroked line width (in pixels)\n"
+		"\t-K\tdo not draw text\n"
+		"\t-KK\tonly draw text\n"
 		"\t-D\tdisable use of display list\n"
 		"\t-i\tignore errors\n"
+		"\t-m -\tlimit memory usage in bytes\n"
 		"\t-L\tlow memory mode (avoid caching, clear objects after each page)\n"
 #ifndef DISABLE_MUTHREADS
 		"\t-P\tparallel interpretation/rendering\n"
@@ -457,13 +488,21 @@ static int usage(void)
 #endif
 #ifndef OCR_DISABLED
 		"\t-t -\tSpecify language/script for OCR (default: eng)\n"
+		"\t-d -\tSpecify path for OCR files (default: rely on TESSDATA_PREFIX environment variable)\n"
+		"\t-k -{,-}\tSkew correction options. auto or angle {0=increase size, 1=maintain size, 2=decrease size}\n"
 #else
 		"\t-t -\tSpecify language/script for OCR (default: eng) (disabled)\n"
+		"\t-d -\tSpecify path for OCR files (default: rely on TESSDATA_PREFIX environment variable) (disabled)\n"
+		"\t-k -{,-}\tSkew correction options. auto or angle {0=increase size, 1=maintain size, 2=decrease size} (disabled)\n"
 #endif
 		"\n"
 		"\t-y l\tList the layer configs to stderr\n"
 		"\t-y -\tSelect layer config (by number)\n"
 		"\t-y -{,-}*\tSelect layer config (by number), and toggle the listed entries\n"
+		"\n"
+		"\t-Y\tList individual layers to stderr\n"
+		"\t-z -\tHide individual layer\n"
+		"\t-Z -\tShow individual layer\n"
 		"\n"
 		"\tpages\tcomma separated list of page numbers and ranges\n"
 		);
@@ -535,7 +574,15 @@ file_level_headers(fz_context *ctx)
 		char options[300];
 		fz_pdfocr_options opts = { 0 };
 		fz_snprintf(options, sizeof(options), "compression=flate,ocr-language=%s", ocr_language);
+		if (ocr_datadir)
+		{
+			fz_strlcat(options, ",ocr-datadir=", sizeof (options));
+			fz_strlcat(options, ocr_datadir, sizeof (options));
+		}
 		fz_parse_pdfocr_options(ctx, &opts, options);
+		opts.skew_correct = skew_correct;
+		opts.skew_border = skew_border;
+		opts.skew_angle = skew_angle;
 		bander = fz_new_pdfocr_band_writer(ctx, out, &opts);
 	}
 }
@@ -557,7 +604,31 @@ file_level_trailers(fz_context *ctx)
 		fz_write_ps_file_trailer(ctx, out, output_pagenum);
 
 	if (output_format == OUT_PCLM || output_format == OUT_OCR_PDF)
+	{
+		fz_close_band_writer(ctx, bander);
 		fz_drop_band_writer(ctx, bander);
+		bander = NULL;
+	}
+}
+
+static void apply_kill_switch(fz_device *dev)
+{
+	if (s_kill == 1)
+	{
+		/* kill all non-clipping text operators */
+		dev->fill_text = NULL;
+		dev->stroke_text = NULL;
+		dev->ignore_text = NULL;
+	}
+	else if (s_kill == 2)
+	{
+		/* kill all non-clipping path, image, and shading operators */
+		dev->fill_path = NULL;
+		dev->stroke_path = NULL;
+		dev->fill_shade = NULL;
+		dev->fill_image = NULL;
+		dev->fill_image_mask = NULL;
+	}
 }
 
 static void drawband(fz_context *ctx, fz_page *page, fz_display_list *list, fz_matrix ctm, fz_rect tbounds, fz_cookie *cookie, int band_start, fz_pixmap *pix, fz_bitmap **bit)
@@ -576,6 +647,7 @@ static void drawband(fz_context *ctx, fz_page *page, fz_display_list *list, fz_m
 			fz_clear_pixmap_with_value(ctx, pix, 255);
 
 		dev = fz_new_draw_device_with_proof(ctx, fz_identity, pix, proof_cs);
+		apply_kill_switch(dev);
 		if (lowmemory)
 			fz_enable_device_hints(ctx, dev, FZ_NO_CACHE);
 		if (alphabits_graphics == 0)
@@ -616,29 +688,32 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 	if (list)
 		mediabox = fz_bound_display_list(ctx, list);
 	else
-		mediabox = fz_bound_page(ctx, page);
+		mediabox = fz_bound_page_box(ctx, page, page_box);
 
 	if (output_format == OUT_TRACE || output_format == OUT_OCR_TRACE)
 	{
 		float zoom;
 		fz_matrix ctm;
 		fz_device *pre_ocr_dev = NULL;
+		fz_rect tmediabox;
 
 		zoom = resolution / 72;
 		ctm = fz_pre_scale(fz_rotate(rotation), zoom, zoom);
+		tmediabox = fz_transform_rect(mediabox, ctm);
 
 		fz_var(pre_ocr_dev);
 
 		fz_try(ctx)
 		{
 			fz_write_printf(ctx, out, "<page mediabox=\"%g %g %g %g\">\n",
-					mediabox.x0, mediabox.y0, mediabox.x1, mediabox.y1);
+					tmediabox.x0, tmediabox.y0, tmediabox.x1, tmediabox.y1);
 			dev = fz_new_trace_device(ctx, out);
+			apply_kill_switch(dev);
 			if (output_format == OUT_OCR_TRACE)
 			{
 				pre_ocr_dev = dev;
 				dev = NULL;
-				dev = fz_new_ocr_device(ctx, pre_ocr_dev, ctm, mediabox, 1, ocr_language, NULL, NULL);
+				dev = fz_new_ocr_device(ctx, pre_ocr_dev, ctm, mediabox, 1, ocr_language, ocr_datadir, NULL, NULL);
 			}
 			if (lowmemory)
 				fz_enable_device_hints(ctx, dev, FZ_NO_CACHE);
@@ -669,13 +744,22 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 	{
 		fz_try(ctx)
 		{
+			float zoom;
+			fz_matrix ctm;
+			fz_rect tmediabox;
+
+			zoom = resolution / 72;
+			ctm = fz_pre_scale(fz_rotate(rotation), zoom, zoom);
+			tmediabox = fz_transform_rect(mediabox, ctm);
+
 			fz_write_printf(ctx, out, "<page mediabox=\"%g %g %g %g\">\n",
-					mediabox.x0, mediabox.y0, mediabox.x1, mediabox.y1);
+					tmediabox.x0, tmediabox.y0, tmediabox.x1, tmediabox.y1);
 			dev = fz_new_xmltext_device(ctx, out);
+			apply_kill_switch(dev);
 			if (list)
-				fz_run_display_list(ctx, list, dev, fz_identity, fz_infinite_rect, cookie);
+				fz_run_display_list(ctx, list, dev, ctm, fz_infinite_rect, cookie);
 			else
-				fz_run_page(ctx, page, dev, fz_identity, cookie);
+				fz_run_page(ctx, page, dev, ctm, cookie);
 			fz_write_printf(ctx, out, "</page>\n");
 			fz_close_device(ctx, dev);
 		}
@@ -694,15 +778,24 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 		fz_try(ctx)
 		{
 			fz_rect bbox = fz_empty_rect;
+			float zoom;
+			fz_matrix ctm;
+			fz_rect tmediabox;
+
+			zoom = resolution / 72;
+			ctm = fz_pre_scale(fz_rotate(rotation), zoom, zoom);
+			tmediabox = fz_transform_rect(mediabox, ctm);
+
 			dev = fz_new_bbox_device(ctx, &bbox);
+			apply_kill_switch(dev);
 			if (lowmemory)
 				fz_enable_device_hints(ctx, dev, FZ_NO_CACHE);
 			if (list)
-				fz_run_display_list(ctx, list, dev, fz_identity, fz_infinite_rect, cookie);
+				fz_run_display_list(ctx, list, dev, ctm, fz_infinite_rect, cookie);
 			else
-				fz_run_page(ctx, page, dev, fz_identity, cookie);
+				fz_run_page(ctx, page, dev, ctm, cookie);
 			fz_close_device(ctx, dev);
-			fz_write_printf(ctx, out, "<page bbox=\"%R\" mediabox=\"%R\" />\n", &bbox, &mediabox);
+			fz_write_printf(ctx, out, "<page bbox=\"%R\" mediabox=\"%R\" />\n", &bbox, &tmediabox);
 		}
 		fz_always(ctx)
 		{
@@ -721,6 +814,7 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 		float zoom;
 		fz_matrix ctm;
 		fz_device *pre_ocr_dev = NULL;
+		fz_rect tmediabox;
 
 		zoom = resolution / 72;
 		ctm = fz_pre_scale(fz_rotate(rotation), zoom, zoom);
@@ -730,17 +824,21 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 
 		fz_try(ctx)
 		{
-			fz_stext_options stext_options;
+			fz_stext_options stext_options = { 0 };
 
 			stext_options.flags = (output_format == OUT_HTML ||
 						output_format == OUT_XHTML ||
 						output_format == OUT_OCR_HTML ||
 						output_format == OUT_OCR_XHTML
 						) ? FZ_STEXT_PRESERVE_IMAGES : 0;
+			stext_options.flags |= FZ_STEXT_CLIP;
+			stext_options.flags |= FZ_STEXT_ACCURATE_BBOXES;
 			if (output_format == OUT_STEXT_JSON || output_format == OUT_OCR_STEXT_JSON)
 				stext_options.flags |= FZ_STEXT_PRESERVE_SPANS;
-			text = fz_new_stext_page(ctx, mediabox);
+			tmediabox = fz_transform_rect(mediabox, ctm);
+			text = fz_new_stext_page(ctx, tmediabox);
 			dev = fz_new_stext_device(ctx, text, &stext_options);
+			apply_kill_switch(dev);
 			if (lowmemory)
 				fz_enable_device_hints(ctx, dev, FZ_NO_CACHE);
 			if (output_format == OUT_OCR_TEXT ||
@@ -751,7 +849,7 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 			{
 				pre_ocr_dev = dev;
 				dev = NULL;
-				dev = fz_new_ocr_device(ctx, pre_ocr_dev, ctm, mediabox, 1, ocr_language, NULL, NULL);
+				dev = fz_new_ocr_device(ctx, pre_ocr_dev, ctm, mediabox, 1, ocr_language, ocr_datadir, NULL, NULL);
 			}
 			if (list)
 				fz_run_display_list(ctx, list, dev, ctm, fz_infinite_rect, cookie);
@@ -813,9 +911,12 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 
 		fz_try(ctx)
 		{
+			/* We are ignoring ctm here. Understandable in a way, as resolution makes no sense
+			 * when writing PDFs. Rotation is taken care of by the pdf_add_page call. */
 			pdf_obj *page_obj;
 
 			dev = pdf_page_write(ctx, pdfout, mediabox, &resources, &contents);
+			apply_kill_switch(dev);
 			if (list)
 				fz_run_display_list(ctx, list, dev, fz_identity, fz_infinite_rect, cookie);
 			else
@@ -866,6 +967,7 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 			}
 
 			dev = fz_new_svg_device(ctx, outs, tbounds.x1-tbounds.x0, tbounds.y1-tbounds.y0, FZ_SVG_TEXT_AS_PATH, 1);
+			apply_kill_switch(dev);
 			if (lowmemory)
 				fz_enable_device_hints(ctx, dev, FZ_NO_CACHE);
 			if (list)
@@ -984,16 +1086,18 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 					workers[band].error = 0;
 					workers[band].ctm = ctm;
 					workers[band].tbounds = tbounds;
+					tbounds.y0 += band_height;
+					tbounds.y1 += band_height;
 					memset(&workers[band].cookie, 0, sizeof(fz_cookie));
 					workers[band].list = list;
 					workers[band].pix = fz_new_pixmap_with_bbox(ctx, colorspace, band_ibounds, seps, alpha);
+					workers[band].pix->y += band * band_height;
 					fz_set_pixmap_resolution(ctx, workers[band].pix, resolution, resolution);
 					workers[band].running = 1;
 #ifndef DISABLE_MUTHREADS
 					DEBUG_THREADS(("Worker %d, Pre-triggering band %d\n", band, band));
 					mu_trigger_semaphore(&workers[band].start);
 #endif
-					ctm.f -= drawheight;
 				}
 				pix = workers[0].pix;
 			}
@@ -1039,6 +1143,10 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 					fz_write_header(ctx, bander, pix->w, totalheight, pix->n, pix->alpha, pix->xres, pix->yres, output_pagenum++, pix->colorspace, pix->seps);
 				}
 			}
+			if (output_format == OUT_J2K && bands > 1)
+			{
+				fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't band with J2k output!");
+			}
 
 			for (band = 0; band < bands; band++)
 			{
@@ -1065,6 +1173,14 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 				{
 					if (bander && (pix || bit))
 						fz_write_band(ctx, bander, bit ? bit->stride : pix->stride, drawheight, bit ? bit->samples : pix->samples);
+#if FZ_ENABLE_JPX
+					if (output_format == OUT_J2K)
+					{
+						fz_write_pixmap_as_jpx(ctx, out, pix, 80);
+					}
+#else
+					fz_throw(ctx, FZ_ERROR_GENERIC, "JPX support disabled");
+#endif
 					fz_drop_bitmap(ctx, bit);
 					bit = NULL;
 				}
@@ -1073,6 +1189,7 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 				{
 					worker_t *w = &workers[band % num_workers];
 					w->band = band + num_workers;
+					w->pix->y = band_ibounds.y0 + w->band * band_height;
 					w->ctm = ctm;
 					w->tbounds = tbounds;
 					memset(&w->cookie, 0, sizeof(fz_cookie));
@@ -1082,8 +1199,14 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 					mu_trigger_semaphore(&w->start);
 #endif
 				}
-				ctm.f -= drawheight;
+				if (num_workers <= 0)
+					pix->y += band_height;
+				tbounds.y0 += band_height;
+				tbounds.y1 += band_height;
 			}
+
+			if (output_format != OUT_PCLM && output_format != OUT_OCR_PDF)
+				fz_close_band_writer(ctx, bander);
 
 			/* FIXME */
 			if (showmd5 && pix)
@@ -1135,6 +1258,11 @@ static void dodrawpage(fz_context *ctx, fz_page *page, fz_display_list *list, in
 		}
 		fz_catch(ctx)
 		{
+			if (output_format == OUT_PCLM || output_format == OUT_OCR_PDF)
+			{
+				fz_drop_band_writer(ctx, bander);
+				bander = NULL;
+			}
 			fz_rethrow(ctx);
 		}
 	}
@@ -1230,6 +1358,20 @@ static void drawpage(fz_context *ctx, fz_document *doc, int pagenum)
 
 	start = (showtime ? gettime() : 0);
 
+	if (output_file_per_page)
+	{
+		char text_buffer[512];
+
+		bgprint_flush();
+		if (out)
+		{
+			fz_close_output(ctx, out);
+			fz_drop_output(ctx, out);
+		}
+		fz_format_output_path(ctx, text_buffer, sizeof text_buffer, output, pagenum);
+		out = fz_new_output_with_path(ctx, text_buffer, 0);
+	}
+
 	page = fz_load_page(ctx, doc, pagenum - 1);
 
 	if (spots != SPOTS_NONE)
@@ -1273,7 +1415,7 @@ static void drawpage(fz_context *ctx, fz_document *doc, int pagenum)
 	{
 		fz_try(ctx)
 		{
-			list = fz_new_display_list(ctx, fz_bound_page(ctx, page));
+			list = fz_new_display_list(ctx, fz_bound_page_box(ctx, page, page_box));
 			dev = fz_new_list_device(ctx, list);
 			if (lowmemory)
 				fz_enable_device_hints(ctx, dev, FZ_NO_CACHE);
@@ -1304,6 +1446,7 @@ static void drawpage(fz_context *ctx, fz_document *doc, int pagenum)
 	{
 		int iscolor;
 		dev = fz_new_test_device(ctx, &iscolor, 0.02f, 0, NULL);
+		apply_kill_switch(dev);
 		if (lowmemory)
 			fz_enable_device_hints(ctx, dev, FZ_NO_CACHE);
 		fz_try(ctx)
@@ -1327,20 +1470,6 @@ static void drawpage(fz_context *ctx, fz_document *doc, int pagenum)
 			fz_rethrow(ctx);
 		}
 		features = iscolor ? " color" : " grayscale";
-	}
-
-	if (output_file_per_page)
-	{
-		char text_buffer[512];
-
-		bgprint_flush();
-		if (out)
-		{
-			fz_close_output(ctx, out);
-			fz_drop_output(ctx, out);
-		}
-		fz_format_output_path(ctx, text_buffer, sizeof text_buffer, output, pagenum);
-		out = fz_new_output_with_path(ctx, text_buffer, 0);
 	}
 
 	if (bgprint.active)
@@ -1642,6 +1771,50 @@ static inline int iswhite(int ch)
 		ch == '\014' || ch == '\015' || ch == '\040';
 }
 
+static void list_layers(fz_context *ctx, fz_document *doc)
+{
+#if FZ_ENABLE_PDF
+	pdf_document *pdoc = pdf_specifics(ctx, doc);
+	int k, n = pdf_count_layers(ctx, pdoc);
+	for (k = 0; k < n; ++k) {
+		const char *name = pdf_layer_name(ctx, pdoc, k);
+		int state = pdf_layer_is_enabled(ctx, pdoc, k);
+		fprintf(stderr, "layer %d (%s): %s\n", k+1, state ? "on" : "off", name);
+	}
+#endif
+}
+
+static void toggle_layers(fz_context *ctx, fz_document *doc)
+{
+#if FZ_ENABLE_PDF
+	pdf_document *pdoc = pdf_specifics(ctx, doc);
+	int i, k, n;
+
+	n = pdf_count_layers(ctx, pdoc);
+	for (i = 0; i < layer_off_len; ++i)
+	{
+		if (layer_off[i] == -1)
+			for (k = 0; k < n; ++k)
+				pdf_enable_layer(ctx, pdoc, k, 0);
+		else if (layer_off[i] >= 1 && layer_off[i] <= n)
+			pdf_enable_layer(ctx, pdoc, layer_off[i] - 1, 0);
+		else
+			fprintf(stderr, "invalid layer: %d\n", layer_off[i]);
+	}
+
+	for (i = 0; i < layer_on_len; ++i)
+	{
+		if (layer_on[i] == -1)
+			for (k = 0; k < n; ++k)
+				pdf_enable_layer(ctx, pdoc, k, 1);
+		else if (layer_on[i] >= 1 && layer_on[i] <= n)
+			pdf_enable_layer(ctx, pdoc, layer_on[i] - 1, 1);
+		else
+			fprintf(stderr, "invalid layer: %d\n", layer_on[i]);
+	}
+#endif
+}
+
 static void apply_layer_config(fz_context *ctx, fz_document *doc, const char *lc)
 {
 #if FZ_ENABLE_PDF
@@ -1742,18 +1915,52 @@ static void apply_layer_config(fz_context *ctx, fz_document *doc, const char *lc
 #endif
 }
 
-static int convert_to_accel_path(fz_context *ctx, char outname[], char *absname, size_t len)
+static int create_accel_path(fz_context *ctx, char outname[], size_t len, int create, const char *absname, ...)
+{
+	va_list args;
+	char *s = outname;
+	size_t z, remain = len;
+	char *arg;
+
+	va_start(args, absname);
+
+	while ((arg = va_arg(args, char *)) != NULL)
+	{
+		z = fz_snprintf(s, remain, "%s", arg);
+		if (z+1 > remain)
+			goto fail; /* won't fit */
+
+		if (create)
+			(void) fz_mkdir(outname);
+		if (!fz_is_directory(ctx, outname))
+			goto fail; /* directory creation failed, or that dir doesn't exist! */
+#ifdef _WIN32
+		s[z] = '\\';
+#else
+		s[z] = '/';
+#endif
+		s[z+1] = 0;
+		s += z+1;
+		remain -= z+1;
+	}
+
+	if (fz_snprintf(s, remain, "%s.accel", absname) >= remain)
+		goto fail; /* won't fit */
+
+	va_end(args);
+
+	return 1;
+
+fail:
+	va_end(args);
+
+	return 0;
+}
+
+static int convert_to_accel_path(fz_context *ctx, char outname[], char *absname, size_t len, int create)
 {
 	char *tmpdir;
 	char *s;
-
-	tmpdir = getenv("TEMP");
-	if (!tmpdir)
-		tmpdir = getenv("TMP");
-	if (!tmpdir)
-		tmpdir = "/var/tmp";
-	if (!fz_is_directory(ctx, tmpdir))
-		tmpdir = "/tmp";
 
 	if (absname[0] == '/' || absname[0] == '\\')
 		++absname;
@@ -1765,17 +1972,34 @@ static int convert_to_accel_path(fz_context *ctx, char outname[], char *absname,
 		++s;
 	}
 
-	if (fz_snprintf(outname, len, "%s/%s.accel", tmpdir, absname) >= len)
-		return 0;
-	return 1;
+#ifdef _WIN32
+	tmpdir = getenv("USERPROFILE");
+	if (tmpdir && create_accel_path(ctx, outname, len, create, absname, tmpdir, ".config", "mupdf", NULL))
+		return 1; /* OK! */
+	/* TEMP and TMP are user-specific on modern windows. */
+	tmpdir = getenv("TEMP");
+	if (tmpdir && create_accel_path(ctx, outname, len, create, absname, tmpdir, "mupdf", NULL))
+		return 1; /* OK! */
+	tmpdir = getenv("TMP");
+	if (tmpdir && create_accel_path(ctx, outname, len, create, absname, tmpdir, "mupdf", NULL))
+		return 1; /* OK! */
+#else
+	tmpdir = getenv("XDG_CACHE_HOME");
+	if (tmpdir && create_accel_path(ctx, outname, len, create, absname, tmpdir, "mupdf", NULL))
+		return 1; /* OK! */
+	tmpdir = getenv("HOME");
+	if (tmpdir && create_accel_path(ctx, outname, len, create, absname, tmpdir, ".cache", "mupdf", NULL))
+		return 1; /* OK! */
+#endif
+	return 0; /* Fail */
 }
 
-static int get_accelerator_filename(fz_context *ctx, char outname[], size_t len, const char *fname)
+static int get_accelerator_filename(fz_context *ctx, char outname[], size_t len, const char *filename, int create)
 {
 	char absname[PATH_MAX];
-	if (!fz_realpath(fname, absname))
+	if (!fz_realpath(filename, absname))
 		return 0;
-	if (!convert_to_accel_path(ctx, outname, absname, len))
+	if (!convert_to_accel_path(ctx, outname, absname, len, create))
 		return 0;
 	return 1;
 }
@@ -1788,7 +2012,7 @@ static void save_accelerator(fz_context *ctx, fz_document *doc, const char *fnam
 		return;
 	if (!fz_document_supports_accelerator(ctx, doc))
 		return;
-	if (!get_accelerator_filename(ctx, absname, sizeof(absname), fname))
+	if (!get_accelerator_filename(ctx, absname, sizeof(absname), fname, 1))
 		return;
 
 	fz_save_accelerator(ctx, doc, absname);
@@ -1812,7 +2036,7 @@ int mudraw_main(int argc, char **argv)
 
 	fz_var(doc);
 
-	while ((c = fz_getopt(argc, argv, "qp:o:F:R:r:w:h:fB:c:e:G:Is:A:DiW:H:S:T:t:U:XLvPl:y:NO:am:")) != -1)
+	while ((c = fz_getopt(argc, argv, "qp:o:F:R:r:w:h:fB:c:e:G:Is:A:DiW:H:S:T:t:d:U:XLvPl:y:Yz:Z:NO:am:Kb:k:")) != -1)
 	{
 		switch (c)
 		{
@@ -1831,6 +2055,14 @@ int mudraw_main(int argc, char **argv)
 		case 'h': height = fz_atof(fz_optarg); break;
 		case 'f': fit = 1; break;
 		case 'B': band_height = atoi(fz_optarg); break;
+		case 'b':
+			page_box = fz_box_type_from_string(fz_optarg);
+			if (page_box == FZ_UNKNOWN_BOX)
+			{
+				fprintf(stderr, "Invalid box type: %s\n", fz_optarg);
+				return 1;
+			}
+			break;
 
 		case 'c': out_cs = parse_colorspace(fz_optarg); break;
 		case 'e': proof_filename = fz_optarg; break;
@@ -1842,6 +2074,8 @@ int mudraw_main(int argc, char **argv)
 		case 'S': layout_em = fz_atof(fz_optarg); break;
 		case 'U': layout_css = fz_optarg; break;
 		case 'X': layout_use_doc_css = 0; break;
+
+		case 'K': ++s_kill; break;
 
 		case 'O': spots = fz_atof(fz_optarg);
 #ifndef FZ_ENABLE_SPOT_RENDERING
@@ -1880,6 +2114,13 @@ int mudraw_main(int argc, char **argv)
 			fprintf(stderr, "Threads not enabled in this build\n");
 			break;
 #endif
+		case 'd':
+#ifndef OCR_DISABLED
+			ocr_datadir = fz_optarg; break;
+#else
+			fprintf(stderr, "OCR functionality not enabled in this build\n");
+			break;
+#endif
 		case 't':
 #ifndef OCR_DISABLED
 			ocr_language = fz_optarg; break;
@@ -1901,7 +2142,22 @@ int mudraw_main(int argc, char **argv)
 			break;
 #endif
 		case 'y': layer_config = fz_optarg; break;
+		case 'Y': layer_list = 1; break;
+		case 'z': layer_off[layer_off_len++] = !strcmp(fz_optarg, "all") ? -1 : fz_atoi(fz_optarg); break;
+		case 'Z': layer_on[layer_on_len++] = !strcmp(fz_optarg, "all") ? -1 : fz_atoi(fz_optarg); break;
 		case 'a': useaccel = 0; break;
+		case 'k':
+		{
+			const char *a;
+			if (fz_optarg[0] == 'a')
+				skew_correct = 1;
+			else
+				skew_correct = 2, skew_angle = fz_atof(fz_optarg);
+			a = strchr(fz_optarg, ',');
+			if (a != NULL)
+				skew_border = fz_atoi(fz_optarg+1);
+			break;
+		}
 
 		case 'v': fprintf(stderr, "mudraw version %s\n", FZ_VERSION); return 1;
 		}
@@ -2276,6 +2532,12 @@ int mudraw_main(int argc, char **argv)
 			if (!output_file_per_page)
 				file_level_headers(ctx);
 			fz_register_document_handlers(ctx);
+#ifdef HAVE_SMARTOFFICE
+			{
+				void *cfg = so_doc_handler_enable(ctx, "en-gb", NULL, 1);
+				so_doc_handler_configure(ctx, cfg, SO_DOC_HANDLER_MODE, SO_DOC_HANDLER_MODE_HTML);
+			}
+#endif
 
 			while (fz_optind < argc)
 			{
@@ -2293,12 +2555,12 @@ int mudraw_main(int argc, char **argv)
 					if (!useaccel)
 						accel = NULL;
 					/* If there was an accelerator to load, what would it be called? */
-					else if (get_accelerator_filename(ctx, accelpath, sizeof(accelpath), filename))
+					else if (get_accelerator_filename(ctx, accelpath, sizeof(accelpath), filename, 0))
 					{
 						/* Check whether that file exists, and isn't older than
 						 * the document. */
-						atime = stat_mtime(accelpath);
-						dtime = stat_mtime(filename);
+						atime = fz_stat_mtime(accelpath);
+						dtime = fz_stat_mtime(filename);
 						if (atime == 0)
 						{
 							/* No accelerator */
@@ -2308,19 +2570,46 @@ int mudraw_main(int argc, char **argv)
 						else
 						{
 							/* Accelerator data is out of date */
-							unlink(accelpath);
+#ifdef _WIN32
+							fz_remove_utf8(accelpath);
+#else
+							remove(accelpath);
+#endif
 							accel = NULL; /* In case we have jumped up from below */
 						}
-
 					}
 
 					doc = fz_open_accelerated_document(ctx, filename, accel);
 
+#ifdef CLUSTER
+					/* Load and then drop the outline if we're running under the cluster.
+					 * This allows our outline handling to be tested automatically. */
+					fz_try(ctx)
+						fz_drop_outline(ctx, fz_load_outline(ctx, doc));
+					fz_catch(ctx)
+					{
+						/* Drop any error */
+						fz_report_error(ctx);
+					}
+#endif
+
 					if (fz_needs_password(ctx, doc))
 					{
 						if (!fz_authenticate_password(ctx, doc, password))
-							fz_throw(ctx, FZ_ERROR_GENERIC, "cannot authenticate password: %s", filename);
+							fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot authenticate password: %s", filename);
 					}
+
+#ifdef CLUSTER
+					/* Load and then drop the outline if we're running under the cluster.
+					 * This allows our outline handling to be tested automatically. */
+					fz_try(ctx)
+						fz_drop_outline(ctx, fz_load_outline(ctx, doc));
+					fz_catch(ctx)
+					{
+						/* Drop any error */
+						fz_report_error(ctx);
+					}
+#endif
 
 					/* Once document is open check for output intent colorspace */
 					oi = fz_document_output_intent(ctx, doc);
@@ -2358,6 +2647,10 @@ int mudraw_main(int argc, char **argv)
 
 					if (layer_config)
 						apply_layer_config(ctx, doc, layer_config);
+					if (layer_on_len > 0 || layer_off_len > 0)
+						toggle_layers(ctx, doc);
+					if (layer_list)
+						list_layers(ctx, doc);
 
 					if (fz_optind == argc || !fz_is_page_range(ctx, argv[fz_optind]))
 						drawrange(ctx, doc, "1-N");
@@ -2382,6 +2675,7 @@ int mudraw_main(int argc, char **argv)
 						fz_rethrow(ctx);
 
 					bgprint_flush();
+					fz_report_error(ctx);
 					fz_warn(ctx, "ignoring error in '%s'", filename);
 				}
 			}
@@ -2390,7 +2684,8 @@ int mudraw_main(int argc, char **argv)
 		{
 			bgprint_flush();
 			fz_drop_document(ctx, doc);
-			fprintf(stderr, "error: cannot draw '%s'\n", filename);
+			fz_report_error(ctx);
+			fz_log_error_printf(ctx, "cannot draw '%s'", filename);
 			errored = 1;
 		}
 
@@ -2483,6 +2778,7 @@ int mudraw_main(int argc, char **argv)
 	}
 	fz_catch(ctx)
 	{
+		fz_report_error(ctx);
 		if (!errored) {
 			fprintf(stderr, "Rendering failed\n");
 			errored = 1;

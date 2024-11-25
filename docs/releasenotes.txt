@@ -3,6 +3,107 @@ the release notes, as we make them, to make the release process easier.
 
 Next version:
 
+3.6
+* add `ShowLinks` advanced setting and `Toggle Show Links` for command palette (`Ctrl + K`)
+* `-search` cmd-line arg now copies search term to find box so that F3 works
+* add `LazyLoading` advanced setting, defaults to true. When restoring a session lazy loading delays loading a file until its tab is selected. Makes SumatraPDF startup faster.
+
+3.5.2 (2023-10-25)
+* fix not showing tab text
+make menus in dark themes look more like standard menus (bigger padding)
+* fix Bookmarks for folder showing bad file names
+
+3.5.1 (2023-10-24)
+* fix uninstaller crash
+* disable lazy loading of files when restoring a session
+
+3.5 (2023-10-23)
+* CmdEditAnnotation select annotation under cursor and open annotation edit window
+* rename CmdShowCursorPosition => CmdToggleCursorPosition
+* add Annotations [ FreeTextColor, FreeTextSize, FreeTextBorderWidth ] settings
+* change: to move annotations, must press Ctrl
+* add CmdCommandPaletteOnlyTabs and bind it to Alt + K
+* exit fullscreen / presentation modes via double click with left mouse button
+* ability to drag out a tab to open it in new window
+* support opening .avif images (including inside .cbz/,cbr files)
+* respect image orientation exif metadata in .jpeg and .png images
+* support Adobe Reader syntax for opening files /A "page=<pageno>#nameddest=<dest>search=<string>
+* add Next Tab / Prev Tab commands and bind them to Ctrl + PageUp / Ctrl + PageDown
+* keep Home tab open; add NoHomeTab advanced option to disable that
+* add context menu to tabs
+* bugfix: handle files we can't open in next file in folder / prev file in folder commands
+* command palette: when search starts with >, only show commands, not files (like in Visual Studio Code)
+* add reopen last closed command (Ctrl + Shift + T, like in web browsers)
+* add clear history command
+* can send commands via DDE
+* added CmdOpenWithExplorer, CmdOpenWithDirectoryOpus, CmdOpenWithTotalCommander, CmdOpenWithDoubleCommander commands
+* enable CmdCloseOtherTabs, CmdCloseTabsToTheRight commands from command palette
+* recognize PgUp / PgDown in keyboard shortcuts
+add -disable-auto-rotation cmd-line print option
+* Arm 64 builds
+
+3.4.6 (2022-06-08)
+* fix crashes
+* fix hang in Fit Content mode and Bookmark links
+
+3.4.5 (2022-06-05)
+* fix crashes
+
+3.4.4 (2022-06-02)
+* restore HOME and END in find edit field
+* fix crashes
+
+3.4.3 (2022-05-29)
+* re-enable Backspace in edit field
+* fix installation for all users when using custom installation directory
+* re-enable Copy Image context menu for comic book files
+* fix display of some PDF images
+* fix slow loading of some ePub files
+
+3.4.2 (2022-05-27)
+* make keyboard accelerators work when tree view has focus
+* fix -set-color-range and -bg-color replacing MainWindowBackground
+* fix crash with incorrectly defined selection handlers
+
+3.4.1 (2022-05-25)
+* fix downloading of symbols for better crash reports
+
+3.4 (2022-05-24)
+* Command Palette
+* customizable keyboard shortcuts
+* better support for epub files using mupdf’s epub engine. Adds text selection and search in ebook files. Better rendering fidelity. On the downside, might be slower.
+* search / translate selected text with web services
+* we have few built-in and you can add your own
+* installer: -all-users cmd-line arg for system-wide install
+* added Annotations.TextIconColor and TextIconType advanced settings
+* added Annotations.UnderlineColor advanced setting
+* added Annotations.DefaultAuthor advanced setting
+* i keyboard shortcuts inverts document colors Shift + i does what i used to do i.e. show page number
+* u and Shift + u keyboard shortcuts adds underline annotation for currently selected text
+* Delete / Backspace keyboard shortcuts delete an annotation under mouse cursor
+support .svg files
+* faster scrolling with mouse wheel when cursor over scrollbar
+* add -search cmd-line option and [Search("<file>", "<search-term>")] DDE command
+* a way to get list of used fonts in properties window
+* support opening .heic image files (if Windows heic codec is installed)
+* add experimental smooth scrolling (enabled with SmoothScroll advanc
+
+
+3.3.3 (2021-07-20)
+* fix a crash in PdfFilter.dll
+
+3.3.2 (2021-07-19)
+* restore showing Table Of Contents for .chm files
+* fix crashes
+
+3.3.1 (2021-07-14)
+* fix rotation of DjVu files
+
+3.3 (2021-07-06)
+* initial support for editing annotations
+* toolbar: new look and DPI scalability
+* toolbar: add rotate buttons
+
 3.2 (2020-03-15)
 * upgraded core PDF parsing rendering to latest version of mupdf. Faster, less bugs.
 * support for multiple windows
@@ -43,7 +144,7 @@ Next version:
 * new advanced settings: FullPathInTitle, UseSysColors (no longer exposed through the Options dialog)
 * replaced non-free UnRAR with a free RAR extraction library
   (if some CBR files fail to open for you, please download unrar.dll from
-  http://www.rarlab.com/rar_add.htm and place it alongside SumatraPDF.exe)
+  https://www.rarlab.com/rar_add.htm and place it alongside SumatraPDF.exe)
 * removed support for reading sumatrapdfprefs.dat (when updating from a version prior to
   version 2.3, please upgrade to 2.5.2 first and have that convert your settings to the
   format introduced in version 2.3 before updating to a later version)
@@ -93,7 +194,7 @@ Next version:
 * more configurability. Settings are now saved in human-editable
   SumatraPDF-settings.txt (instead of binary sumatrapdfprefs.dat)
   and there are more settings for customizing Sumatra. For more
-  documentation see http://blog.kowalczyk.info/software/sumatrapdf/settings.html
+  documentation see https://blog.kowalczyk.info/software/sumatrapdf/settings.html
 * "Go To Page" for ebook format
 * add support for OpenXPS documents
 * add View/Manga Mode menu item for Comic Book (CBZ/CBR) files
@@ -174,7 +275,7 @@ Next version:
 * logical page numbers are displayed and used, if a document
   provides them (such as i, ii, iii, etc.)
 * allow to restrict SumatraPDF's features with more granularity; see
-  http://code.google.com/p/sumatrapdf/source/browse/trunk/docs/sumatrapdfrestrict.ini
+  https://code.google.com/p/sumatrapdf/source/browse/trunk/docs/sumatrapdfrestrict.ini
 * -named-dest also matches strings in table of contents
 * improved support for EPS files (requires Ghostscript)
 * improved support for right-to-left languages e.g. Arabic
@@ -262,7 +363,7 @@ Next version:
 * add Ctrl+A as a shortcut for Select All Text
 * improved full screen mode
 * open embedded PDF documents
-* allow saving PDF document attachements to disk
+* allow saving PDF document attachments to disk
 * latest fixes and improvements to PDF rendering from mupdf project
 
 1.1 (2010-05-20):
@@ -307,11 +408,11 @@ updated Japanese and Brazillian translation
 
 * ability to disable auto-update check
 * improved text rendering - should fix problems with overlapping text
-* improved font substition for fonts not present in PDF file
+* improved font substitution for fonts not present in PDF file
 * can now open PDF files with non-ascii names
 * improvements to DDE (contributed by Danilo Roascio)
 * SyncTex improvements
-* improve persistance of state (contributed by Robert Liu)
+* improve persistence of state (contributed by Robert Liu)
 * fix crash when pressing 'Cancel' when entering a password
 * updated translations
 

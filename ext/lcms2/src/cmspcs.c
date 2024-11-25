@@ -1,7 +1,7 @@
 //---------------------------------------------------------------------------------
 //
 //  Little Color Management System
-//  Copyright (c) 1998-2020 Marti Maria Saguer
+//  Copyright (c) 1998-2022 Marti Maria Saguer
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files (the "Software"),
@@ -668,7 +668,7 @@ cmsFloat64Number CMSEXPORT cmsCIE2000DeltaE(cmsContext ContextID, const cmsCIELa
 
 // This function returns a number of gridpoints to be used as LUT table. It assumes same number
 // of gripdpoints in all dimensions. Flags may override the choice.
-cmsUInt32Number _cmsReasonableGridpointsByColorspace(cmsContext ContextID, cmsColorSpaceSignature Colorspace, cmsUInt32Number dwFlags)
+cmsUInt32Number CMSEXPORT _cmsReasonableGridpointsByColorspace(cmsContext ContextID, cmsColorSpaceSignature Colorspace, cmsUInt32Number dwFlags)
 {
     cmsUInt32Number nChannels;
 
@@ -888,7 +888,7 @@ int CMSEXPORT _cmsLCMScolorSpace(cmsContext ContextID, cmsColorSpaceSignature Pr
 }
 
 
-cmsUInt32Number CMSEXPORT cmsChannelsOf(cmsContext ContextID, cmsColorSpaceSignature ColorSpace)
+cmsInt32Number CMSEXPORT cmsChannelsOfColorSpace(cmsContext ContextID, cmsColorSpaceSignature ColorSpace)
 {
     cmsUNUSED_PARAMETER(ContextID);
     switch (ColorSpace) {
@@ -950,6 +950,16 @@ cmsUInt32Number CMSEXPORT cmsChannelsOf(cmsContext ContextID, cmsColorSpaceSigna
     case cmsSigMCHFData:
     case cmsSig15colorData: return 15;
 
-    default: return 3;
+    default: return -1;
     }
+}
+
+/**
+* DEPRECATED: Provided for compatibility only
+*/
+cmsUInt32Number CMSEXPORT cmsChannelsOf(cmsContext ContextID, cmsColorSpaceSignature ColorSpace)
+{
+    int n = cmsChannelsOfColorSpace(ContextID, ColorSpace);
+    if (n < 0) return 3;
+    return (cmsUInt32Number)n;
 }

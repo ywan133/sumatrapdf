@@ -1,44 +1,49 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-/* How to use:
+struct StrQueue;
 
-DirIter di(dir, recursive);
-for (const WCHAR *path = di.First(); path; path = di.Next()) {
-    // process path
-}
-
-*/
-class DirIter {
-    bool recursive = false;
-
-    WStrVec dirsToVisit;
-    AutoFreeWstr startDir;
-    AutoFreeWstr currDir;
-    bool foundNext = false;
-
-    bool StartDirIter(const WCHAR* dir);
-    bool TryNextDir();
-
-  public:
-    AutoFreeWstr currPath;
-    HANDLE currFindHandle = nullptr;
-    WIN32_FIND_DATAW currFindData{};
-
-    DirIter(const WCHAR* dir, bool recur = false) {
-        recursive = recur;
-        startDir.SetCopy(dir);
-    }
-    ~DirIter() {
-        FindClose(currFindHandle);
-    }
-
-    const WCHAR* First();
-    const WCHAR* Next();
+struct DirIterEntry {
+    WIN32_FIND_DATAW* fd = nullptr;
+    const char* name = nullptr;
+    const char* filePath = nullptr;
+    bool stopTraversal = false;
+    bool fileMatches = false;
 };
 
-bool CollectPathsFromDirectory(const WCHAR* pattern, WStrVec& paths, bool dirsInsteadOfFiles = false);
-// std::vector<std::wstring> CollectDirsFromDirectory(const WCHAR*);
+struct DirIter {
+    const char* dir = nullptr;
+    bool includeFiles = true;
+    bool includeDirs = false;
+    bool recurse = false;
 
-bool CollectFilesFromDirectory(std::string_view dir, VecStr& files,
-                               const std::function<bool(std::string_view path)>& fileMatches);
+    struct iterator {
+        const DirIter* di;
+        bool didFinish = false;
+
+        StrVec dirsToVisit;
+        char* currDir = nullptr;
+        WCHAR* pattern = nullptr;
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = nullptr;
+        DirIterEntry data;
+
+        iterator(const DirIter*, bool);
+        ~iterator();
+
+        DirIterEntry* operator*();
+        iterator& operator++();   // ++it
+        iterator operator++(int); // it++
+        iterator& operator+(int); // it += n
+        friend bool operator==(const iterator& a, const iterator& b);
+        friend bool operator!=(const iterator& a, const iterator& b);
+    };
+    iterator begin() const;
+    iterator end() const;
+};
+
+void StartDirTraverseAsync(StrQueue* queue, const char* dir, bool recurse);
+
+i64 GetFileSize(WIN32_FIND_DATAW*);
+bool IsDirectory(DWORD fileAttr);
+bool IsRegularFile(DWORD fileAttr);

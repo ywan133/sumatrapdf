@@ -1,19 +1,18 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 #include "utils/BaseUtil.h"
 #include "utils/ScopedWin.h"
 #include "utils/WinDynCalls.h"
+#include "utils/WinUtil.h"
 
-#include "wingui/TreeModel.h"
+#include "wingui/UIModels.h"
 
-#include "Annotation.h"
+#include "Settings.h"
+#include "DocController.h"
 #include "EngineBase.h"
 #include "uia/TextRange.h"
-#include "DisplayMode.h"
-#include "SettingsStructs.h"
-#include "Controller.h"
-#include "EngineCreate.h"
+#include "EngineAll.h"
 #include "DisplayModel.h"
 #include "uia/DocumentProvider.h"
 #include "uia/Constants.h"
@@ -92,8 +91,8 @@ bool SumatraUIAutomationTextRange::IsEmptyRange() const {
 }
 
 int SumatraUIAutomationTextRange::GetPageGlyphCount(int pageNum) {
-    CrashIf(!document->IsDocumentLoaded());
-    CrashIf(pageNum <= 0);
+    ReportIf(!document->IsDocumentLoaded());
+    ReportIf(pageNum <= 0);
 
     int pageLen;
     document->GetDM()->textCache->GetTextForPage(pageNum, &pageLen);
@@ -101,7 +100,7 @@ int SumatraUIAutomationTextRange::GetPageGlyphCount(int pageNum) {
 }
 
 int SumatraUIAutomationTextRange::GetPageCount() {
-    CrashIf(!document->IsDocumentLoaded());
+    ReportIf(!document->IsDocumentLoaded());
 
     return document->GetDM()->PageCount();
 }
@@ -209,7 +208,7 @@ int SumatraUIAutomationTextRange::FindNextLineEndpoint(int pageno, int idx, bool
 
 // IUnknown
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::QueryInterface(REFIID riid, void** ppv) {
-    static const QITAB qit[] = {QITABENT(SumatraUIAutomationTextRange, ITextRangeProvider), {0}};
+    static const QITAB qit[] = {QITABENT(SumatraUIAutomationTextRange, ITextRangeProvider), {nullptr}};
     return QISearch(this, qit, riid, ppv);
 }
 
@@ -219,7 +218,7 @@ ULONG STDMETHODCALLTYPE SumatraUIAutomationTextRange::AddRef() {
 
 ULONG STDMETHODCALLTYPE SumatraUIAutomationTextRange::Release() {
     LONG res = InterlockedDecrement(&refCount);
-    CrashIf(res < 0);
+    ReportIf(res < 0);
     if (0 == res) {
         delete this;
     }
@@ -353,9 +352,8 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::ExpandToEnclosingUnit(en
     }
 }
 
-HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::FindAttribute([[maybe_unused]] TEXTATTRIBUTEID attr,
-                                                                      [[maybe_unused]] VARIANT val,
-                                                                      [[maybe_unused]] BOOL backward,
+HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::FindAttribute(__unused TEXTATTRIBUTEID attr,
+                                                                      __unused VARIANT val, __unused BOOL backward,
                                                                       ITextRangeProvider** found) {
     if (found == nullptr) {
         return E_POINTER;
@@ -369,10 +367,8 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::FindAttribute([[maybe_un
     return S_OK;
 }
 
-HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::FindText([[maybe_unused]] BSTR text,
-                                                                 [[maybe_unused]] BOOL backward,
-                                                                 [[maybe_unused]] BOOL ignoreCase,
-                                                                 ITextRangeProvider** found) {
+HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::FindText(__unused BSTR text, __unused BOOL backward,
+                                                                 __unused BOOL ignoreCase, ITextRangeProvider** found) {
     if (found == nullptr) {
         return E_POINTER;
     }
@@ -384,7 +380,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::FindText([[maybe_unused]
     return E_NOTIMPL;
 }
 
-HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::GetAttributeValue([[maybe_unused]] TEXTATTRIBUTEID attr,
+HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::GetAttributeValue(__unused TEXTATTRIBUTEID attr,
                                                                           VARIANT* value) {
     if (value == nullptr) {
         return E_POINTER;
@@ -458,7 +454,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::GetText(int maxLength, B
     selection.StartAt(startPage, startGlyph);
     selection.SelectUpTo(endPage, endGlyph);
 
-    AutoFreeWstr selected_text(selection.ExtractText(L"\r\n"));
+    AutoFreeWStr selected_text(selection.ExtractText("\r\n"));
     size_t selected_text_length = str::Len(selected_text);
 
     // -1 and [0, inf) are allowed
@@ -562,11 +558,11 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::MoveEndpointByUnit(TextP
         virtual bool NextEndpoint() const {
             // HACK: Declaring these as pure virtual causes "unreferenced local variable" warnings ==> define a dummy
             // body to get rid of warnings
-            CrashIf(true);
+            ReportIf(true);
             return false;
         }
         virtual bool PrevEndpoint() const {
-            CrashIf(true);
+            ReportIf(true);
             return false;
         }
 
@@ -846,7 +842,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::GetChildren(SAFEARRAY** 
             LONG index = it->GetPageNum() - startPage;
 
             HRESULT hr = SafeArrayPutElement(psa, &index, it);
-            CrashIf(FAILED(hr));
+            ReportIf(FAILED(hr));
             it->AddRef();
         }
 

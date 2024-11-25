@@ -1,211 +1,207 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
-#include "utils/Log.h"
+#include "utils/WinUtil.h"
+
+#include "SumatraConfig.h"
+
 #include "Translations.h"
 
-#ifdef DEBUG
-// define for adding "English RTL" for testing RTL layout
-#define ADD_EN_RTL_TEST_LANGUAGE
-#endif
-
-// Note: this code is intentionally optimized for (small) size, not speed
+#include "utils/Log.h"
 
 namespace trans {
 
 // defined in Trans*_txt.cpp
 extern int gLangsCount;
-extern int gStringsCount;
 extern const char* gLangNames;
 extern const char* gLangCodes;
-const LANGID* GetLangIds();
-bool IsLangRtl(int langIdx);
-const char** GetOriginalStrings();
+extern const LANGID* GetLangIds();
+extern bool IsLangRtl(int langIdx);
+} // namespace trans
+
+namespace trans {
 
 // used locally, gCurrLangCode points into gLangCodes
 static const char* gCurrLangCode = nullptr;
 static int gCurrLangIdx = 0;
+// for each translation: english string followed by a translation
+static StrVec* gTranslationCache = nullptr;
 
-// Note: we don't have access to STRINGS_COUNT and LANGS_COUNT
-// hence foo[] => *foo here
-// const char *gCurrLangStrings[STRINGS_COUNT];
-const char** gCurrLangStrings = nullptr;
-// WCHAR ** gLangsTransCache[LANGS_COUNT];
-WCHAR*** gLangsTransCache = nullptr;
-
-const char* GetTranslationsForLang(int langIdx);
-
-#ifdef ADD_EN_RTL_TEST_LANGUAGE
-#define EN_RTL_CODE "en-rtl"
-#define EN_RTL_NAME "English RTL for testing"
-#define EN_RTL_IDX gLangsCount
-#endif
-
-/* In general, after adding new _TR() strings, one has to re-generate Translations_txt.cpp, but
-that also requires uploading new strings to the server, for which one needs access.
-
-To support adding new strings without re-generating Translatiosn_txt.cpp, we have a concept
-of missing translations. */
-
-struct MissingTranslation {
-    const char* s;
-    const WCHAR* translation;
-};
-
-// number of missing translations should be small
-static MissingTranslation gMissingTranslations[64];
-static int gMissingTranslationsCount = 0;
-
-static void FreeMissingTranslations() {
-    for (int i = 0; i < gMissingTranslationsCount; i++) {
-        str::Free(gMissingTranslations[i].translation);
+static TempStr UnescapeTemp(char* sOrig) {
+    char* s = str::DupTemp(sOrig);
+    char* unescaped = s;
+    char* dst = s;
+    char c, c2;
+    while (*s) {
+        c = *s++;
+        if (c != '\\') {
+            *dst++ = c;
+            continue;
+        }
+        c2 = *s;
+        switch (c2) {
+            case '\\':
+                *dst++ = '\\';
+                break;
+            case 't':
+                *dst++ = '\t';
+                break;
+            case 'n':
+                *dst++ = '\n';
+                break;
+            case 'r':
+                *dst++ = '\r';
+                break;
+            default:
+                *dst++ = c;
+                break;
+        }
+        s++;
     }
-    gMissingTranslationsCount = 0;
+    *dst = 0;
+    return unescaped;
 }
 
-static const WCHAR* FindOrAddMissingTranslation(const char* s) {
-    for (int i = 0; i < gMissingTranslationsCount; i++) {
-        if (s == gMissingTranslations[i].s) {
-            return gMissingTranslations[i].translation;
+static void FreeTranslations() {
+    delete gTranslationCache;
+    gTranslationCache = nullptr;
+}
+
+static void ParseTranslationsTxt(const StrSpan& d, const char* langCode) {
+    langCode = str::JoinTemp(langCode, ":");
+    int nLangCode = str::Len(langCode);
+
+    StrVec lines;
+    Split(&lines, d.CStr(), "\n", true);
+    int nStrings = 0;
+    for (char* l : lines) {
+        if (l[0] == ':') {
+            nStrings++;
         }
     }
-    if (gMissingTranslationsCount >= dimof(gMissingTranslations)) {
-        return L"missing translation";
-    }
+    int nLines = lines.Size();
+    logf("ParseTranslationsTxt: %d lines, nStrings: %d\n", nLines, nStrings);
 
-    gMissingTranslations[gMissingTranslationsCount].s = s;
-    const WCHAR* res = strconv::Utf8ToWstr(s);
-    gMissingTranslations[gMissingTranslationsCount].translation = res;
-    gMissingTranslationsCount++;
-    return res;
+    delete gTranslationCache;
+    gTranslationCache = new StrVec();
+    auto c = gTranslationCache;
+    int nUntranslated = 0;
+
+    char* orig;
+    char* trans;
+    char* line;
+    int i = 2; // skip first 2 header lines
+    while (i < nLines) {
+        orig = lines[i];
+        ReportDebugIf(*orig != ':');
+        orig += 1; // skip the ':' at the beginning
+        i++;
+        trans = nullptr;
+        while (i < nLines && lines[i][0] != ':') {
+            if (!trans) {
+                line = lines[i];
+                if (str::StartsWith(line, langCode)) {
+                    trans = line + nLangCode;
+                }
+            }
+            i++;
+        }
+        if (!trans) {
+            nUntranslated++;
+        }
+        TempStr unescaped = UnescapeTemp(orig);
+        c->Append(unescaped);
+        if (!trans) {
+            c->Append(nullptr);
+            continue;
+        }
+        unescaped = UnescapeTemp(trans);
+        c->Append(unescaped);
+    }
+    int nTrans = c->Size();
+    ReportDebugIf(nTrans != nStrings * 2);
+    if (nUntranslated > 0 && !str::Eq(langCode, "en:")) {
+        logf("Untranslated strings: %d for lang '%s'\n", nUntranslated, langCode);
+    }
+}
+
+// don't free
+const char* GetTranslation(const char* s) {
+    if (gCurrLangIdx == 0) {
+        // 0 is english, no translation needed
+        return s;
+    }
+    auto c = gTranslationCache;
+    int n = c->Size();
+    ReportDebugIf(n % 2 != 0);
+    n = n / 2;
+    int sLen = str::Leni(s);
+    for (int i = 0; i < n; i++) {
+        int idx = i * 2;
+        StrSpan s2 = c->AtSpan(idx);
+        if (s2.Len() == sLen && str::Eq(s, s2.CStr())) {
+            auto tr = c->At(idx + 1);
+            if (!tr) {
+                logf("Didn't find translation for '%s'\n", s);
+                return s;
+            }
+            return tr;
+        }
+    }
+    ReportDebugIf(true);
+    return s;
 }
 
 int GetLangsCount() {
-#ifdef ADD_EN_RTL_TEST_LANGUAGE
-    return gLangsCount + 1;
-#else
     return gLangsCount;
-#endif
 }
 
 const char* GetCurrentLangCode() {
     return gCurrLangCode;
 }
 
-static WCHAR** GetTransCacheForLang(int langIdx) {
-#ifdef ADD_EN_RTL_TEST_LANGUAGE
-    if (langIdx == EN_RTL_IDX)
-        langIdx = 0;
-#endif
-    if (!gLangsTransCache[langIdx]) {
-        gLangsTransCache[langIdx] = AllocArray<WCHAR*>(gStringsCount);
-    }
-    return gLangsTransCache[langIdx];
-}
-
-static void FreeTransCache() {
-    for (int langIdx = 0; langIdx < gLangsCount; langIdx++) {
-        WCHAR** transCache = gLangsTransCache[langIdx];
-        for (int i = 0; transCache && i < gStringsCount; i++) {
-            free(transCache[i]);
-        }
-        free(transCache);
-    }
-    free(gLangsTransCache);
-    free(gCurrLangStrings);
-}
-
-static void BuildStringsIndexForLang(int langIdx) {
-#ifdef ADD_EN_RTL_TEST_LANGUAGE
-    if (0 == gCurrLangIdx || EN_RTL_IDX == gCurrLangIdx) {
-#else
-    if (0 == gCurrLangIdx) {
-#endif
-        const char** origStrings = GetOriginalStrings();
-        for (int idx = 0; idx < gStringsCount; idx++) {
-            gCurrLangStrings[idx] = origStrings[idx];
-            CrashIf(!gCurrLangStrings[idx]);
-        }
-        return;
-    }
-
-    const char* s = GetTranslationsForLang(langIdx);
-    for (int i = 0; i < gStringsCount; i++) {
-        if (0 == *s) {
-            gCurrLangStrings[i] = nullptr;
-        } else {
-            gCurrLangStrings[i] = s;
-        }
-        // advance to the next string
-        while (*s) {
-            ++s;
-        }
-        ++s;
-    }
-}
-
 void SetCurrentLangByCode(const char* langCode) {
-    if (!gCurrLangStrings) {
-        gCurrLangStrings = AllocArray<const char*>(gStringsCount);
-        gLangsTransCache = AllocArray<WCHAR**>(gLangsCount);
-    }
-
     if (str::Eq(langCode, gCurrLangCode)) {
         return;
     }
 
     int idx = seqstrings::StrToIdx(gLangCodes, langCode);
-#ifdef ADD_EN_RTL_TEST_LANGUAGE
-    if (-1 == idx && str::Eq(langCode, EN_RTL_CODE)) {
-        idx = EN_RTL_IDX;
-    }
-#endif
-    if (-1 == idx) {
-        logf("Unknown lang code: '%s'\n", langCode);
+    if (idx < 0) {
+        logf("SetCurrentLangByCode: unknown lang code: '%s'\n", langCode);
         // set to English
         idx = 0;
     }
-    CrashIf(-1 == idx);
+    ReportDebugIf(-1 == idx);
     gCurrLangIdx = idx;
     gCurrLangCode = GetLangCodeByIdx(idx);
-    BuildStringsIndexForLang(gCurrLangIdx);
+    if (idx == 0 && !gIsDebugBuild) {
+        // perf: in release builds we skip parsing translations for english
+        // in debug we want to execute this code to catch errors
+        return;
+    }
+    StrSpan d = LoadDataResource(2);
+    ParseTranslationsTxt(d, langCode);
+    str::Free(d);
 }
 
 const char* ValidateLangCode(const char* langCode) {
     int idx = seqstrings::StrToIdx(gLangCodes, langCode);
-#ifdef ADD_EN_RTL_TEST_LANGUAGE
-    if (-1 == idx && str::Eq(langCode, EN_RTL_CODE)) {
-        idx = EN_RTL_IDX;
-    }
-#endif
-    if (-1 == idx) {
+    if (idx < 0) {
         return nullptr;
     }
     return GetLangCodeByIdx(idx);
 }
 
 const char* GetLangCodeByIdx(int idx) {
-#ifdef ADD_EN_RTL_TEST_LANGUAGE
-    if (idx == EN_RTL_IDX)
-        return EN_RTL_CODE;
-#endif
     return seqstrings::IdxToStr(gLangCodes, idx);
 }
 
 const char* GetLangNameByIdx(int idx) {
-#ifdef ADD_EN_RTL_TEST_LANGUAGE
-    if (idx == EN_RTL_IDX)
-        return EN_RTL_NAME;
-#endif
     return seqstrings::IdxToStr(gLangNames, idx);
 }
 
 bool IsCurrLangRtl() {
-#ifdef ADD_EN_RTL_TEST_LANGUAGE
-    if (gCurrLangIdx == EN_RTL_IDX)
-        return true;
-#endif
     return IsLangRtl(gCurrLangIdx);
 }
 
@@ -231,52 +227,12 @@ const char* DetectUserLang() {
     return "en";
 }
 
-static int GetEnglishStringIndex(const char* txt) {
-    const char** origStrings = GetOriginalStrings();
-    for (int idx = 0; idx < gStringsCount; idx++) {
-        const char* s = origStrings[idx];
-        if (str::Eq(s, txt)) {
-            return idx;
-        }
-    }
-    return -1;
-}
-
-const WCHAR* GetTranslation(const char* s) {
-    if (nullptr == gCurrLangCode) {
-        SetCurrentLangByCode("en");
-    }
-
-    int idx = GetEnglishStringIndex(s);
-    if (-1 == idx) {
-        return FindOrAddMissingTranslation(s);
-    }
-
-    const char* trans = gCurrLangStrings[idx];
-    // fall back to English if the language doesn't have a translations for this string
-    if (!trans) {
-        trans = s;
-    }
-
-    WCHAR** transCache = GetTransCacheForLang(gCurrLangIdx);
-    if (!transCache[idx]) {
-        transCache[idx] = strconv::Utf8ToWstr(trans);
-    }
-    return transCache[idx];
-}
-
 void Destroy() {
-    if (!gCurrLangCode) {
-        // no need for clean-up if translations were never initialized
-        return;
-    }
-
-    FreeTransCache();
-    FreeMissingTranslations();
+    FreeTranslations();
 }
 
 } // namespace trans
 
-const WCHAR* _TR(const char* s) {
+const char* _TRA(const char* s) {
     return trans::GetTranslation(s);
 }

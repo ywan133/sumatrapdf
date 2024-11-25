@@ -1,12 +1,14 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 #include "utils/BaseUtil.h"
 #include "utils/ScopedWin.h"
+#include "utils/WinUtil.h"
 
-#include "wingui/TreeModel.h"
+#include "wingui/UIModels.h"
 
-#include "Annotation.h"
+#include "Settings.h"
+#include "DocController.h"
 #include "EngineBase.h"
 #include "ProgressUpdateUI.h"
 #include "TextSelection.h"
@@ -32,9 +34,25 @@ TextSearch::~TextSearch() {
     Clear();
 }
 
+void TextSearch::Clear() {
+    str::FreePtr(&findText);
+    str::FreePtr(&anchor);
+    str::FreePtr(&lastText);
+    Reset();
+}
+
 void TextSearch::Reset() {
     pageText = nullptr;
     TextSelection::Reset();
+}
+
+int TextSearch::GetCurrentPageNo() const {
+    return findPage;
+}
+
+// note: the result might not be a valid page number!
+int TextSearch::GetSearchHitStartPageNo() const {
+    return searchHitStartAt;
 }
 
 void TextSearch::SetText(const WCHAR* text) {
@@ -64,7 +82,7 @@ void TextSearch::SetText(const WCHAR* text) {
         for (end = text; isnoncjkwordchar(*end); end++) {
             ;
         }
-        anchor = str::DupN(text, end - text);
+        anchor = str::Dup(text, end - text);
     }
     // Adobe Reader also matches certain hard-to-type Unicode
     // characters when searching for easy-to-type homoglyphs
@@ -72,7 +90,7 @@ void TextSearch::SetText(const WCHAR* text) {
     else if (*text == '-' || *text == '\'' || *text == '"') {
         anchor = nullptr;
     } else {
-        anchor = str::DupN(text, 1);
+        anchor = str::Dup(text, 1);
     }
 
     if (str::Len(this->findText) >= INT_MAX) {
@@ -94,15 +112,15 @@ void TextSearch::SetSensitive(bool sensitive) {
     markAllPagesNonSkip(pagesToSkip);
 }
 
-void TextSearch::SetDirection(TextSearchDirection direction) {
-    bool forward = TextSearchDirection::Forward == direction;
-    if (forward == this->forward) {
+void TextSearch::SetDirection(TextSearch::Direction direction) {
+    bool fwd = TextSearch::Direction::Forward == direction;
+    if (fwd == forward) {
         return;
     }
-    this->forward = forward;
+    forward = fwd;
     if (findText) {
         int n = (int)str::Len(findText);
-        if (forward) {
+        if (fwd) {
             findIndex += n;
         } else {
             findIndex -= n;
@@ -113,8 +131,8 @@ void TextSearch::SetDirection(TextSearchDirection direction) {
 void TextSearch::SetLastResult(TextSelection* sel) {
     CopySelection(sel);
 
-    AutoFreeWstr selection(ExtractText(L" "));
-    str::NormalizeWS(selection);
+    AutoFreeWStr selection(ExtractText(" "));
+    str::NormalizeWSInPlace(selection);
     SetText(selection);
 
     searchHitStartAt = findPage = std::min(startPage, endPage);
@@ -286,16 +304,14 @@ bool TextSearch::FindTextInPage(int pageNo, TextSearch::PageAndOffset* finalGlyp
     return true;
 }
 
-bool TextSearch::FindStartingAtPage(int pageNo, ProgressUpdateUI* tracker) {
+bool TextSearch::FindStartingAtPage(int pageNo) {
     if (str::IsEmpty(findText)) {
         return false;
     }
 
     int next = forward ? 1 : -1;
-    while (1 <= pageNo && pageNo <= nPages && (!tracker || !tracker->WasCanceled())) {
-        if (tracker) {
-            tracker->UpdateProgress(pageNo, nPages);
-        }
+    while ((1 <= pageNo) && (pageNo <= nPages) && !WasCanceled(progressCb)) {
+        UpdateProgress(progressCb, pageNo, nPages);
 
         if (pagesToSkip[pageNo - 1]) {
             pageNo += next;
@@ -332,27 +348,25 @@ bool TextSearch::FindStartingAtPage(int pageNo, ProgressUpdateUI* tracker) {
     return false;
 }
 
-TextSel* TextSearch::FindFirst(int page, const WCHAR* text, ProgressUpdateUI* tracker) {
+TextSel* TextSearch::FindFirst(int page, const WCHAR* text) {
     SetText(text);
 
-    if (FindStartingAtPage(page, tracker)) {
+    if (FindStartingAtPage(page)) {
         return &result;
     }
     return nullptr;
 }
 
-TextSel* TextSearch::FindNext(ProgressUpdateUI* tracker) {
-    CrashIf(!findText);
+TextSel* TextSearch::FindNext() {
+    ReportIf(!findText);
     if (!findText) {
         return nullptr;
     }
 
-    if (tracker) {
-        if (tracker->WasCanceled()) {
-            return nullptr;
-        }
-        tracker->UpdateProgress(findPage, nPages);
+    if (WasCanceled(progressCb)) {
+        return nullptr;
     }
+    UpdateProgress(progressCb, findPage, nPages);
 
     PageAndOffset finalGlyph;
     if (FindTextInPage(findPage, &finalGlyph)) {
@@ -365,7 +379,7 @@ TextSel* TextSearch::FindNext(ProgressUpdateUI* tracker) {
     }
 
     auto next = forward ? 1 : -1;
-    if (FindStartingAtPage(findPage + next, tracker)) {
+    if (FindStartingAtPage(findPage + next)) {
         return &result;
     }
     return nullptr;

@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 extern "C" {
@@ -13,17 +13,16 @@ class MultiFormatArchive {
     enum class Format { Zip, Rar, SevenZip, Tar };
 
     struct FileInfo {
-        size_t fileId;
-        std::string_view name;
-        i64 fileTime; // this is typedef'ed as time64_t in unrar.h
-        size_t fileSizeUncompressed;
+        size_t fileId = 0;
+        const char* name = nullptr;
+        i64 fileTime = 0; // this is typedef'ed as time64_t in unrar.h
+        size_t fileSizeUncompressed = 0;
 
         // internal use
-        i64 filePos;
+        i64 filePos = 0;
+        char* data = nullptr;
 
-#if OS_WIN
         FILETIME GetWinFileTime() const;
-#endif
     };
 
     MultiFormatArchive(archive_opener_t opener, Format format);
@@ -37,13 +36,13 @@ class MultiFormatArchive {
 
     size_t GetFileId(const char* fileName);
 
-#if OS_WIN
-    std::span<u8> GetFileDataByName(const WCHAR* filename);
-#endif
-    std::span<u8> GetFileDataByName(const char* filename);
-    std::span<u8> GetFileDataById(size_t fileId);
+    ByteSlice GetFileDataByName(const char* filename);
+    ByteSlice GetFileDataById(size_t fileId);
 
-    std::string_view GetComment();
+    const char* GetComment();
+
+    // if true, will load and uncompress all files on open
+    bool loadOnOpen = false;
 
   protected:
     // used for allocating strings that are referenced by ArchFileInfo::name
@@ -58,7 +57,7 @@ class MultiFormatArchive {
     const char* rarFilePath_ = nullptr;
 
     bool OpenUnrarFallback(const char* rarPathUtf);
-    std::span<u8> GetFileDataByIdUnarrDll(size_t fileId);
+    ByteSlice GetFileDataByIdUnarrDll(size_t fileId);
     bool LoadedUsingUnrarDll() const {
         return rarFilePath_ != nullptr;
     }
@@ -67,18 +66,9 @@ class MultiFormatArchive {
 MultiFormatArchive* OpenZipArchive(const char* path, bool deflatedOnly);
 MultiFormatArchive* Open7zArchive(const char* path);
 MultiFormatArchive* OpenTarArchive(const char* path);
+MultiFormatArchive* OpenRarArchive(const char* path);
 
-// TODO: remove those
-#if OS_WIN
-MultiFormatArchive* OpenZipArchive(const WCHAR* path, bool deflatedOnly);
-MultiFormatArchive* Open7zArchive(const WCHAR* path);
-MultiFormatArchive* OpenTarArchive(const WCHAR* path);
-MultiFormatArchive* OpenRarArchive(const WCHAR* path);
-#endif
-
-#if OS_WIN
 MultiFormatArchive* OpenZipArchive(IStream* stream, bool deflatedOnly);
 MultiFormatArchive* Open7zArchive(IStream* stream);
 MultiFormatArchive* OpenTarArchive(IStream* stream);
 MultiFormatArchive* OpenRarArchive(IStream* stream);
-#endif

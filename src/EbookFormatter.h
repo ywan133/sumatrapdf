@@ -1,9 +1,9 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 /* formatting extensions for Mobi */
 
-class MobiDoc;
+struct MobiDoc;
 
 class MobiFormatter : public HtmlFormatter {
     // accessor to images (and other format-specific data)
@@ -32,7 +32,7 @@ class EpubFormatter : public HtmlFormatter {
     void HandleTagSvgImage(HtmlToken* t);
 
     EpubDoc* epubDoc;
-    AutoFree pagePath;
+    AutoFreeStr pagePath;
     size_t hiddenDepth;
 
   public:
@@ -82,7 +82,7 @@ class HtmlFileFormatter : public HtmlFormatter {
 
 class TxtFormatter : public HtmlFormatter {
   protected:
-    void HandleTagPagebreak([[maybe_unused]] HtmlToken* t) override {
+    void HandleTagPagebreak(HtmlToken*) override {
         ForceNewPage();
     }
 

@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* StrokeState interface */
 
 JNIEXPORT void JNICALL
@@ -11,16 +33,16 @@ FUN(StrokeState_finalize)(JNIEnv *env, jobject self)
 }
 
 JNIEXPORT jlong JNICALL
-FUN(StrokeState_newStrokeState)(JNIEnv *env, jobject self, jint startCap, jint dashCap, jint endCap, jint lineJoin, jfloat lineWidth, jfloat miterLimit, jfloat dashPhase, jfloatArray dash)
+FUN(StrokeState_newNativeStrokeState)(JNIEnv *env, jobject self, jint startCap, jint dashCap, jint endCap, jint lineJoin, jfloat lineWidth, jfloat miterLimit, jfloat dashPhase, jfloatArray dash)
 {
 	fz_context *ctx = get_context(env);
 	fz_stroke_state *stroke = NULL;
 	jsize len = 0;
 
 	if (!ctx) return 0;
-	if (!dash) jni_throw_arg(env, "dash must not be null");
 
-	len = (*env)->GetArrayLength(env, dash);
+	if (dash)
+		len = (*env)->GetArrayLength(env, dash);
 
 	fz_try(ctx)
 	{
@@ -37,8 +59,11 @@ FUN(StrokeState_newStrokeState)(JNIEnv *env, jobject self, jint startCap, jint d
 	fz_catch(ctx)
 		jni_rethrow(env, ctx);
 
-	(*env)->GetFloatArrayRegion(env, dash, 0, len, &stroke->dash_list[0]);
-	if ((*env)->ExceptionCheck(env)) return 0;
+	if (dash)
+	{
+		(*env)->GetFloatArrayRegion(env, dash, 0, len, &stroke->dash_list[0]);
+		if ((*env)->ExceptionCheck(env)) return 0;
+	}
 
 	return jlong_cast(stroke);
 }

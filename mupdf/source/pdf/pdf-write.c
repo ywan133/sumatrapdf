@@ -1,5 +1,27 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
-#include "mupdf/pdf.h"
+#include "pdf-annot-imp.h"
 
 #include <zlib.h>
 
@@ -11,6 +33,7 @@
 /* #define DEBUG_LINEARIZATION */
 /* #define DEBUG_HEAP_SORT */
 /* #define DEBUG_WRITING */
+/* #define DEBUG_MARK_AND_SWEEP */
 
 #define SIG_EXTRAS_SIZE (1024)
 
@@ -72,6 +95,10 @@ typedef struct
 	int do_clean;
 	int do_encrypt;
 	int dont_regenerate_id;
+	int do_snapshot;
+	int do_preserve_metadata;
+	int do_use_objstms;
+	int compression_effort;
 
 	int list_len;
 	int *use_list;
@@ -87,7 +114,7 @@ typedef struct
 	int64_t first_xref_entry_offset;
 	int64_t file_len;
 	int hints_shared_offset;
-	int hintstream_len;
+	int64_t hintstream_len;
 	pdf_obj *linear_l;
 	pdf_obj *linear_h0;
 	pdf_obj *linear_h1;
@@ -97,6 +124,7 @@ typedef struct
 	pdf_obj *linear_t;
 	pdf_obj *hints_s;
 	pdf_obj *hints_length;
+	int hint_object_num;
 	int page_count;
 	page_objects_list *page_object_lists;
 	int crypt_object_number;
@@ -104,6 +132,8 @@ typedef struct
 	char upwd_utf8[128];
 	int permissions;
 	pdf_crypt *crypt;
+	pdf_obj *crypt_obj;
+	pdf_obj *metadata;
 } pdf_write_state;
 
 /*
@@ -553,6 +583,27 @@ objects_dump(fz_context *ctx, pdf_document *doc, pdf_write_state *opts)
  * Garbage collect objects not reachable from the trailer.
  */
 
+static void bake_stream_length(fz_context *ctx, pdf_document *doc, int num)
+{
+	if (pdf_obj_num_is_stream(ctx, doc, num))
+	{
+		pdf_obj *len;
+		pdf_obj *obj = NULL;
+		fz_var(obj);
+		fz_try(ctx)
+		{
+			obj = pdf_load_object(ctx, doc, num);
+			len = pdf_dict_get(ctx, obj, PDF_NAME(Length));
+			if (pdf_is_indirect(ctx, len))
+				pdf_dict_put_int(ctx, obj, PDF_NAME(Length), pdf_to_int(ctx, len));
+		}
+		fz_always(ctx)
+			pdf_drop_obj(ctx, obj);
+		fz_catch(ctx)
+			fz_rethrow(ctx);
+	}
+}
+
 /* Mark a reference. If it's been marked already, return NULL (as no further
  * processing is required). If it's not, return the resolved object so
  * that we can continue our recursive marking. If it's a duff reference
@@ -561,36 +612,19 @@ objects_dump(fz_context *ctx, pdf_document *doc, pdf_write_state *opts)
 static pdf_obj *markref(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, pdf_obj *obj, int *duff)
 {
 	int num = pdf_to_num(ctx, obj);
+	int xref_len = pdf_xref_len(ctx, doc);
 
-	if (num <= 0 || num >= pdf_xref_len(ctx, doc))
+	if (num <= 0 || num >= xref_len)
 	{
 		*duff = 1;
 		return NULL;
 	}
+	expand_lists(ctx, opts, xref_len);
 	*duff = 0;
 	if (opts->use_list[num])
 		return NULL;
 
 	opts->use_list[num] = 1;
-
-	/* Bake in /Length in stream objects */
-	fz_try(ctx)
-	{
-		if (pdf_obj_num_is_stream(ctx, doc, num))
-		{
-			pdf_obj *len = pdf_dict_get(ctx, obj, PDF_NAME(Length));
-			if (pdf_is_indirect(ctx, len))
-			{
-				opts->use_list[pdf_to_num(ctx, len)] = 0;
-				len = pdf_resolve_indirect(ctx, len);
-				pdf_dict_put(ctx, obj, PDF_NAME(Length), len);
-			}
-		}
-	}
-	fz_catch(ctx)
-	{
-		/* Leave broken */
-	}
 
 	obj = pdf_resolve_indirect(ctx, obj);
 	if (obj == NULL || pdf_is_null(ctx, obj))
@@ -675,89 +709,38 @@ static int markobj(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, pd
 
 static void removeduplicateobjs(fz_context *ctx, pdf_document *doc, pdf_write_state *opts)
 {
-	int num, other, max_num;
+	int num, other;
 	int xref_len = pdf_xref_len(ctx, doc);
 
+	expand_lists(ctx, opts, xref_len);
 	for (num = 1; num < xref_len; num++)
 	{
 		/* Only compare an object to objects preceding it */
 		for (other = 1; other < num; other++)
 		{
 			pdf_obj *a, *b;
-			int newnum, streama = 0, streamb = 0, differ = 0;
+			int newnum;
 
-			if (num == other || !opts->use_list[num] || !opts->use_list[other])
+			if (num == other || num >= opts->list_len || !opts->use_list[num] || !opts->use_list[other])
 				continue;
 
 			/* TODO: resolve indirect references to see if we can omit them */
 
-			/*
-			 * Comparing stream objects data contents would take too long.
-			 *
-			 * pdf_obj_num_is_stream calls pdf_cache_object and ensures
-			 * that the xref table has the objects loaded.
-			 */
-			fz_try(ctx)
+			a = pdf_get_xref_entry_no_null(ctx, doc, num)->obj;
+			b = pdf_get_xref_entry_no_null(ctx, doc, other)->obj;
+			if (opts->do_garbage >= 4)
 			{
-				streama = pdf_obj_num_is_stream(ctx, doc, num);
-				streamb = pdf_obj_num_is_stream(ctx, doc, other);
-				differ = streama || streamb;
-				if (streama && streamb && opts->do_garbage >= 4)
-					differ = 0;
+				if (pdf_objcmp_deep(ctx, a, b))
+					continue;
 			}
-			fz_catch(ctx)
+			else
 			{
-				/* Assume different */
-				differ = 1;
-			}
-			if (differ)
-				continue;
-
-			a = pdf_get_xref_entry(ctx, doc, num)->obj;
-			b = pdf_get_xref_entry(ctx, doc, other)->obj;
-
-			if (pdf_objcmp(ctx, a, b))
-				continue;
-
-			if (streama && streamb)
-			{
-				/* Check to see if streams match too. */
-				fz_buffer *sa = NULL;
-				fz_buffer *sb = NULL;
-
-				fz_var(sa);
-				fz_var(sb);
-
-				differ = 1;
-				fz_try(ctx)
-				{
-					unsigned char *dataa, *datab;
-					size_t lena, lenb;
-					sa = pdf_load_raw_stream_number(ctx, doc, num);
-					sb = pdf_load_raw_stream_number(ctx, doc, other);
-					lena = fz_buffer_storage(ctx, sa, &dataa);
-					lenb = fz_buffer_storage(ctx, sb, &datab);
-					if (lena == lenb && memcmp(dataa, datab, lena) == 0)
-						differ = 0;
-				}
-				fz_always(ctx)
-				{
-					fz_drop_buffer(ctx, sa);
-					fz_drop_buffer(ctx, sb);
-				}
-				fz_catch(ctx)
-				{
-					fz_rethrow(ctx);
-				}
-				if (differ)
+				if (pdf_objcmp(ctx, a, b))
 					continue;
 			}
 
 			/* Keep the lowest numbered object */
 			newnum = fz_mini(num, other);
-			max_num = fz_maxi(num, other);
-			if (max_num >= opts->list_len)
-				expand_lists(ctx, opts, max_num);
 			opts->renumber_map[num] = newnum;
 			opts->renumber_map[other] = newnum;
 			opts->rev_renumber_map[newnum] = num; /* Either will do */
@@ -894,7 +877,7 @@ static void renumberobjs(fz_context *ctx, pdf_document *doc, pdf_write_state *op
 			if (to == 0)
 				continue;
 
-			obj = pdf_get_xref_entry(ctx, doc, num)->obj;
+			obj = pdf_get_xref_entry_no_null(ctx, doc, num)->obj;
 
 			if (pdf_is_indirect(ctx, obj))
 			{
@@ -914,7 +897,7 @@ static void renumberobjs(fz_context *ctx, pdf_document *doc, pdf_write_state *op
 
 		/* Create new table for the reordered, compacted xref */
 		newxref = Memento_label(fz_malloc_array(ctx, xref_len + 3, pdf_xref_entry), "pdf_xref_entries");
-		newxref[0] = *pdf_get_xref_entry(ctx, doc, 0);
+		newxref[0] = *pdf_get_xref_entry_no_null(ctx, doc, 0);
 
 		/* Move used objects into the new compacted xref */
 		newlen = 0;
@@ -925,18 +908,17 @@ static void renumberobjs(fz_context *ctx, pdf_document *doc, pdf_write_state *op
 				pdf_xref_entry *e;
 				if (newlen < opts->renumber_map[num])
 					newlen = opts->renumber_map[num];
-				e = pdf_get_xref_entry(ctx, doc, num);
+				e = pdf_get_xref_entry_no_null(ctx, doc, num);
 				newxref[opts->renumber_map[num]] = *e;
 				if (e->obj)
-				{
 					pdf_set_obj_parent(ctx, e->obj, opts->renumber_map[num]);
-					e->obj = NULL;
-				}
+				e->obj = NULL;
+				e->stm_buf = NULL;
 				new_use_list[opts->renumber_map[num]] = opts->use_list[num];
 			}
 			else
 			{
-				pdf_xref_entry *e = pdf_get_xref_entry(ctx, doc, num);
+				pdf_xref_entry *e = pdf_get_xref_entry_no_null(ctx, doc, num);
 				pdf_drop_obj(ctx, e->obj);
 				e->obj = NULL;
 				fz_drop_buffer(ctx, e->stm_buf);
@@ -1005,120 +987,101 @@ renumber_pages(fz_context *ctx, pdf_document *doc, pdf_write_state *opts)
 }
 
 static void
-mark_all(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, pdf_obj *val, int flag, int page)
+mark_all(fz_context *ctx, pdf_document *doc, pdf_mark_list *list, pdf_write_state *opts, pdf_obj *val, int flag, int page)
 {
-	if (pdf_mark_obj(ctx, val))
+	if (pdf_mark_list_push(ctx, list, val))
 		return;
 
-	fz_try(ctx)
+	if (pdf_is_indirect(ctx, val))
 	{
-		if (pdf_is_indirect(ctx, val))
+		int num = pdf_to_num(ctx, val);
+		int bits = flag;
+		if (num >= opts->list_len)
+			expand_lists(ctx, opts, num);
+		if (page >= 0)
+			page_objects_list_insert(ctx, opts, page, num);
+		if (opts->use_list[num] & USE_PAGE_MASK)
+			/* Already used */
+			bits = USE_SHARED;
+		if ((opts->use_list[num] | bits) == opts->use_list[num])
 		{
-			int num = pdf_to_num(ctx, val);
-			if (num >= opts->list_len)
-				expand_lists(ctx, opts, num);
-			if (opts->use_list[num] & USE_PAGE_MASK)
-				/* Already used */
-				opts->use_list[num] |= USE_SHARED;
-			else
-				opts->use_list[num] |= flag;
-			if (page >= 0)
-				page_objects_list_insert(ctx, opts, page, num);
+			/* Been here already */
+			pdf_mark_list_pop(ctx, list);
+			return;
 		}
+		opts->use_list[num] |= bits;
+	}
 
-		if (pdf_is_dict(ctx, val))
+	if (pdf_is_dict(ctx, val))
+	{
+		int i, n;
+		n = pdf_dict_len(ctx, val);
+
+		for (i = 0; i < n; i++)
 		{
-			int i, n;
-			n = pdf_dict_len(ctx, val);
+			pdf_obj *v = pdf_dict_get_val(ctx, val, i);
+			pdf_obj *type = pdf_dict_get(ctx, v, PDF_NAME(Type));
 
-			for (i = 0; i < n; i++)
-			{
-				pdf_obj *v = pdf_dict_get_val(ctx, val, i);
-				pdf_obj *type = pdf_dict_get(ctx, v, PDF_NAME(Type));
+			/* Don't walk through the Page tree, or direct to a page. */
+			if (pdf_name_eq(ctx, PDF_NAME(Pages), type) || pdf_name_eq(ctx, PDF_NAME(Page), type))
+				continue;
 
-				/* Don't walk through the Page tree, or direct to a page. */
-				if (pdf_name_eq(ctx, PDF_NAME(Pages), type) || pdf_name_eq(ctx, PDF_NAME(Page), type))
-					continue;
-
-				mark_all(ctx, doc, opts, v, flag, page);
-			}
-		}
-		else if (pdf_is_array(ctx, val))
-		{
-			int i, n = pdf_array_len(ctx, val);
-
-			for (i = 0; i < n; i++)
-			{
-				pdf_obj *v = pdf_array_get(ctx, val, i);
-				pdf_obj *type = pdf_dict_get(ctx, v, PDF_NAME(Type));
-
-				/* Don't walk through the Page tree, or direct to a page. */
-				if (pdf_name_eq(ctx, PDF_NAME(Pages), type) || pdf_name_eq(ctx, PDF_NAME(Page), type))
-					continue;
-
-				mark_all(ctx, doc, opts, v, flag, page);
-			}
+			mark_all(ctx, doc, list, opts, v, flag, page);
 		}
 	}
-	fz_always(ctx)
+	else if (pdf_is_array(ctx, val))
 	{
-		pdf_unmark_obj(ctx, val);
+		int i, n = pdf_array_len(ctx, val);
+
+		for (i = 0; i < n; i++)
+		{
+			pdf_obj *v = pdf_array_get(ctx, val, i);
+			pdf_obj *type = pdf_dict_get(ctx, v, PDF_NAME(Type));
+
+			/* Don't walk through the Page tree, or direct to a page. */
+			if (pdf_name_eq(ctx, PDF_NAME(Pages), type) || pdf_name_eq(ctx, PDF_NAME(Page), type))
+				continue;
+
+			mark_all(ctx, doc, list, opts, v, flag, page);
+		}
 	}
-	fz_catch(ctx)
-	{
-		fz_rethrow(ctx);
-	}
+	pdf_mark_list_pop(ctx, list);
 }
 
 static int
-mark_pages(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, pdf_obj *val, int pagenum)
+mark_pages(fz_context *ctx, pdf_document *doc, pdf_mark_list *list, pdf_write_state *opts, pdf_obj *val, int pagenum)
 {
-	if (pdf_mark_obj(ctx, val))
+	if (pdf_mark_list_push(ctx, list, val))
 		return pagenum;
 
-	fz_try(ctx)
+	if (pdf_is_dict(ctx, val))
 	{
-		if (pdf_is_dict(ctx, val))
+		if (pdf_name_eq(ctx, PDF_NAME(Page), pdf_dict_get(ctx, val, PDF_NAME(Type))))
 		{
-			if (pdf_name_eq(ctx, PDF_NAME(Page), pdf_dict_get(ctx, val, PDF_NAME(Type))))
-			{
-				int num = pdf_to_num(ctx, val);
-				pdf_unmark_obj(ctx, val);
-				mark_all(ctx, doc, opts, val, pagenum == 0 ? USE_PAGE1 : (pagenum<<USE_PAGE_SHIFT), pagenum);
-				page_objects_list_set_page_object(ctx, opts, pagenum, num);
-				pagenum++;
-				opts->use_list[num] |= USE_PAGE_OBJECT;
-			}
-			else
-			{
-				int i, n = pdf_dict_len(ctx, val);
+			int num = pdf_to_num(ctx, val);
+			pdf_mark_list_pop(ctx, list);
 
-				for (i = 0; i < n; i++)
-				{
-					pdf_obj *key = pdf_dict_get_key(ctx, val, i);
-					pdf_obj *obj = pdf_dict_get_val(ctx, val, i);
-
-					if (pdf_name_eq(ctx, PDF_NAME(Kids), key))
-						pagenum = mark_pages(ctx, doc, opts, obj, pagenum);
-					else
-						mark_all(ctx, doc, opts, obj, USE_CATALOGUE, -1);
-				}
-
-				if (pdf_is_indirect(ctx, val))
-				{
-					int num = pdf_to_num(ctx, val);
-					opts->use_list[num] |= USE_CATALOGUE;
-				}
-			}
+			mark_all(ctx, doc, list, opts, val, pagenum == 0 ? USE_PAGE1 : (pagenum<<USE_PAGE_SHIFT), pagenum);
+			page_objects_list_set_page_object(ctx, opts, pagenum, num);
+			pagenum++;
+			opts->use_list[num] |= USE_PAGE_OBJECT;
+			return pagenum;
 		}
-		else if (pdf_is_array(ctx, val))
+		else
 		{
-			int i, n = pdf_array_len(ctx, val);
+			int i, n = pdf_dict_len(ctx, val);
 
 			for (i = 0; i < n; i++)
 			{
-				pagenum = mark_pages(ctx, doc, opts, pdf_array_get(ctx, val, i), pagenum);
+				pdf_obj *key = pdf_dict_get_key(ctx, val, i);
+				pdf_obj *obj = pdf_dict_get_val(ctx, val, i);
+
+				if (pdf_name_eq(ctx, PDF_NAME(Kids), key))
+					pagenum = mark_pages(ctx, doc, list, opts, obj, pagenum);
+				else
+					mark_all(ctx, doc, list, opts, obj, USE_CATALOGUE, -1);
 			}
+
 			if (pdf_is_indirect(ctx, val))
 			{
 				int num = pdf_to_num(ctx, val);
@@ -1126,98 +1089,86 @@ mark_pages(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, pdf_obj *v
 			}
 		}
 	}
-	fz_always(ctx)
+	else if (pdf_is_array(ctx, val))
 	{
-		pdf_unmark_obj(ctx, val);
+		int i, n = pdf_array_len(ctx, val);
+
+		for (i = 0; i < n; i++)
+		{
+			pagenum = mark_pages(ctx, doc, list, opts, pdf_array_get(ctx, val, i), pagenum);
+		}
+		if (pdf_is_indirect(ctx, val))
+		{
+			int num = pdf_to_num(ctx, val);
+			opts->use_list[num] |= USE_CATALOGUE;
+		}
 	}
-	fz_catch(ctx)
-	{
-		fz_rethrow(ctx);
-	}
+	pdf_mark_list_pop(ctx, list);
+
 	return pagenum;
 }
 
 static void
-mark_root(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, pdf_obj *dict)
+mark_root(fz_context *ctx, pdf_document *doc, pdf_mark_list *list, pdf_write_state *opts, pdf_obj *dict)
 {
 	int i, n = pdf_dict_len(ctx, dict);
 
-	if (pdf_mark_obj(ctx, dict))
+	if (pdf_mark_list_push(ctx, list, dict))
 		return;
 
-	fz_try(ctx)
+	if (pdf_is_indirect(ctx, dict))
 	{
-		if (pdf_is_indirect(ctx, dict))
-		{
-			int num = pdf_to_num(ctx, dict);
-			opts->use_list[num] |= USE_CATALOGUE;
-		}
+		int num = pdf_to_num(ctx, dict);
+		opts->use_list[num] |= USE_CATALOGUE;
+	}
 
-		for (i = 0; i < n; i++)
-		{
-			pdf_obj *key = pdf_dict_get_key(ctx, dict, i);
-			pdf_obj *val = pdf_dict_get_val(ctx, dict, i);
+	for (i = 0; i < n; i++)
+	{
+		pdf_obj *key = pdf_dict_get_key(ctx, dict, i);
+		pdf_obj *val = pdf_dict_get_val(ctx, dict, i);
 
-			if (pdf_name_eq(ctx, PDF_NAME(Pages), key))
-				opts->page_count = mark_pages(ctx, doc, opts, val, 0);
-			else if (pdf_name_eq(ctx, PDF_NAME(Names), key))
-				mark_all(ctx, doc, opts, val, USE_OTHER_OBJECTS, -1);
-			else if (pdf_name_eq(ctx, PDF_NAME(Dests), key))
-				mark_all(ctx, doc, opts, val, USE_OTHER_OBJECTS, -1);
-			else if (pdf_name_eq(ctx, PDF_NAME(Outlines), key))
-			{
-				int section;
-				/* Look at PageMode to decide whether to
-				 * USE_OTHER_OBJECTS or USE_PAGE1 here. */
-				if (pdf_name_eq(ctx, pdf_dict_get(ctx, dict, PDF_NAME(PageMode)), PDF_NAME(UseOutlines)))
-					section = USE_PAGE1;
-				else
-					section = USE_OTHER_OBJECTS;
-				mark_all(ctx, doc, opts, val, section, -1);
-			}
+		if (pdf_name_eq(ctx, PDF_NAME(Pages), key))
+			opts->page_count = mark_pages(ctx, doc, list, opts, val, 0);
+		else if (pdf_name_eq(ctx, PDF_NAME(Names), key))
+			mark_all(ctx, doc, list, opts, val, USE_OTHER_OBJECTS, -1);
+		else if (pdf_name_eq(ctx, PDF_NAME(Dests), key))
+			mark_all(ctx, doc, list, opts, val, USE_OTHER_OBJECTS, -1);
+		else if (pdf_name_eq(ctx, PDF_NAME(Outlines), key))
+		{
+			int section;
+			/* Look at PageMode to decide whether to
+			 * USE_OTHER_OBJECTS or USE_PAGE1 here. */
+			if (pdf_name_eq(ctx, pdf_dict_get(ctx, dict, PDF_NAME(PageMode)), PDF_NAME(UseOutlines)))
+				section = USE_PAGE1;
 			else
-				mark_all(ctx, doc, opts, val, USE_CATALOGUE, -1);
+				section = USE_OTHER_OBJECTS;
+			mark_all(ctx, doc, list, opts, val, section, -1);
 		}
+		else
+			mark_all(ctx, doc, list, opts, val, USE_CATALOGUE, -1);
 	}
-	fz_always(ctx)
-	{
-		pdf_unmark_obj(ctx, dict);
-	}
-	fz_catch(ctx)
-	{
-		fz_rethrow(ctx);
-	}
+	pdf_mark_list_pop(ctx, list);
 }
 
 static void
-mark_trailer(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, pdf_obj *dict)
+mark_trailer(fz_context *ctx, pdf_document *doc, pdf_mark_list *list, pdf_write_state *opts, pdf_obj *dict)
 {
 	int i, n = pdf_dict_len(ctx, dict);
 
-	if (pdf_mark_obj(ctx, dict))
+	if (pdf_mark_list_push(ctx, list, dict))
 		return;
 
-	fz_try(ctx)
+	for (i = 0; i < n; i++)
 	{
-		for (i = 0; i < n; i++)
-		{
-			pdf_obj *key = pdf_dict_get_key(ctx, dict, i);
-			pdf_obj *val = pdf_dict_get_val(ctx, dict, i);
+		pdf_obj *key = pdf_dict_get_key(ctx, dict, i);
+		pdf_obj *val = pdf_dict_get_val(ctx, dict, i);
 
-			if (pdf_name_eq(ctx, PDF_NAME(Root), key))
-				mark_root(ctx, doc, opts, val);
-			else
-				mark_all(ctx, doc, opts, val, USE_CATALOGUE, -1);
-		}
+		if (pdf_name_eq(ctx, PDF_NAME(Root), key))
+			mark_root(ctx, doc, list, opts, val);
+		else
+			mark_all(ctx, doc, list, opts, val, USE_CATALOGUE, -1);
 	}
-	fz_always(ctx)
-	{
-		pdf_unmark_obj(ctx, dict);
-	}
-	fz_catch(ctx)
-	{
-		fz_rethrow(ctx);
-	}
+	pdf_mark_list_pop(ctx, list);
 }
 
 static void
@@ -1252,8 +1203,7 @@ add_linearization_objs(fz_context *ctx, pdf_document *doc, pdf_write_state *opts
 		opts->linear_l = pdf_new_int(ctx, INT_MIN);
 		pdf_dict_put(ctx, params_obj, PDF_NAME(L), opts->linear_l);
 		opts->linear_h0 = pdf_new_int(ctx, INT_MIN);
-		o = pdf_new_array(ctx, doc, 2);
-		pdf_dict_put_drop(ctx, params_obj, PDF_NAME(H), o);
+		o = pdf_dict_put_array(ctx, params_obj, PDF_NAME(H), 2);
 		pdf_array_push(ctx, o, opts->linear_h0);
 		opts->linear_h1 = pdf_new_int(ctx, INT_MIN);
 		pdf_array_push(ctx, o, opts->linear_h1);
@@ -1265,17 +1215,18 @@ add_linearization_objs(fz_context *ctx, pdf_document *doc, pdf_write_state *opts
 		pdf_dict_put(ctx, params_obj, PDF_NAME(N), opts->linear_n);
 		opts->linear_t = pdf_new_int(ctx, INT_MIN);
 		pdf_dict_put(ctx, params_obj, PDF_NAME(T), opts->linear_t);
+		pdf_dict_put_int(ctx, params_obj, PDF_NAME(P), 0);
 
 		/* Primary hint stream */
 		hint_obj = pdf_new_dict(ctx, doc, 10);
 		hint_ref = pdf_add_object(ctx, doc, hint_obj);
 		hint_num = pdf_to_num(ctx, hint_ref);
 
+		opts->hint_object_num = hint_num;
 		opts->use_list[hint_num] = USE_HINTS;
 		opts->renumber_map[hint_num] = hint_num;
 		opts->rev_renumber_map[hint_num] = hint_num;
 		opts->gen_list[hint_num] = 0;
-		pdf_dict_put_int(ctx, hint_obj, PDF_NAME(P), 0);
 		opts->hints_s = pdf_new_int(ctx, INT_MIN);
 		pdf_dict_put(ctx, hint_obj, PDF_NAME(S), opts->hints_s);
 		/* FIXME: Do we have thumbnails? Do a T entry */
@@ -1289,7 +1240,7 @@ add_linearization_objs(fz_context *ctx, pdf_document *doc, pdf_write_state *opts
 		pdf_dict_put(ctx, hint_obj, PDF_NAME(Filter), PDF_NAME(FlateDecode));
 		opts->hints_length = pdf_new_int(ctx, INT_MIN);
 		pdf_dict_put(ctx, hint_obj, PDF_NAME(Length), opts->hints_length);
-		xe = pdf_get_xref_entry(ctx, doc, hint_num);
+		xe = pdf_get_xref_entry_no_null(ctx, doc, hint_num);
 		xe->stm_ofs = 0;
 		/* Empty stream, required so that we write the object as
 		 * a stream during the first pass. Without this, offsets
@@ -1310,7 +1261,7 @@ add_linearization_objs(fz_context *ctx, pdf_document *doc, pdf_write_state *opts
 }
 
 static void
-lpr_inherit_res_contents(fz_context *ctx, pdf_obj *res, pdf_obj *dict, pdf_obj *text)
+lpr_inherit_res_contents(fz_context *ctx, pdf_mark_list *list, int cycle, pdf_obj *res, pdf_obj *dict, pdf_obj *text)
 {
 	pdf_obj *o, *r;
 	int i, n;
@@ -1320,20 +1271,28 @@ lpr_inherit_res_contents(fz_context *ctx, pdf_obj *res, pdf_obj *dict, pdf_obj *
 	if (!o)
 		return;
 
+	if (!cycle)
+		cycle = pdf_mark_list_check(ctx, list, o);
+
 	/* If the resources dict we are building doesn't have an entry of this
 	 * type yet, then just copy it (ensuring it's not a reference) */
 	r = pdf_dict_get(ctx, res, text);
 	if (r == NULL)
 	{
-		o = pdf_resolve_indirect(ctx, o);
-		if (pdf_is_dict(ctx, o))
-			o = pdf_copy_dict(ctx, o);
-		else if (pdf_is_array(ctx, o))
-			o = pdf_copy_array(ctx, o);
-		else
-			o = NULL;
-		if (o)
-			pdf_dict_put_drop(ctx, res, text, o);
+		/* Only copy the dict if to do so would not cause a cycle! */
+		if (!cycle)
+		{
+			if (pdf_is_dict(ctx, o))
+				o = pdf_copy_dict(ctx, o);
+			else if (pdf_is_array(ctx, o))
+				o = pdf_copy_array(ctx, o);
+			else
+				o = NULL;
+			if (o)
+				pdf_dict_put_drop(ctx, res, text, o);
+		}
+		else if (o)
+			pdf_dict_put(ctx, res, text, o);
 		return;
 	}
 
@@ -1346,49 +1305,67 @@ lpr_inherit_res_contents(fz_context *ctx, pdf_obj *res, pdf_obj *dict, pdf_obj *
 			pdf_obj *key = pdf_dict_get_key(ctx, o, i);
 			pdf_obj *val = pdf_dict_get_val(ctx, o, i);
 
-			if (pdf_dict_get(ctx, res, key))
+			if (pdf_dict_get(ctx, r, key))
 				continue;
-			pdf_dict_put(ctx, res, key, val);
+			pdf_dict_put(ctx, r, key, val);
 		}
 	}
 }
 
 static void
-lpr_inherit_res(fz_context *ctx, pdf_obj *node, int depth, pdf_obj *dict)
+lpr_inherit_res(fz_context *ctx, pdf_mark_list *list, pdf_obj *node, int depth, pdf_obj *dict)
 {
 	while (1)
 	{
 		pdf_obj *o;
+		int cycle;
 
 		node = pdf_dict_get(ctx, node, PDF_NAME(Parent));
 		depth--;
 		if (!node || depth < 0)
 			break;
 
+		cycle = pdf_mark_list_push(ctx, list, node);
 		o = pdf_dict_get(ctx, node, PDF_NAME(Resources));
 		if (o)
 		{
-			lpr_inherit_res_contents(ctx, dict, o, PDF_NAME(ExtGState));
-			lpr_inherit_res_contents(ctx, dict, o, PDF_NAME(ColorSpace));
-			lpr_inherit_res_contents(ctx, dict, o, PDF_NAME(Pattern));
-			lpr_inherit_res_contents(ctx, dict, o, PDF_NAME(Shading));
-			lpr_inherit_res_contents(ctx, dict, o, PDF_NAME(XObject));
-			lpr_inherit_res_contents(ctx, dict, o, PDF_NAME(Font));
-			lpr_inherit_res_contents(ctx, dict, o, PDF_NAME(ProcSet));
-			lpr_inherit_res_contents(ctx, dict, o, PDF_NAME(Properties));
+			int cycle2 = cycle;
+			if (!cycle)
+				cycle2 = pdf_mark_list_push(ctx, list, o);
+			lpr_inherit_res_contents(ctx, list, cycle2, dict, o, PDF_NAME(ExtGState));
+			lpr_inherit_res_contents(ctx, list, cycle2, dict, o, PDF_NAME(ColorSpace));
+			lpr_inherit_res_contents(ctx, list, cycle2, dict, o, PDF_NAME(Pattern));
+			lpr_inherit_res_contents(ctx, list, cycle2, dict, o, PDF_NAME(Shading));
+			lpr_inherit_res_contents(ctx, list, cycle2, dict, o, PDF_NAME(XObject));
+			lpr_inherit_res_contents(ctx, list, cycle2, dict, o, PDF_NAME(Font));
+			lpr_inherit_res_contents(ctx, list, cycle2, dict, o, PDF_NAME(ProcSet));
+			lpr_inherit_res_contents(ctx, list, cycle2, dict, o, PDF_NAME(Properties));
+			if (!cycle2)
+				pdf_mark_list_pop(ctx, list);
 		}
+		if (!cycle)
+			pdf_mark_list_pop(ctx, list);
 	}
 }
 
 static pdf_obj *
-lpr_inherit(fz_context *ctx, pdf_obj *node, char *text, int depth)
+lpr_inherit(fz_context *ctx, pdf_mark_list *list, pdf_obj *node, char *text, int depth)
 {
 	do
 	{
 		pdf_obj *o = pdf_dict_gets(ctx, node, text);
 
 		if (o)
+		{
+			/* Watch for cycling here. If we do hit a cycle, then take
+			 * care NOT to resolve the indirection to avoid creating direct
+			 * object cycles. */
+			if (pdf_mark_list_push(ctx, list, o))
+				return o;
+
+			pdf_mark_list_pop(ctx, list);
 			return pdf_resolve_indirect(ctx, o);
+		}
 		node = pdf_dict_get(ctx, node, PDF_NAME(Parent));
 		depth--;
 	}
@@ -1398,13 +1375,13 @@ lpr_inherit(fz_context *ctx, pdf_obj *node, char *text, int depth)
 }
 
 static int
-lpr(fz_context *ctx, pdf_document *doc, pdf_obj *node, int depth, int page)
+lpr(fz_context *ctx, pdf_document *doc, pdf_mark_list *list, pdf_obj *node, int depth, int page)
 {
 	pdf_obj *kids;
 	pdf_obj *o = NULL;
 	int i, n;
 
-	if (pdf_mark_obj(ctx, node))
+	if (pdf_mark_list_push(ctx, list, node))
 		return page;
 
 	fz_var(o);
@@ -1422,23 +1399,23 @@ lpr(fz_context *ctx, pdf_document *doc, pdf_obj *node, int depth, int page)
 				o = pdf_keep_obj(ctx, pdf_new_dict(ctx, doc, 2));
 				pdf_dict_put(ctx, node, PDF_NAME(Resources), o);
 			}
-			lpr_inherit_res(ctx, node, depth, o);
-			r = lpr_inherit(ctx, node, "MediaBox", depth);
+			lpr_inherit_res(ctx, list, node, depth, o);
+			r = lpr_inherit(ctx, list, node, "MediaBox", depth);
 			if (r)
 				pdf_dict_put(ctx, node, PDF_NAME(MediaBox), r);
-			r = lpr_inherit(ctx, node, "CropBox", depth);
+			r = lpr_inherit(ctx, list, node, "CropBox", depth);
 			if (r)
 				pdf_dict_put(ctx, node, PDF_NAME(CropBox), r);
-			r = lpr_inherit(ctx, node, "BleedBox", depth);
+			r = lpr_inherit(ctx, list, node, "BleedBox", depth);
 			if (r)
 				pdf_dict_put(ctx, node, PDF_NAME(BleedBox), r);
-			r = lpr_inherit(ctx, node, "TrimBox", depth);
+			r = lpr_inherit(ctx, list, node, "TrimBox", depth);
 			if (r)
 				pdf_dict_put(ctx, node, PDF_NAME(TrimBox), r);
-			r = lpr_inherit(ctx, node, "ArtBox", depth);
+			r = lpr_inherit(ctx, list, node, "ArtBox", depth);
 			if (r)
 				pdf_dict_put(ctx, node, PDF_NAME(ArtBox), r);
-			r = lpr_inherit(ctx, node, "Rotate", depth);
+			r = lpr_inherit(ctx, list, node, "Rotate", depth);
 			if (r)
 				pdf_dict_put(ctx, node, PDF_NAME(Rotate), r);
 			page++;
@@ -1449,7 +1426,7 @@ lpr(fz_context *ctx, pdf_document *doc, pdf_obj *node, int depth, int page)
 			n = pdf_array_len(ctx, kids);
 			for(i = 0; i < n; i++)
 			{
-				page = lpr(ctx, doc, pdf_array_get(ctx, kids, i), depth+1, page);
+				page = lpr(ctx, doc, list, pdf_array_get(ctx, kids, i), depth+1, page);
 			}
 			pdf_dict_del(ctx, node, PDF_NAME(Resources));
 			pdf_dict_del(ctx, node, PDF_NAME(MediaBox));
@@ -1462,25 +1439,22 @@ lpr(fz_context *ctx, pdf_document *doc, pdf_obj *node, int depth, int page)
 	}
 	fz_always(ctx)
 	{
+		pdf_mark_list_pop(ctx, list);
 		pdf_drop_obj(ctx, o);
 	}
 	fz_catch(ctx)
-	{
 		fz_rethrow(ctx);
-	}
-
-	pdf_unmark_obj(ctx, node);
 
 	return page;
 }
 
-void
-pdf_localise_page_resources(fz_context *ctx, pdf_document *doc)
+static void
+pdf_localise_page_resources(fz_context *ctx, pdf_document *doc, pdf_mark_list *list)
 {
 	if (doc->resources_localised)
 		return;
 
-	lpr(ctx, doc, pdf_dict_getl(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root), PDF_NAME(Pages), NULL), 0, 0);
+	lpr(ctx, doc, list, pdf_dict_getl(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root), PDF_NAME(Pages), NULL), 0, 0);
 
 	doc->resources_localised = 1;
 }
@@ -1492,18 +1466,27 @@ linearize(fz_context *ctx, pdf_document *doc, pdf_write_state *opts)
 	int n = pdf_xref_len(ctx, doc) + 2;
 	int *reorder;
 	int *rev_renumber_map;
+	pdf_mark_list list;
 
+	pdf_mark_list_init(ctx, &list);
 	opts->page_object_lists = page_objects_list_create(ctx);
 
 	/* Ensure that every page has local references of its resources */
-	/* FIXME: We could 'thin' the resources according to what is actually
-	 * required for each page, but this would require us to run the page
-	 * content streams. */
-	pdf_localise_page_resources(ctx, doc);
+	fz_try(ctx)
+	{
+		/* FIXME: We could 'thin' the resources according to what is actually
+		 * required for each page, but this would require us to run the page
+		 * content streams. */
+		pdf_localise_page_resources(ctx, doc, &list);
 
-	/* Walk the objects for each page, marking which ones are used, where */
-	memset(opts->use_list, 0, n * sizeof(int));
-	mark_trailer(ctx, doc, opts, pdf_trailer(ctx, doc));
+		/* Walk the objects for each page, marking which ones are used, where */
+		memset(opts->use_list, 0, n * sizeof(int));
+		mark_trailer(ctx, doc, &list, opts, pdf_trailer(ctx, doc));
+	}
+	fz_always(ctx)
+		pdf_mark_list_free(ctx, &list);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
 
 	/* Add new objects required for linearization */
 	add_linearization_objs(ctx, doc, opts);
@@ -1593,14 +1576,56 @@ static void preloadobjstms(fz_context *ctx, pdf_document *doc)
 {
 	pdf_obj *obj;
 	int num;
+	pdf_xref_entry *x = NULL;
+	int load = 1;
+
+	/* If we have attempted a repair, then everything will have been
+	 * loaded already. */
+	if (doc->repair_attempted)
+	{
+		/* Bug 707112: But we do need to mark all our 'o' objects as being something else. */
+		load = 0;
+	}
+
+	fz_var(num);
+	fz_var(x);
 
 	/* xref_len may change due to repair, so check it every iteration */
 	for (num = 0; num < pdf_xref_len(ctx, doc); num++)
 	{
-		if (pdf_get_xref_entry(ctx, doc, num)->type == 'o')
+		fz_try(ctx)
 		{
-			obj = pdf_load_object(ctx, doc, num);
-			pdf_drop_obj(ctx, obj);
+			for (; num < pdf_xref_len(ctx, doc); num++)
+			{
+				x = pdf_get_xref_entry_no_null(ctx, doc, num);
+				if (x->type == 'o')
+				{
+					if (load)
+					{
+						obj = pdf_load_object(ctx, doc, num);
+						pdf_drop_obj(ctx, obj);
+					}
+					/* The object is no longer an objstm one. It's a regular object
+					 * held in memory. Previously we used gen to hold the index of
+					 * the obj in the objstm, so reset this to 0. */
+					x->type = 'n';
+					x->gen = 0;
+				}
+				x = NULL;
+			}
+		}
+		fz_catch(ctx)
+		{
+			/* We need to clear the type even in the event of an error, lest we
+			 * hit an assert later. Bug 707110. */
+			if (x && x->type == 'o')
+			{
+				x->type = 'f';
+				x->gen = 0;
+			}
+			/* Ignore the error, so we can carry on trying to load. */
+			fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+			fz_report_error(ctx);
 		}
 	}
 }
@@ -1729,7 +1754,7 @@ static void addhexfilter(fz_context *ctx, pdf_document *doc, pdf_obj *dict)
 		fz_rethrow(ctx);
 }
 
-static fz_buffer *deflatebuf(fz_context *ctx, const unsigned char *p, size_t n)
+static fz_buffer *deflatebuf(fz_context *ctx, const unsigned char *p, size_t n, int effort)
 {
 	fz_buffer *buf;
 	uLongf csize;
@@ -1737,21 +1762,32 @@ static fz_buffer *deflatebuf(fz_context *ctx, const unsigned char *p, size_t n)
 	uLong longN = (uLong)n;
 	unsigned char *data;
 	size_t cap;
+	int mode;
 
 	if (n != (size_t)longN)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Buffer too large to deflate");
+		fz_throw(ctx, FZ_ERROR_LIMIT, "Buffer too large to deflate");
 
 	cap = compressBound(longN);
 	data = Memento_label(fz_malloc(ctx, cap), "pdf_write_deflate");
 	buf = fz_new_buffer_from_data(ctx, data, cap);
 	csize = (uLongf)cap;
-	t = compress(data, &csize, p, longN);
+	if (effort == 0)
+		mode = Z_DEFAULT_COMPRESSION;
+	else
+		mode = effort * Z_BEST_COMPRESSION / 100;
+	t = compress2(data, &csize, p, longN, mode);
 	if (t != Z_OK)
 	{
 		fz_drop_buffer(ctx, buf);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot deflate buffer");
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot deflate buffer");
 	}
-	fz_resize_buffer(ctx, buf, csize);
+	fz_try(ctx)
+		fz_resize_buffer(ctx, buf, csize);
+	fz_catch(ctx)
+	{
+		fz_drop_buffer(ctx, buf);
+		fz_rethrow(ctx);
+	}
 	return buf;
 }
 
@@ -1860,7 +1896,7 @@ static void copystream(fz_context *ctx, pdf_document *doc, pdf_write_state *opts
 		{
 			if (is_bitmap_stream(ctx, obj, len, &w, &h))
 			{
-				tmp_comp = fz_compress_ccitt_fax_g4(ctx, data, w, h);
+				tmp_comp = fz_compress_ccitt_fax_g4(ctx, data, w, h, (w+7)>>3);
 				pdf_dict_put(ctx, obj, PDF_NAME(Filter), PDF_NAME(CCITTFaxDecode));
 				dp = pdf_dict_put_dict(ctx, obj, PDF_NAME(DecodeParms), 1);
 				pdf_dict_put_int(ctx, dp, PDF_NAME(K), -1);
@@ -1868,7 +1904,7 @@ static void copystream(fz_context *ctx, pdf_document *doc, pdf_write_state *opts
 			}
 			else
 			{
-				tmp_comp = deflatebuf(ctx, data, len);
+				tmp_comp = deflatebuf(ctx, data, len, opts->compression_effort);
 				pdf_dict_put(ctx, obj, PDF_NAME(Filter), PDF_NAME(FlateDecode));
 			}
 			len = fz_buffer_storage(ctx, tmp_comp, &data);
@@ -1893,7 +1929,7 @@ static void copystream(fz_context *ctx, pdf_document *doc, pdf_write_state *opts
 		else
 		{
 			pdf_dict_put_int(ctx, obj, PDF_NAME(Length), pdf_encrypted_len(ctx, opts->crypt, num, gen, len));
-			pdf_print_encrypted_obj(ctx, opts->out, obj, opts->do_tight, opts->do_ascii, opts->crypt, num, gen);
+			pdf_print_encrypted_obj(ctx, opts->out, obj, opts->do_tight, opts->do_ascii, opts->crypt, num, gen, NULL);
 			fz_write_string(ctx, opts->out, "\nstream\n");
 			pdf_encrypt_data(ctx, opts->crypt, num, gen, write_data, opts->out, data, len);
 		}
@@ -1940,7 +1976,7 @@ static void expandstream(fz_context *ctx, pdf_document *doc, pdf_write_state *op
 		{
 			if (is_bitmap_stream(ctx, obj, len, &w, &h))
 			{
-				tmp_comp = fz_compress_ccitt_fax_g4(ctx, data, w, h);
+				tmp_comp = fz_compress_ccitt_fax_g4(ctx, data, w, h, (w+7)>>3);
 				pdf_dict_put(ctx, obj, PDF_NAME(Filter), PDF_NAME(CCITTFaxDecode));
 				dp = pdf_dict_put_dict(ctx, obj, PDF_NAME(DecodeParms), 1);
 				pdf_dict_put_int(ctx, dp, PDF_NAME(K), -1);
@@ -1948,7 +1984,7 @@ static void expandstream(fz_context *ctx, pdf_document *doc, pdf_write_state *op
 			}
 			else
 			{
-				tmp_comp = deflatebuf(ctx, data, len);
+				tmp_comp = deflatebuf(ctx, data, len, opts->compression_effort);
 				pdf_dict_put(ctx, obj, PDF_NAME(Filter), PDF_NAME(FlateDecode));
 			}
 			len = fz_buffer_storage(ctx, tmp_comp, &data);
@@ -1973,7 +2009,7 @@ static void expandstream(fz_context *ctx, pdf_document *doc, pdf_write_state *op
 		else
 		{
 			pdf_dict_put_int(ctx, obj, PDF_NAME(Length), pdf_encrypted_len(ctx, opts->crypt, num, gen, (int)len));
-			pdf_print_encrypted_obj(ctx, opts->out, obj, opts->do_tight, opts->do_ascii, opts->crypt, num, gen);
+			pdf_print_encrypted_obj(ctx, opts->out, obj, opts->do_tight, opts->do_ascii, opts->crypt, num, gen, NULL);
 			fz_write_string(ctx, opts->out, "\nstream\n");
 			pdf_encrypt_data(ctx, opts->crypt, num, gen, write_data, opts->out, data, len);
 		}
@@ -2105,14 +2141,16 @@ static void writeobject(fz_context *ctx, pdf_document *doc, pdf_write_state *opt
 		if (pdf_is_dict(ctx, obj))
 		{
 			pdf_obj *type = pdf_dict_get(ctx, obj, PDF_NAME(Type));
-			if (type == PDF_NAME(ObjStm))
+			if (type == PDF_NAME(ObjStm) && !opts->do_use_objstms)
 			{
-				opts->use_list[num] = 0;
+				if (opts->use_list)
+					opts->use_list[num] = 0;
 				skip = 1;
 			}
 			if (skip_xrefs && type == PDF_NAME(XRef))
 			{
-				opts->use_list[num] = 0;
+				if (opts->use_list)
+					opts->use_list[num] = 0;
 				skip = 1;
 			}
 		}
@@ -2132,7 +2170,7 @@ static void writeobject(fz_context *ctx, pdf_document *doc, pdf_write_state *opt
 				if (is_jpx_stream(ctx, obj))
 					do_deflate = 0, do_expand = 0;
 
-				if (do_expand)
+				if (do_expand && num != opts->hint_object_num)
 					expandstream(ctx, doc, opts, obj, num, gen, do_deflate, unenc);
 				else
 					copystream(ctx, doc, opts, obj, num, gen, do_deflate, unenc);
@@ -2140,7 +2178,7 @@ static void writeobject(fz_context *ctx, pdf_document *doc, pdf_write_state *opt
 			else
 			{
 				fz_write_printf(ctx, opts->out, "%d %d obj\n", num, gen);
-				pdf_print_encrypted_obj(ctx, opts->out, obj, opts->do_tight, opts->do_ascii, unenc ? NULL : opts->crypt, num, gen);
+				pdf_print_encrypted_obj(ctx, opts->out, obj, opts->do_tight, opts->do_ascii, unenc ? NULL : opts->crypt, num, gen, NULL);
 				fz_write_string(ctx, opts->out, "\nendobj\n\n");
 			}
 		}
@@ -2174,7 +2212,6 @@ static void writexref(fz_context *ctx, pdf_document *doc, pdf_write_state *opts,
 {
 	pdf_obj *trailer = NULL;
 	pdf_obj *obj;
-	pdf_obj *nobj = NULL;
 
 	fz_write_string(ctx, opts->out, "xref\n");
 	opts->first_xref_entry_offset = fz_tell_output(ctx, opts->out);
@@ -2208,55 +2245,75 @@ static void writexref(fz_context *ctx, pdf_document *doc, pdf_write_state *opts,
 
 	fz_var(trailer);
 
-	if (opts->do_incremental)
+	fz_try(ctx)
 	{
-		trailer = pdf_keep_obj(ctx, pdf_trailer(ctx, doc));
-		pdf_dict_put_int(ctx, trailer, PDF_NAME(Size), pdf_xref_len(ctx, doc));
-		pdf_dict_put_int(ctx, trailer, PDF_NAME(Prev), doc->startxref);
-		doc->startxref = startxref;
+		if (opts->do_incremental)
+		{
+			trailer = pdf_keep_obj(ctx, pdf_trailer(ctx, doc));
+			pdf_dict_put_int(ctx, trailer, PDF_NAME(Size), pdf_xref_len(ctx, doc));
+			pdf_dict_put_int(ctx, trailer, PDF_NAME(Prev), doc->startxref);
+			pdf_dict_del(ctx, trailer, PDF_NAME(XRefStm));
+			if (!opts->do_snapshot)
+				doc->startxref = startxref;
+		}
+		else
+		{
+			trailer = pdf_new_dict(ctx, doc, 5);
+
+			pdf_dict_put_int(ctx, trailer, PDF_NAME(Size), to);
+
+			if (first)
+			{
+				pdf_obj *otrailer = pdf_trailer(ctx, doc);
+				obj = pdf_dict_get(ctx, otrailer, PDF_NAME(Info));
+				if (obj)
+					pdf_dict_put(ctx, trailer, PDF_NAME(Info), obj);
+
+				obj = pdf_dict_get(ctx, otrailer, PDF_NAME(Root));
+				if (obj)
+					pdf_dict_put(ctx, trailer, PDF_NAME(Root), obj);
+
+
+				obj = pdf_dict_get(ctx, otrailer, PDF_NAME(ID));
+				if (obj)
+					pdf_dict_put(ctx, trailer, PDF_NAME(ID), obj);
+
+				/* The encryption dictionary is kept in the writer state to handle
+				   the encryption dictionary object being renumbered during repair.*/
+				if (opts->crypt_obj)
+				{
+					/* If the encryption dictionary used to be an indirect reference from the trailer,
+					   store it the same way in the trailer in the saved file. */
+					if (pdf_is_indirect(ctx, opts->crypt_obj))
+						pdf_dict_put_indirect(ctx, trailer, PDF_NAME(Encrypt), opts->crypt_object_number);
+					else
+						pdf_dict_put(ctx, trailer, PDF_NAME(Encrypt), opts->crypt_obj);
+				}
+
+				if (opts->metadata)
+					pdf_dict_putp(ctx, trailer, "Root/Metadata", opts->metadata);
+			}
+			if (main_xref_offset != 0)
+				pdf_dict_put_int(ctx, trailer, PDF_NAME(Prev), main_xref_offset);
+		}
+
+		fz_write_string(ctx, opts->out, "trailer\n");
+		/* Trailer is NOT encrypted */
+		pdf_print_obj(ctx, opts->out, trailer, opts->do_tight, opts->do_ascii);
+		fz_write_string(ctx, opts->out, "\n");
+
+		fz_write_printf(ctx, opts->out, "startxref\n%lu\n%%%%EOF\n", startxref);
+
+		doc->last_xref_was_old_style = 1;
 	}
-	else
+	fz_always(ctx)
 	{
-		trailer = pdf_new_dict(ctx, doc, 5);
-
-		nobj = pdf_new_int(ctx, to);
-		pdf_dict_put_drop(ctx, trailer, PDF_NAME(Size), nobj);
-
-		if (first)
-		{
-			obj = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Info));
-			if (obj)
-				pdf_dict_put(ctx, trailer, PDF_NAME(Info), obj);
-
-			obj = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root));
-			if (obj)
-				pdf_dict_put(ctx, trailer, PDF_NAME(Root), obj);
-
-			obj = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(ID));
-			if (obj)
-				pdf_dict_put(ctx, trailer, PDF_NAME(ID), obj);
-
-			obj = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Encrypt));
-			if (obj)
-				pdf_dict_put(ctx, trailer, PDF_NAME(Encrypt), obj);
-		}
-		if (main_xref_offset != 0)
-		{
-			nobj = pdf_new_int(ctx, main_xref_offset);
-			pdf_dict_put_drop(ctx, trailer, PDF_NAME(Prev), nobj);
-		}
+		pdf_drop_obj(ctx, trailer);
 	}
-
-	fz_write_string(ctx, opts->out, "trailer\n");
-	/* Trailer is NOT encrypted */
-	pdf_print_obj(ctx, opts->out, trailer, opts->do_tight, opts->do_ascii);
-	fz_write_string(ctx, opts->out, "\n");
-
-	pdf_drop_obj(ctx, trailer);
-
-	fz_write_printf(ctx, opts->out, "startxref\n%lu\n%%%%EOF\n", startxref);
-
-	doc->has_xref_streams = 0;
+	fz_catch(ctx)
+	{
+		fz_rethrow(ctx);
+	}
 }
 
 static void writexrefstreamsubsect(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, pdf_obj *index, fz_buffer *fzbuf, int from, int to)
@@ -2267,12 +2324,32 @@ static void writexrefstreamsubsect(fz_context *ctx, pdf_document *doc, pdf_write
 	pdf_array_push_int(ctx, index, to - from);
 	for (num = from; num < to; num++)
 	{
-		fz_append_byte(ctx, fzbuf, opts->use_list[num] ? 1 : 0);
-		fz_append_byte(ctx, fzbuf, opts->ofs_list[num]>>24);
-		fz_append_byte(ctx, fzbuf, opts->ofs_list[num]>>16);
-		fz_append_byte(ctx, fzbuf, opts->ofs_list[num]>>8);
-		fz_append_byte(ctx, fzbuf, opts->ofs_list[num]);
-		fz_append_byte(ctx, fzbuf, opts->gen_list[num]);
+		int f1, f2, f3;
+		pdf_xref_entry *x = pdf_get_xref_entry_no_null(ctx, doc, num);
+		if (opts->use_list[num] == 0)
+		{
+			f1 = 0; /* Free */
+			f2 = opts->ofs_list[num];
+			f3 = opts->gen_list[num];
+		}
+		else if (x->type == 'o')
+		{
+			f1 = 2; /* Object Stream */
+			f2 = opts->ofs_list[num];
+			f3 = opts->gen_list[num];
+		}
+		else
+		{
+			f1 = 1; /* Object */
+			f2 = opts->ofs_list[num];
+			f3 = opts->gen_list[num];
+		}
+		fz_append_byte(ctx, fzbuf, f1);
+		fz_append_byte(ctx, fzbuf, f2>>24);
+		fz_append_byte(ctx, fzbuf, f2>>16);
+		fz_append_byte(ctx, fzbuf, f2>>8);
+		fz_append_byte(ctx, fzbuf, f2);
+		fz_append_byte(ctx, fzbuf, f3);
 	}
 }
 
@@ -2314,11 +2391,16 @@ static void writexrefstream(fz_context *ctx, pdf_document *doc, pdf_write_state 
 			if (obj)
 				pdf_dict_put(ctx, dict, PDF_NAME(ID), obj);
 
-			if (opts->do_incremental)
+			/* The encryption dictionary is kept in the writer state to handle
+			   the encryption dictionary object being renumbered during repair.*/
+			if (opts->crypt_obj)
 			{
-				obj = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Encrypt));
-				if (obj)
-					pdf_dict_put(ctx, dict, PDF_NAME(Encrypt), obj);
+				/* If the encryption dictionary used to be an indirect reference from the trailer,
+				   store it the same way in the xref stream in the saved file. */
+				if (pdf_is_indirect(ctx, opts->crypt_obj))
+					pdf_dict_put_indirect(ctx, dict, PDF_NAME(Encrypt), opts->crypt_object_number);
+				else
+					pdf_dict_put(ctx, dict, PDF_NAME(Encrypt), opts->crypt_obj);
 			}
 		}
 
@@ -2327,7 +2409,8 @@ static void writexrefstream(fz_context *ctx, pdf_document *doc, pdf_write_state 
 		if (opts->do_incremental)
 		{
 			pdf_dict_put_int(ctx, dict, PDF_NAME(Prev), doc->startxref);
-			doc->startxref = startxref;
+			if (!opts->do_snapshot)
+				doc->startxref = startxref;
 		}
 		else
 		{
@@ -2381,6 +2464,9 @@ static void writexrefstream(fz_context *ctx, pdf_document *doc, pdf_write_state 
 
 		writeobject(ctx, doc, opts, num, 0, 0, 1);
 		fz_write_printf(ctx, opts->out, "startxref\n%lu\n%%%%EOF\n", startxref);
+
+		if (opts->do_snapshot)
+			pdf_delete_object(ctx, doc, num);
 	}
 	fz_always(ctx)
 	{
@@ -2393,7 +2479,7 @@ static void writexrefstream(fz_context *ctx, pdf_document *doc, pdf_write_state 
 		fz_rethrow(ctx);
 	}
 
-	doc->has_old_style_xrefs = 0;
+	doc->last_xref_was_old_style = 0;
 }
 
 static void
@@ -2412,13 +2498,12 @@ padto(fz_context *ctx, fz_output *out, int64_t target)
 static void
 dowriteobject(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, int num, int pass)
 {
-	pdf_xref_entry *entry = pdf_get_xref_entry(ctx, doc, num);
+	pdf_xref_entry *entry = pdf_get_xref_entry_no_null(ctx, doc, num);
+	int gen = opts->gen_list ? opts->gen_list[num] : 0;
 	if (entry->type == 'f')
-		opts->gen_list[num] = entry->gen;
+		gen = entry->gen;
 	if (entry->type == 'n')
-		opts->gen_list[num] = entry->gen;
-	if (entry->type == 'o')
-		opts->gen_list[num] = 0;
+		gen = entry->gen;
 
 	/* If we are renumbering, then make sure all generation numbers are
 	 * zero (except object 0 which must be free, and have a gen number of
@@ -2426,22 +2511,38 @@ dowriteobject(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, int num
 	 * will break encryption - so only do this if we are renumbering
 	 * anyway. */
 	if (opts->do_garbage >= 2)
-		opts->gen_list[num] = (num == 0 ? 65535 : 0);
+		gen = (num == 0 ? 65535 : 0);
+
+	/* For objects in object streams, the gen number gives us the index of
+	 * the object within the stream. */
+	if (entry->type == 'o')
+		gen = entry->gen;
+
+	if (opts->gen_list)
+		opts->gen_list[num] = gen;
 
 	if (opts->do_garbage && !opts->use_list[num])
 		return;
 
-	if (entry->type == 'n' || entry->type == 'o')
+	if (entry->type == 'o' && (!opts->do_incremental || pdf_xref_is_incremental(ctx, doc, num)))
+	{
+		assert(opts->do_use_objstms);
+		opts->ofs_list[num] = entry->ofs;
+		return;
+	}
+
+	if (entry->type == 'n')
 	{
 		if (pass > 0)
 			padto(ctx, opts->out, opts->ofs_list[num]);
 		if (!opts->do_incremental || pdf_xref_is_incremental(ctx, doc, num))
 		{
-			opts->ofs_list[num] = fz_tell_output(ctx, opts->out);
-			writeobject(ctx, doc, opts, num, opts->gen_list[num], 1, num == opts->crypt_object_number);
+			if (opts->ofs_list)
+				opts->ofs_list[num] = fz_tell_output(ctx, opts->out);
+			writeobject(ctx, doc, opts, num, gen, 1, num == opts->crypt_object_number);
 		}
 	}
-	else
+	else if (opts->use_list)
 		opts->use_list[num] = 0;
 }
 
@@ -2809,7 +2910,7 @@ make_hint_stream(fz_context *ctx, pdf_document *doc, pdf_write_state *opts)
 		make_page_offset_hints(ctx, doc, opts, buf);
 		obj = pdf_load_object(ctx, doc, pdf_xref_len(ctx, doc)-1);
 		pdf_update_stream(ctx, doc, obj, buf, 0);
-		opts->hintstream_len = (int)fz_buffer_storage(ctx, buf, NULL);
+		opts->hintstream_len = (int64_t)fz_buffer_storage(ctx, buf, NULL);
 	}
 	fz_always(ctx)
 	{
@@ -2875,6 +2976,8 @@ static void complete_signatures(fz_context *ctx, pdf_document *doc, pdf_write_st
 	char *buf = NULL, *ptr;
 	int s;
 	fz_stream *stm = NULL;
+
+	fz_var(byte_range);
 	fz_var(stm);
 	fz_var(buf);
 
@@ -2921,7 +3024,7 @@ static void complete_signatures(fz_context *ctx, pdf_document *doc, pdf_write_st
 					fstr = fz_memmem(buf, bytes_read, SLASH_FILTER, sizeof(SLASH_FILTER)-1);
 
 					if (!(bstr && cstr && fstr && bstr < cstr && cstr < fstr))
-						fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to determine byte ranges while writing signature");
+						fz_throw(ctx, FZ_ERROR_FORMAT, "Failed to determine byte ranges while writing signature");
 
 					usig->byte_range_start = bstr - buf + sizeof(SLASH_BYTE_RANGE)-1 + opts->ofs_list[pnum];
 					usig->byte_range_end = cstr - buf + opts->ofs_list[pnum];
@@ -2997,16 +3100,21 @@ static void complete_signatures(fz_context *ctx, pdf_document *doc, pdf_write_st
 	}
 }
 
-static void clean_content_streams(fz_context *ctx, pdf_document *doc, int sanitize, int ascii)
+static void clean_content_streams(fz_context *ctx, pdf_document *doc, int sanitize, int ascii, int newlines)
 {
 	int n = pdf_count_pages(ctx, doc);
 	int i;
 
-	pdf_filter_options filter;
-	memset(&filter, 0, sizeof filter);
-	filter.recurse = 1;
-	filter.sanitize = sanitize;
-	filter.ascii = ascii;
+	pdf_filter_options options = { 0 };
+	pdf_sanitize_filter_options sopts = { 0 };
+	pdf_filter_factory list[2] = { 0 };
+
+	options.recurse = 1;
+	options.ascii = ascii;
+	options.newlines = newlines;
+	options.filters = sanitize ? list : NULL;
+	list[0].filter = pdf_new_sanitize_filter;
+	list[0].options = &sopts;
 
 	for (i = 0; i < n; i++)
 	{
@@ -3015,10 +3123,10 @@ static void clean_content_streams(fz_context *ctx, pdf_document *doc, int saniti
 
 		fz_try(ctx)
 		{
-			pdf_filter_page_contents(ctx, doc, page, &filter);
+			pdf_filter_page_contents(ctx, doc, page, &options);
 			for (annot = pdf_first_annot(ctx, page); annot != NULL; annot = pdf_next_annot(ctx, annot))
 			{
-				pdf_filter_annot_contents(ctx, doc, annot, &filter);
+				pdf_filter_annot_contents(ctx, doc, annot, &options);
 			}
 		}
 		fz_always(ctx)
@@ -3041,12 +3149,20 @@ static void initialise_write_state(fz_context *ctx, pdf_document *doc, const pdf
 	opts->do_compress = in_opts->do_compress;
 	opts->do_compress_images = in_opts->do_compress_images;
 	opts->do_compress_fonts = in_opts->do_compress_fonts;
+	opts->do_snapshot = in_opts->do_snapshot;
+	opts->compression_effort = in_opts->compression_effort;
+	if (opts->compression_effort < 0)
+		opts->compression_effort = 0;
+	else if (opts->compression_effort > 100)
+		opts->compression_effort = 100;
 
 	opts->do_garbage = in_opts->do_garbage;
 	opts->do_linear = in_opts->do_linear;
 	opts->do_clean = in_opts->do_clean;
 	opts->do_encrypt = in_opts->do_encrypt;
 	opts->dont_regenerate_id = in_opts->dont_regenerate_id;
+	opts->do_preserve_metadata = in_opts->do_preserve_metadata;
+	opts->do_use_objstms = in_opts->do_use_objstms;
 	opts->start = 0;
 	opts->main_xref_offset = INT_MIN;
 
@@ -3105,6 +3221,28 @@ const pdf_write_options pdf_default_write_options = {
 	~0, /* permissions */
 	"", /* opwd_utf8[128] */
 	"", /* upwd_utf8[128] */
+	0 /* do_snapshot */
+};
+
+static const pdf_write_options pdf_snapshot_write_options = {
+	1, /* do_incremental */
+	0, /* do_pretty */
+	0, /* do_ascii */
+	0, /* do_compress */
+	0, /* do_compress_images */
+	0, /* do_compress_fonts */
+	0, /* do_decompress */
+	0, /* do_garbage */
+	0, /* do_linear */
+	0, /* do_clean */
+	0, /* do_sanitize */
+	0, /* do_appearance */
+	0, /* do_encrypt */
+	1, /* dont_regenerate_id */
+	~0, /* permissions */
+	"", /* opwd_utf8[128] */
+	"", /* upwd_utf8[128] */
+	1 /* do_snapshot */
 };
 
 const char *fz_pdf_write_options_usage =
@@ -3146,6 +3284,8 @@ pdf_parse_write_options(fz_context *ctx, pdf_write_options *opts, const char *ar
 		opts->do_compress_fonts = fz_option_eq(val, "yes");
 	if (fz_has_option(ctx, args, "compress-images", &val))
 		opts->do_compress_images = fz_option_eq(val, "yes");
+	if (fz_has_option(ctx, args, "compression-effort", &val))
+		opts->compression_effort = fz_atoi(val);
 	if (fz_has_option(ctx, args, "ascii", &val))
 		opts->do_ascii = fz_option_eq(val, "yes");
 	if (fz_has_option(ctx, args, "pretty", &val))
@@ -3158,6 +3298,8 @@ pdf_parse_write_options(fz_context *ctx, pdf_write_options *opts, const char *ar
 		opts->do_sanitize = fz_option_eq(val, "yes");
 	if (fz_has_option(ctx, args, "incremental", &val))
 		opts->do_incremental = fz_option_eq(val, "yes");
+	if (fz_has_option(ctx, args, "objstms", &val))
+		opts->do_use_objstms = fz_option_eq(val, "yes");
 	if (fz_has_option(ctx, args, "regenerate-id", &val))
 		opts->dont_regenerate_id = fz_option_eq(val, "no");
 	if (fz_has_option(ctx, args, "decrypt", &val))
@@ -3214,17 +3356,27 @@ int pdf_can_be_saved_incrementally(fz_context *ctx, pdf_document *doc)
 		return 0;
 	if (doc->redacted)
 		return 0;
-	if (doc->has_xref_streams && doc->has_old_style_xrefs)
-		return 0;
 	return 1;
 }
 
 static void
-prepare_for_save(fz_context *ctx, pdf_document *doc, pdf_write_options *in_opts)
+prepare_for_save(fz_context *ctx, pdf_document *doc, const pdf_write_options *in_opts)
 {
 	/* Rewrite (and possibly sanitize) the operator streams */
 	if (in_opts->do_clean || in_opts->do_sanitize)
-		clean_content_streams(ctx, doc, in_opts->do_sanitize, in_opts->do_ascii);
+	{
+		pdf_begin_operation(ctx, doc, "Clean content streams");
+		fz_try(ctx)
+		{
+			clean_content_streams(ctx, doc, in_opts->do_sanitize, in_opts->do_ascii, in_opts->do_pretty);
+			pdf_end_operation(ctx, doc);
+		}
+		fz_catch(ctx)
+		{
+			pdf_abandon_operation(ctx, doc);
+			fz_rethrow(ctx);
+		}
+	}
 
 	/* When saving a PDF with signatures the file will
 	first be written once, then the file will have its
@@ -3235,7 +3387,8 @@ prepare_for_save(fz_context *ctx, pdf_document *doc, pdf_write_options *in_opts)
 	the signature dictionary is updated. */
 	doc->save_in_progress = 1;
 
-	presize_unsaved_signature_byteranges(ctx, doc);
+	if (!in_opts->do_snapshot)
+		presize_unsaved_signature_byteranges(ctx, doc);
 }
 
 static pdf_obj *
@@ -3247,8 +3400,8 @@ new_identity(fz_context *ctx, pdf_document *doc)
 	fz_memrnd(ctx, rnd, nelem(rnd));
 
 	id = pdf_dict_put_array(ctx, pdf_trailer(ctx, doc), PDF_NAME(ID), 2);
-	pdf_array_push_drop(ctx, id, pdf_new_string(ctx, (char *) rnd + 0, nelem(rnd) / 2));
-	pdf_array_push_drop(ctx, id, pdf_new_string(ctx, (char *) rnd + 16, nelem(rnd) / 2));
+	pdf_array_push_string(ctx, id, (char *) rnd + 0, nelem(rnd) / 2);
+	pdf_array_push_string(ctx, id, (char *) rnd + 16, nelem(rnd) / 2);
 
 	return id;
 }
@@ -3261,7 +3414,7 @@ change_identity(fz_context *ctx, pdf_document *doc, pdf_obj *id)
 	{
 		/* Update second half of ID array with new random data. */
 		fz_memrnd(ctx, rnd, 16);
-		pdf_array_put_drop(ctx, id, 1, pdf_new_string(ctx, (char *)rnd, 16));
+		pdf_array_put_string(ctx, id, 1, (char *)rnd, 16);
 	}
 }
 
@@ -3329,54 +3482,69 @@ create_encryption_dictionary(fz_context *ctx, pdf_document *doc, pdf_crypt *cryp
 }
 
 static void
-ensure_initial_incremental_contents(fz_context *ctx, fz_stream *in, fz_output *out)
+ensure_initial_incremental_contents(fz_context *ctx, fz_stream *in, fz_output *out, int64_t len)
 {
 	fz_stream *verify;
-	unsigned char buf0[256];
-	unsigned char buf1[256];
+	unsigned char buf0[4096];
+	unsigned char buf1[4096];
 	size_t n0, n1;
 	int64_t off = 0;
 	int same;
 
 	if (!in)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't copy contents for incremental write");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "no input file for incremental write");
 
 	verify = fz_stream_from_output(ctx, out);
-	if (!verify)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't incrementally write pdf to this type of output");
-
-	fz_var(verify);
 
 	fz_try(ctx)
 	{
-		do
+		/* Compare current contents of output file (in case we append) */
+		if (verify)
 		{
-			fz_seek(ctx, in, off, SEEK_SET);
-			n0 = fz_read(ctx, in, buf0, sizeof(buf0));
-			fz_seek(ctx, verify, off, SEEK_SET);
-			n1 = fz_read(ctx, verify, buf1, sizeof(buf1));
-			same = (n0 == n1 && !memcmp(buf0, buf1, n0));
-			off += n0;
+			do
+			{
+				int64_t read = sizeof(buf0);
+				if (off + read > len)
+					read = len - off;
+				fz_seek(ctx, in, off, SEEK_SET);
+				n0 = fz_read(ctx, in, buf0, read);
+				fz_seek(ctx, verify, off, SEEK_SET);
+				n1 = fz_read(ctx, verify, buf1, read);
+				same = (n0 == n1 && !memcmp(buf0, buf1, n0));
+				off += (int64_t)n0;
+			}
+			while (same && n0 > 0 && off < len);
+
+			if (same)
+			{
+				fz_seek_output(ctx, out, len, SEEK_SET);
+				fz_truncate_output(ctx, out);
+				break; /* return from try */
+			}
+
+			fz_seek_output(ctx, out, 0, SEEK_SET);
 		}
-		while (same && n0 > 0);
-
-		if (same)
-			break;
-
-		fz_drop_stream(ctx, verify);
-		verify = NULL;
 
 		/* Copy old contents into new file */
 		fz_seek(ctx, in, 0, SEEK_SET);
-		fz_seek_output(ctx, out, 0, SEEK_SET);
+		off = 0;
 		do
 		{
-			n0 = fz_read(ctx, in, buf0, sizeof(buf0));
+			int64_t read = sizeof(buf0);
+			if (off + read > len)
+				read = len - off;
+			n0 = fz_read(ctx, in, buf0, read);
 			if (n0)
 				fz_write_data(ctx, out, buf0, n0);
+			off += n0;
 		}
-		while (n0);
-		fz_truncate_output(ctx, out);
+		while (n0 > 0 && off < len);
+
+		if (verify)
+		{
+			fz_truncate_output(ctx, out);
+			fz_seek_output(ctx, out, 0, SEEK_END);
+		}
 	}
 	fz_always(ctx)
 		fz_drop_stream(ctx, verify);
@@ -3384,8 +3552,170 @@ ensure_initial_incremental_contents(fz_context *ctx, fz_stream *in, fz_output *o
 		fz_rethrow(ctx);
 }
 
+#define OBJSTM_MAXOBJS 256
+#define OBJSTM_MAXLEN 1<<24
+
+typedef struct
+{
+	pdf_write_state *opts;
+	int n;
+	int objnum[OBJSTM_MAXOBJS];
+	size_t len[OBJSTM_MAXOBJS];
+	fz_buffer *content_buf;
+	fz_output *content_out;
+	int root_num;
+	int info_num;
+	int sep;
+} objstm_gather_data;
+
 static void
-do_pdf_save_document(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, pdf_write_options *in_opts)
+flush_gathered(fz_context *ctx, pdf_document *doc, objstm_gather_data *data)
+{
+	pdf_obj *obj;
+	pdf_obj *ref = NULL;
+	fz_buffer *newbuf = NULL;
+	fz_output *out = NULL;
+	int i;
+
+	if (data->n == 0)
+		return;
+
+	obj = pdf_new_dict(ctx, doc, 4);
+
+	fz_var(ref);
+	fz_var(newbuf);
+	fz_var(out);
+
+	fz_try(ctx)
+	{
+		size_t pos = 0, first;
+		int num;
+		newbuf = fz_new_buffer(ctx, 128);
+
+		out = fz_new_output_with_buffer(ctx, newbuf);
+
+		for (i = 0; i < data->n; i++)
+		{
+			fz_write_printf(ctx, out, "%d %d ", data->objnum[i], pos);
+			pos += data->len[i];
+		}
+
+		fz_close_output(ctx, out);
+		first = fz_tell_output(ctx, out);
+		fz_drop_output(ctx, out);
+		out = NULL;
+
+		pdf_dict_put_int(ctx, obj, PDF_NAME(First), first);
+		pdf_dict_put_int(ctx, obj, PDF_NAME(N), data->n);
+		pdf_dict_put(ctx, obj, PDF_NAME(Type), PDF_NAME(ObjStm));
+
+		fz_close_output(ctx, data->content_out);
+		fz_append_buffer(ctx, newbuf, data->content_buf);
+
+		doc->xref_base = 0; /* Might have been reset by our caller */
+		ref = pdf_add_object(ctx, doc, obj);
+		pdf_update_stream(ctx, doc, ref, newbuf, 0);
+
+		num = pdf_to_num(ctx, ref);
+		expand_lists(ctx, data->opts, num);
+		data->opts->use_list[num] = 1;
+
+		/* Update all the xref entries for the objects to point into this stream. */
+		for (i = 0; i < data->n; i++)
+		{
+			pdf_xref_entry *x = pdf_get_xref_entry_no_null(ctx, doc, data->objnum[i]);
+			x->ofs = num; /* ofs = which objstm is this in */
+			x->gen = i; /* gen = nth entry in the objstm */
+			data->opts->ofs_list[data->objnum[i]] = i;
+			data->opts->gen_list[data->objnum[i]] = i;
+		}
+
+		data->n = 0;
+		data->sep = 0;
+	}
+	fz_always(ctx)
+	{
+		fz_drop_output(ctx, data->content_out);
+		data->content_out = NULL;
+		fz_drop_buffer(ctx, data->content_buf);
+		data->content_buf = NULL;
+		pdf_drop_obj(ctx, obj);
+		pdf_drop_obj(ctx, ref);
+		fz_drop_buffer(ctx, newbuf);
+		fz_drop_output(ctx, out);
+	}
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+}
+
+static void
+objstm_gather(fz_context *ctx, pdf_xref_entry *x, int i, pdf_document *doc, void *arg)
+{
+	size_t olen, len;
+	objstm_gather_data *data = (objstm_gather_data *)arg;
+
+	/* If we are writing incrementally, then only the last one can be gathered. */
+	if (data->opts->do_incremental && doc->xref_base != 0)
+		return;
+
+	if (i == data->root_num || i == data->info_num)
+		return;
+
+	/* Ensure the object is loaded! */
+	if (i == 0)
+		return; /* pdf_cache_object does not like being called for i == 0 which should be free. */
+	pdf_cache_object(ctx, doc, i);
+
+	if (x->type != 'n' || x->stm_buf != NULL || x->stm_ofs != 0 || x->gen != 0)
+		return; /* Stream objects, objects with generation number != 0 cannot be put in objstms */
+	if (i == data->opts->crypt_object_number)
+		return; /* Encryption dictionaries can also not be put in objstms */
+
+	/* FIXME: Can we do a pass through to check for such objects more exactly? */
+	if (pdf_is_int(ctx, x->obj))
+		return; /* In case it's a Length value. */
+	if (pdf_is_indirect(ctx, x->obj))
+		return; /* Bare indirect references are not allowed. */
+	if (data->opts->do_linear && pdf_is_dict(ctx, x->obj))
+	{
+		pdf_obj *type = pdf_dict_get(ctx, x->obj, PDF_NAME(Type));
+		if (pdf_name_eq(ctx, type, PDF_NAME(Pages)) ||
+			pdf_name_eq(ctx, type, PDF_NAME(Page)))
+			return;
+	}
+
+	if (data->content_buf == NULL)
+		data->content_buf = fz_new_buffer(ctx, 128);
+	if (data->content_out == NULL)
+		data->content_out = fz_new_output_with_buffer(ctx, data->content_buf);
+
+	olen = data->content_buf->len;
+	pdf_print_encrypted_obj(ctx, data->content_out, x->obj, 1, 0, NULL, 0, 0, NULL);
+	data->objnum[data->n] = i;
+	len = data->content_buf->len;
+	data->len[data->n] = len - olen;
+	x->type = 'o';
+	x->gen = data->n;
+	data->n++;
+	if (data->n == OBJSTM_MAXOBJS || len > OBJSTM_MAXLEN)
+		flush_gathered(ctx, doc, data);
+}
+
+static void
+gather_to_objstms(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, int xref_len)
+{
+	objstm_gather_data data = { 0 };
+
+	data.opts = opts;
+	data.root_num = pdf_to_num(ctx, pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root)));
+	data.info_num = pdf_to_num(ctx, pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Info)));
+
+	pdf_xref_entry_map(ctx, doc, objstm_gather, &data);
+	flush_gathered(ctx, doc, &data);
+}
+
+static void
+do_pdf_save_document(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, const pdf_write_options *in_opts)
 {
 	int lastfree;
 	int num;
@@ -3394,21 +3724,21 @@ do_pdf_save_document(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, 
 
 	if (in_opts->do_incremental)
 	{
-		ensure_initial_incremental_contents(ctx, doc->file, opts->out);
+		ensure_initial_incremental_contents(ctx, doc->file, opts->out, doc->file_size);
 
 		/* If no changes, nothing more to write */
-		if (doc->num_incremental_sections == 0)
+		if (!pdf_has_unsaved_changes(ctx, doc))
 		{
 			doc->save_in_progress = 0;
 			return;
 		}
 
-		fz_seek_output(ctx, opts->out, 0, SEEK_END);
 		fz_write_string(ctx, opts->out, "\n");
 	}
 
 	xref_len = pdf_xref_len(ctx, doc);
 
+	pdf_begin_operation(ctx, doc, "Save document");
 	fz_try(ctx)
 	{
 		initialise_write_state(ctx, doc, in_opts, opts);
@@ -3424,6 +3754,7 @@ do_pdf_save_document(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, 
 		/* Remove encryption dictionary if saving without encryption. */
 		if (opts->do_encrypt == PDF_ENCRYPT_NONE)
 		{
+			assert(!in_opts->do_snapshot);
 			pdf_dict_del(ctx, pdf_trailer(ctx, doc), PDF_NAME(Encrypt));
 		}
 
@@ -3436,6 +3767,7 @@ do_pdf_save_document(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, 
 		/* Create encryption dictionary if saving with new encryption. */
 		else
 		{
+			assert(!opts->do_snapshot);
 			if (!id)
 				id = new_identity(ctx, doc);
 			id1 = pdf_array_get(ctx, id, 0);
@@ -3443,22 +3775,50 @@ do_pdf_save_document(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, 
 			create_encryption_dictionary(ctx, doc, opts->crypt);
 		}
 
+		/* Stash Encrypt entry in the writer state, in case a repair pass throws away the old trailer. */
+		opts->crypt_obj = pdf_keep_obj(ctx, pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Encrypt)));
+
+		/* If we're writing a snapshot, we can't be doing garbage
+		 * collection, or linearisation, and must be writing
+		 * incrementally. */
+		assert(!opts->do_snapshot || (opts->do_garbage == 0 && !opts->do_linear));
+
 		/* Make sure any objects hidden in compressed streams have been loaded */
 		if (!opts->do_incremental)
 		{
 			pdf_ensure_solid_xref(ctx, doc, xref_len);
 			preloadobjstms(ctx, doc);
-			xref_len = pdf_xref_len(ctx, doc); /* May have changed due to repair */
-			expand_lists(ctx, opts, xref_len);
 		}
+
+		/* If we're using objstms, then the version must be at least 1.5 */
+		if (opts->do_use_objstms && pdf_version(ctx, doc) < 15)
+		{
+			pdf_obj *root = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root));
+			pdf_obj *version = pdf_dict_get(ctx, root, PDF_NAME(Version));
+			doc->version = 15;
+			if (opts->do_incremental || version != NULL)
+			{
+				pdf_dict_put(ctx, root, PDF_NAME(Version), PDF_NAME(1_5));
+			}
+		}
+
+		if (opts->do_preserve_metadata)
+			opts->metadata = pdf_keep_obj(ctx, pdf_metadata(ctx, doc));
+
+		xref_len = pdf_xref_len(ctx, doc); /* May have changed due to repair */
+		expand_lists(ctx, opts, xref_len);
 
 		/* Sweep & mark objects from the trailer */
 		if (opts->do_garbage >= 1 || opts->do_linear)
+		{
+			/* Start by removing indirect /Length attributes on streams */
+			for (num = 0; num < xref_len; num++)
+				bake_stream_length(ctx, doc, num);
+
 			(void)markobj(ctx, doc, opts, pdf_trailer(ctx, doc));
+		}
 		else
 		{
-			xref_len = pdf_xref_len(ctx, doc); /* May have changed due to repair */
-			expand_lists(ctx, opts, xref_len);
 			for (num = 0; num < xref_len; num++)
 				opts->use_list[num] = 1;
 		}
@@ -3483,11 +3843,16 @@ do_pdf_save_document(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, 
 		if (opts->do_garbage >= 2 || opts->do_linear)
 			renumberobjs(ctx, doc, opts);
 
+		if (opts->do_use_objstms)
+			gather_to_objstms(ctx, doc, opts, xref_len);
+
+		xref_len = pdf_xref_len(ctx, doc); /* May have changed due to repair */
+		expand_lists(ctx, opts, xref_len);
+
 		/* Truncate the xref after compacting and renumbering */
-		if ((opts->do_garbage >= 2 || opts->do_linear) && !opts->do_incremental)
+		if ((opts->do_garbage >= 2 || opts->do_linear) &&
+			!opts->do_incremental)
 		{
-			xref_len = pdf_xref_len(ctx, doc); /* May have changed due to repair */
-			expand_lists(ctx, opts, xref_len);
 			while (xref_len > 0 && !opts->use_list[xref_len-1])
 				xref_len--;
 		}
@@ -3523,7 +3888,7 @@ do_pdf_save_document(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, 
 				}
 
 				opts->first_xref_offset = fz_tell_output(ctx, opts->out);
-				if (doc->has_xref_streams)
+				if (!doc->last_xref_was_old_style || opts->do_use_objstms)
 					writexrefstream(ctx, doc, opts, 0, xref_len, 1, 0, opts->first_xref_offset);
 				else
 					writexref(ctx, doc, opts, 0, xref_len, 1, 0, opts->first_xref_offset);
@@ -3573,20 +3938,28 @@ do_pdf_save_document(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, 
 				writeobjects(ctx, doc, opts, 1);
 
 				padto(ctx, opts->out, opts->main_xref_offset);
-				writexref(ctx, doc, opts, 0, opts->start, 0, 0, opts->first_xref_offset);
+				if (opts->do_use_objstms)
+					writexrefstream(ctx, doc, opts, 0, xref_len, 1, 0, opts->first_xref_offset);
+				else
+					writexref(ctx, doc, opts, 0, opts->start, 0, 0, opts->first_xref_offset);
 			}
 			else
 			{
 				opts->first_xref_offset = fz_tell_output(ctx, opts->out);
-				writexref(ctx, doc, opts, 0, xref_len, 1, 0, opts->first_xref_offset);
+				if (opts->do_use_objstms)
+					writexrefstream(ctx, doc, opts, 0, xref_len, 1, 0, opts->first_xref_offset);
+				else
+					writexref(ctx, doc, opts, 0, xref_len, 1, 0, opts->first_xref_offset);
 			}
 
 			doc->xref_sections[0].end_ofs = fz_tell_output(ctx, opts->out);
 		}
 
-		complete_signatures(ctx, doc, opts);
-
-		doc->dirty = 0;
+		if (!in_opts->do_snapshot)
+		{
+			complete_signatures(ctx, doc, opts);
+		}
+		pdf_end_operation(ctx, doc);
 	}
 	fz_always(ctx)
 	{
@@ -3597,10 +3970,13 @@ do_pdf_save_document(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, 
 		finalise_write_state(ctx, opts);
 		if (opts->crypt != doc->crypt)
 			pdf_drop_crypt(ctx, opts->crypt);
+		pdf_drop_obj(ctx, opts->crypt_obj);
+		pdf_drop_obj(ctx, opts->metadata);
 		doc->save_in_progress = 0;
 	}
 	fz_catch(ctx)
 	{
+		pdf_abandon_operation(ctx, doc);
 		fz_rethrow(ctx);
 	}
 }
@@ -3618,7 +3994,7 @@ int pdf_has_unsaved_sigs(fz_context *ctx, pdf_document *doc)
 	return 0;
 }
 
-void pdf_write_document(fz_context *ctx, pdf_document *doc, fz_output *out, pdf_write_options *in_opts)
+void pdf_write_document(fz_context *ctx, pdf_document *doc, fz_output *out, const pdf_write_options *in_opts)
 {
 	pdf_write_options opts_defaults = pdf_default_write_options;
 	pdf_write_state opts = { 0 };
@@ -3630,15 +4006,32 @@ void pdf_write_document(fz_context *ctx, pdf_document *doc, fz_output *out, pdf_
 		in_opts = &opts_defaults;
 
 	if (in_opts->do_incremental && doc->repair_attempted)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't do incremental writes on a repaired file");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't do incremental writes on a repaired file");
 	if (in_opts->do_incremental && in_opts->do_garbage)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't do incremental writes with garbage collection");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't do incremental writes with garbage collection");
 	if (in_opts->do_incremental && in_opts->do_linear)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't do incremental writes with linearisation");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't do incremental writes with linearisation");
 	if (in_opts->do_incremental && in_opts->do_encrypt != PDF_ENCRYPT_KEEP)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't do incremental writes when changing encryption");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't do incremental writes when changing encryption");
+	if (in_opts->do_snapshot)
+	{
+		if (in_opts->do_incremental == 0 ||
+			in_opts->do_pretty ||
+			in_opts->do_ascii ||
+			in_opts->do_compress ||
+			in_opts->do_compress_images ||
+			in_opts->do_compress_fonts ||
+			in_opts->do_decompress ||
+			in_opts->do_garbage ||
+			in_opts->do_linear ||
+			in_opts->do_clean ||
+			in_opts->do_sanitize ||
+			in_opts->do_appearance ||
+			in_opts->do_encrypt != PDF_ENCRYPT_KEEP)
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't use these options when snapshotting!");
+	}
 	if (pdf_has_unsaved_sigs(ctx, doc) && !fz_output_supports_stream(ctx, out))
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't write pdf that has unsaved sigs to a fz_output unless it supports fz_stream_from_output!");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't write pdf that has unsaved sigs to a fz_output unless it supports fz_stream_from_output!");
 
 	prepare_for_save(ctx, doc, in_opts);
 
@@ -3647,7 +4040,7 @@ void pdf_write_document(fz_context *ctx, pdf_document *doc, fz_output *out, pdf_
 	do_pdf_save_document(ctx, doc, &opts, in_opts);
 }
 
-void pdf_save_document(fz_context *ctx, pdf_document *doc, const char *filename, pdf_write_options *in_opts)
+void pdf_save_document(fz_context *ctx, pdf_document *doc, const char *filename, const pdf_write_options *in_opts)
 {
 	pdf_write_options opts_defaults = pdf_default_write_options;
 	pdf_write_state opts = { 0 };
@@ -3659,15 +4052,32 @@ void pdf_save_document(fz_context *ctx, pdf_document *doc, const char *filename,
 		in_opts = &opts_defaults;
 
 	if (in_opts->do_incremental && !doc->file)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't do incremental writes on a new document");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't do incremental writes on a new document");
 	if (in_opts->do_incremental && doc->repair_attempted)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't do incremental writes on a repaired file");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't do incremental writes on a repaired file");
 	if (in_opts->do_incremental && in_opts->do_garbage)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't do incremental writes with garbage collection");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't do incremental writes with garbage collection");
 	if (in_opts->do_incremental && in_opts->do_linear)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't do incremental writes with linearisation");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't do incremental writes with linearisation");
 	if (in_opts->do_incremental && in_opts->do_encrypt != PDF_ENCRYPT_KEEP)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't do incremental writes when changing encryption");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't do incremental writes when changing encryption");
+	if (in_opts->do_snapshot)
+	{
+		if (in_opts->do_incremental == 0 ||
+			in_opts->do_pretty ||
+			in_opts->do_ascii ||
+			in_opts->do_compress ||
+			in_opts->do_compress_images ||
+			in_opts->do_compress_fonts ||
+			in_opts->do_decompress ||
+			in_opts->do_garbage ||
+			in_opts->do_linear ||
+			in_opts->do_clean ||
+			in_opts->do_sanitize ||
+			in_opts->do_appearance ||
+			in_opts->do_encrypt != PDF_ENCRYPT_KEEP)
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't use these options when snapshotting!");
+	}
 
 	if (in_opts->do_appearance > 0)
 	{
@@ -3677,14 +4087,17 @@ void pdf_save_document(fz_context *ctx, pdf_document *doc, const char *filename,
 			pdf_page *page = pdf_load_page(ctx, doc, i);
 			fz_try(ctx)
 			{
-				if (in_opts->do_appearance > 1)
-				{
-					pdf_annot *annot;
-					for (annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot))
-						annot->needs_new_ap = 1;
-					for (annot = pdf_first_widget(ctx, page); annot; annot = pdf_next_widget(ctx, annot))
-						annot->needs_new_ap = 1;
-				}
+				pdf_annot *annot;
+				for (annot = pdf_first_annot(ctx, page); annot; annot = pdf_next_annot(ctx, annot))
+					if (in_opts->do_appearance > 1)
+						pdf_annot_request_resynthesis(ctx, annot);
+					else
+						pdf_annot_request_synthesis(ctx, annot);
+				for (annot = pdf_first_widget(ctx, page); annot; annot = pdf_next_widget(ctx, annot))
+					if (in_opts->do_appearance > 1)
+						pdf_annot_request_resynthesis(ctx, annot);
+					else
+						pdf_annot_request_synthesis(ctx, annot);
 				pdf_update_page(ctx, page);
 			}
 			fz_always(ctx)
@@ -3718,6 +4131,16 @@ void pdf_save_document(fz_context *ctx, pdf_document *doc, const char *filename,
 	{
 		fz_rethrow(ctx);
 	}
+}
+
+void pdf_save_snapshot(fz_context *ctx, pdf_document *doc, const char *filename)
+{
+	pdf_save_document(ctx, doc, filename, &pdf_snapshot_write_options);
+}
+
+void pdf_write_snapshot(fz_context *ctx, pdf_document *doc, fz_output *out)
+{
+	pdf_write_document(ctx, doc, out, &pdf_snapshot_write_options);
 }
 
 char *
@@ -3842,7 +4265,7 @@ static fz_device *
 pdf_writer_begin_page(fz_context *ctx, fz_document_writer *wri_, fz_rect mediabox)
 {
 	pdf_writer *wri = (pdf_writer*)wri_;
-	wri->mediabox = mediabox;
+	wri->mediabox = mediabox; // TODO: handle non-zero x0,y0
 	return pdf_page_write(ctx, wri->pdf, wri->mediabox, &wri->resources, &wri->contents);
 }
 
@@ -3894,16 +4317,20 @@ pdf_writer_drop_writer(fz_context *ctx, fz_document_writer *wri_)
 fz_document_writer *
 fz_new_pdf_writer_with_output(fz_context *ctx, fz_output *out, const char *options)
 {
-	pdf_writer *wri = fz_new_derived_document_writer(ctx, pdf_writer, pdf_writer_begin_page, pdf_writer_end_page, pdf_writer_close_writer, pdf_writer_drop_writer);
+	pdf_writer *wri;
+
+	fz_var(wri);
 
 	fz_try(ctx)
 	{
+		wri = fz_new_derived_document_writer(ctx, pdf_writer, pdf_writer_begin_page, pdf_writer_end_page, pdf_writer_close_writer, pdf_writer_drop_writer);
 		pdf_parse_write_options(ctx, &wri->opts, options);
 		wri->out = out;
 		wri->pdf = pdf_create_document(ctx);
 	}
 	fz_catch(ctx)
 	{
+		fz_drop_output(ctx, out);
 		pdf_drop_document(ctx, wri->pdf);
 		fz_free(ctx, wri);
 		fz_rethrow(ctx);
@@ -3916,13 +4343,56 @@ fz_document_writer *
 fz_new_pdf_writer(fz_context *ctx, const char *path, const char *options)
 {
 	fz_output *out = fz_new_output_with_path(ctx, path ? path : "out.pdf", 0);
-	fz_document_writer *wri = NULL;
+	return fz_new_pdf_writer_with_output(ctx, out, options);
+}
+
+void pdf_write_journal(fz_context *ctx, pdf_document *doc, fz_output *out)
+{
+	if (!doc || !out)
+		return;
+
+	if (!doc->journal)
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't write non-existent journal");
+
+	pdf_serialise_journal(ctx, doc, out);
+}
+
+void pdf_save_journal(fz_context *ctx, pdf_document *doc, const char *filename)
+{
+	fz_output *out;
+
+	if (!doc)
+		return;
+
+	out = fz_new_output_with_path(ctx, filename, 0);
 	fz_try(ctx)
-		wri = fz_new_pdf_writer_with_output(ctx, out, options);
-	fz_catch(ctx)
 	{
-		fz_drop_output(ctx, out);
-		fz_rethrow(ctx);
+		pdf_write_journal(ctx, doc, out);
+		fz_close_output(ctx, out);
 	}
-	return wri;
+	fz_always(ctx)
+		fz_drop_output(ctx, out);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+}
+
+void pdf_read_journal(fz_context *ctx, pdf_document *doc, fz_stream *stm)
+{
+	pdf_deserialise_journal(ctx, doc, stm);
+}
+
+void pdf_load_journal(fz_context *ctx, pdf_document *doc, const char *filename)
+{
+	fz_stream *stm;
+
+	if (!doc)
+		return;
+
+	stm = fz_open_file(ctx, filename);
+	fz_try(ctx)
+		pdf_read_journal(ctx, doc, stm);
+	fz_always(ctx)
+		fz_drop_stream(ctx, stm);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
 }

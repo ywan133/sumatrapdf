@@ -1,7 +1,30 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_DOCUMENT_H
 #define MUPDF_FITZ_DOCUMENT_H
 
 #include "mupdf/fitz/system.h"
+#include "mupdf/fitz/types.h"
 #include "mupdf/fitz/context.h"
 #include "mupdf/fitz/geometry.h"
 #include "mupdf/fitz/device.h"
@@ -9,24 +32,24 @@
 #include "mupdf/fitz/link.h"
 #include "mupdf/fitz/outline.h"
 #include "mupdf/fitz/separation.h"
+#include "mupdf/fitz/archive.h"
 
-typedef struct fz_document fz_document;
 typedef struct fz_document_handler fz_document_handler;
 typedef struct fz_page fz_page;
 typedef intptr_t fz_bookmark;
 
-/**
-	Locations within the document are referred to in terms of
-	chapter and page, rather than just a page number. For some
-	documents (such as epub documents with large numbers of pages
-	broken into many chapters) this can make navigation much faster
-	as only the required chapter needs to be decoded at a time.
-*/
-typedef struct
+typedef enum
 {
-	int chapter;
-	int page;
-} fz_location;
+	FZ_MEDIA_BOX,
+	FZ_CROP_BOX,
+	FZ_BLEED_BOX,
+	FZ_TRIM_BOX,
+	FZ_ART_BOX,
+	FZ_UNKNOWN_BOX
+} fz_box_type;
+
+fz_box_type fz_box_type_from_string(const char *name);
+const char *fz_string_from_box_type(fz_box_type box);
 
 /**
 	Simple constructor for fz_locations.
@@ -86,6 +109,10 @@ typedef enum
 	FZ_PERMISSION_COPY = 'c',
 	FZ_PERMISSION_EDIT = 'e',
 	FZ_PERMISSION_ANNOTATE = 'n',
+	FZ_PERMISSION_FORM = 'f',
+	FZ_PERMISSION_ACCESSIBILITY = 'y',
+	FZ_PERMISSION_ASSEMBLE = 'a',
+	FZ_PERMISSION_PRINT_HQ = 'h',
 }
 fz_permission;
 
@@ -127,6 +154,12 @@ typedef int (fz_document_has_permission_fn)(fz_context *ctx, fz_document *doc, f
 typedef fz_outline *(fz_document_load_outline_fn)(fz_context *ctx, fz_document *doc);
 
 /**
+	Type for a function to be called to obtain an outline iterator
+	for a document. See fz_document_outline_iterator for more information.
+*/
+typedef fz_outline_iterator *(fz_document_outline_iterator_fn)(fz_context *ctx, fz_document *doc);
+
+/**
 	Type for a function to be called to lay
 	out a document. See fz_layout_document for more information.
 */
@@ -135,9 +168,16 @@ typedef void (fz_document_layout_fn)(fz_context *ctx, fz_document *doc, float w,
 /**
 	Type for a function to be called to
 	resolve an internal link to a location (chapter/page number
-	tuple). See fz_resolve_link for more information.
+	tuple). See fz_resolve_link_dest for more information.
 */
-typedef fz_location (fz_document_resolve_link_fn)(fz_context *ctx, fz_document *doc, const char *uri, float *xp, float *yp);
+typedef fz_link_dest (fz_document_resolve_link_dest_fn)(fz_context *ctx, fz_document *doc, const char *uri);
+
+/**
+	Type for a function to be called to
+	create an internal link to a destination (chapter/page/x/y/w/h/zoom/type
+	tuple). See fz_resolve_link_dest for more information.
+*/
+typedef char * (fz_document_format_link_uri_fn)(fz_context *ctx, fz_document *doc, fz_link_dest dest);
 
 /**
 	Type for a function to be called to
@@ -160,11 +200,24 @@ typedef int (fz_document_count_pages_fn)(fz_context *ctx, fz_document *doc, int 
 typedef fz_page *(fz_document_load_page_fn)(fz_context *ctx, fz_document *doc, int chapter, int page);
 
 /**
+	Type for a function to get the page label of a page in the document.
+	See fz_page_label for more information.
+*/
+typedef void (fz_document_page_label_fn)(fz_context *ctx, fz_document *doc, int chapter, int page, char *buf, size_t size);
+
+/**
 	Type for a function to query
-	a documents metadata. See fz_lookup_metadata for more
+	a document's metadata. See fz_lookup_metadata for more
 	information.
 */
-typedef int (fz_document_lookup_metadata_fn)(fz_context *ctx, fz_document *doc, const char *key, char *buf, int size);
+typedef int (fz_document_lookup_metadata_fn)(fz_context *ctx, fz_document *doc, const char *key, char *buf, size_t size);
+
+/**
+	Type for a function to set
+	a document's metadata. See fz_set_metadata for more
+	information.
+*/
+typedef void (fz_document_set_metadata_fn)(fz_context *ctx, fz_document *doc, const char *key, const char *value);
 
 /**
 	Return output intent color space if it exists
@@ -175,6 +228,18 @@ typedef fz_colorspace *(fz_document_output_intent_fn)(fz_context *ctx, fz_docume
 	Write document accelerator data
 */
 typedef void (fz_document_output_accelerator_fn)(fz_context *ctx, fz_document *doc, fz_output *out);
+
+/**
+	Send document structure to device
+*/
+typedef void (fz_document_run_structure_fn)(fz_context *ctx, fz_document *doc, fz_device *dev, fz_cookie *cookie);
+
+/**
+	Get a handle to this document as PDF.
+
+	Returns a borrowed handle.
+*/
+typedef fz_document *(fz_document_as_pdf_fn)(fz_context *ctx, fz_document *doc);
 
 /**
 	Type for a function to make
@@ -200,7 +265,7 @@ typedef void (fz_page_drop_page_fn)(fz_context *ctx, fz_page *page);
 	bounding box of a page. See fz_bound_page for more
 	information.
 */
-typedef fz_rect (fz_page_bound_page_fn)(fz_context *ctx, fz_page *page);
+typedef fz_rect (fz_page_bound_page_fn)(fz_context *ctx, fz_page *page, fz_box_type box);
 
 /**
 	Type for a function to run the
@@ -257,54 +322,39 @@ typedef int (fz_page_uses_overprint_fn)(fz_context *ctx, fz_page *page);
 typedef fz_link *(fz_page_create_link_fn)(fz_context *ctx, fz_page *page, fz_rect bbox, const char *uri);
 
 /**
-	Function type to open a document from a file.
-
-	filename: file to open
-
-	Pointer to opened document. Throws exception in case of error.
+	Type for a function to delete a link on a page.
 */
-typedef fz_document *(fz_document_open_fn)(fz_context *ctx, const char *filename);
+typedef void (fz_page_delete_link_fn)(fz_context *ctx, fz_page *page, fz_link *link);
 
 /**
 	Function type to open a
 	document from a file.
 
-	stream: fz_stream to read document data from. Must be
-	seekable for formats that require it.
-
-	Pointer to opened document. Throws exception in case of error.
-*/
-typedef fz_document *(fz_document_open_with_stream_fn)(fz_context *ctx, fz_stream *stream);
-
-/**
-	Function type to open a document from a
-	file, with accelerator data.
-
-	filename: file to open
-
-	accel: accelerator file
-
-	Pointer to opened document. Throws exception in case of error.
-*/
-typedef fz_document *(fz_document_open_accel_fn)(fz_context *ctx, const char *filename, const char *accel);
-
-/**
-	Function type to open a document from a file,
-	with accelerator data.
+	handler: the document handler in use.
 
 	stream: fz_stream to read document data from. Must be
 	seekable for formats that require it.
 
-	accel: fz_stream to read accelerator data from. Must be
-	seekable for formats that require it.
+	accel: fz_stream to read accelerator data from. May be
+	NULL. May be ignored.
+
+	dir: 'Directory context' in which the document is loaded;
+	associated content from (like images for an html stream
+	will be loaded from this). Maybe NULL. May be ignored.
+
+	recognize_state: NULL, or a state pointer passed back from the call
+	to recognise_content_fn. Ownership does not pass in. The
+	caller remains responsible for freeing state.
 
 	Pointer to opened document. Throws exception in case of error.
 */
-typedef fz_document *(fz_document_open_accel_with_stream_fn)(fz_context *ctx, fz_stream *stream, fz_stream *accel);
+typedef fz_document *(fz_document_open_fn)(fz_context *ctx, const fz_document_handler *handler, fz_stream *stream, fz_stream *accel, fz_archive *dir, void *recognize_state);
 
 /**
 	Recognize a document type from
 	a magic string.
+
+	handler: the handler in use.
 
 	magic: string to recognise - typically a filename or mime
 	type.
@@ -313,18 +363,64 @@ typedef fz_document *(fz_document_open_accel_with_stream_fn)(fz_context *ctx, fz
 	(fully recognized) based on how certain the recognizer
 	is that this is of the required type.
 */
-typedef int (fz_document_recognize_fn)(fz_context *ctx, const char *magic);
+typedef int (fz_document_recognize_fn)(fz_context *ctx, const fz_document_handler *handler, const char *magic);
+
+typedef void (fz_document_recognize_state_free_fn)(fz_context *ctx, void *state);
+
+/**
+	Recognize a document type from stream contents.
+
+	handler: the handler in use.
+
+	stream: stream contents to recognise (may be NULL if document is
+	a directory).
+
+	dir: directory context from which stream is loaded.
+
+	recognize_state: pointer to retrieve opaque state that may be used
+	by the open routine, or NULL.
+
+	free_recognize_state: pointer to retrieve a function pointer to
+	free the opaque state, or NULL.
+
+	Note: state and free_state should either both be NULL or
+	both be non-NULL!
+
+	Returns a number between 0 (not recognized) and 100
+	(fully recognized) based on how certain the recognizer
+	is that this is of the required type.
+*/
+typedef int (fz_document_recognize_content_fn)(fz_context *ctx, const fz_document_handler *handler, fz_stream *stream, fz_archive *dir, void **recognize_state, fz_document_recognize_state_free_fn **free_recognize_state);
+
+/**
+	Finalise a document handler.
+
+	This will be called on shutdown for a document handler to
+	release resources. This should cope with being called with NULL.
+
+	opaque: The value previously returned by the init call.
+*/
+typedef void (fz_document_handler_fin_fn)(fz_context *ctx, const fz_document_handler *handler);
+
+
+
+/**
+	Type for a function to be called when processing an already opened page.
+	See fz_process_opened_pages.
+*/
+typedef void *(fz_process_opened_page_fn)(fz_context *ctx, fz_page *page, void *state);
 
 /**
 	Register a handler for a document type.
 
-	handler: The handler to register.
+	handler: The handler to register. This must live on for the duration of the
+	use of this handler. It will be passed back to the handler for calls so
+	the caller can use it to retrieve state.
 */
 void fz_register_document_handler(fz_context *ctx, const fz_document_handler *handler);
 
 /**
-	Register handlers
-	for all the standard document types supported in
+	Register handlers for all the standard document types supported in
 	this build.
 */
 void fz_register_document_handlers(fz_context *ctx);
@@ -337,6 +433,42 @@ void fz_register_document_handlers(fz_context *ctx);
 	a mimetype.
 */
 const fz_document_handler *fz_recognize_document(fz_context *ctx, const char *magic);
+
+/**
+	Given a filename find a document handler that can handle a
+	document of this type.
+
+	filename: The filename of the document. This will be opened and sampled
+	to check data.
+*/
+const fz_document_handler *fz_recognize_document_content(fz_context *ctx, const char *filename);
+
+/**
+	Given a magic find a document handler that can handle a
+	document of this type.
+
+	stream: the file stream to sample. May be NULL if the document is
+	a directory.
+
+	magic: Can be a filename extension (including initial period) or
+	a mimetype.
+*/
+const fz_document_handler *fz_recognize_document_stream_content(fz_context *ctx, fz_stream *stream, const char *magic);
+
+/**
+	Given a magic find a document handler that can handle a
+	document of this type.
+
+	stream: the file stream to sample. May be NULL if the document is
+	a directory.
+
+	dir: an fz_archive representing the directory from which the
+	stream was opened (or NULL).
+
+	magic: Can be a filename extension (including initial period) or
+	a mimetype.
+*/
+const fz_document_handler *fz_recognize_document_stream_and_dir_content(fz_context *ctx, fz_stream *stream, fz_archive *dir, const char *magic);
 
 /**
 	Open a document file and read its basic structure so pages and
@@ -368,6 +500,11 @@ fz_document *fz_open_accelerated_document(fz_context *ctx, const char *filename,
 
 	magic: a string used to detect document type; either a file name
 	or mime-type.
+
+	stream: a stream representing the contents of the document file.
+
+	NOTE: The caller retains ownership of 'stream' - the document will take its
+	own reference if required.
 */
 fz_document *fz_open_document_with_stream(fz_context *ctx, const char *magic, fz_stream *stream);
 
@@ -377,8 +514,54 @@ fz_document *fz_open_document_with_stream(fz_context *ctx, const char *magic, fz
 
 	magic: a string used to detect document type; either a file name
 	or mime-type.
+
+	stream: a stream representing the contents of the document file.
+
+	dir: a 'directory context' for those filetypes that need it.
+
+	NOTE: The caller retains ownership of 'stream' and 'dir' - the document will
+	take its own references if required.
+*/
+fz_document *fz_open_document_with_stream_and_dir(fz_context *ctx, const char *magic, fz_stream *stream, fz_archive *dir);
+
+/**
+	Open a document using a buffer rather than opening a file on disk.
+*/
+fz_document *fz_open_document_with_buffer(fz_context *ctx, const char *magic, fz_buffer *buffer);
+
+/**
+	Open a document using the specified stream object rather than
+	opening a file on disk.
+
+	magic: a string used to detect document type; either a file name
+	or mime-type.
+
+	stream: a stream of the document contents.
+
+	accel: NULL, or a stream of the 'accelerator' contents for this document.
+
+	NOTE: The caller retains ownership of 'stream' and 'accel' - the document will
+	take its own references if required.
 */
 fz_document *fz_open_accelerated_document_with_stream(fz_context *ctx, const char *magic, fz_stream *stream, fz_stream *accel);
+
+/**
+	Open a document using the specified stream object rather than
+	opening a file on disk.
+
+	magic: a string used to detect document type; either a file name
+	or mime-type.
+
+	stream: a stream of the document contents.
+
+	accel: NULL, or a stream of the 'accelerator' contents for this document.
+
+	dir: NULL, or the 'directory context' for the stream contents.
+
+	NOTE: The caller retains ownership of 'stream', 'accel' and 'dir' - the document will
+	take its own references if required.
+*/
+fz_document *fz_open_accelerated_document_with_stream_and_dir(fz_context *ctx, const char *magic, fz_stream *stream, fz_stream *accel, fz_archive *dir);
 
 /**
 	Query if the document supports the saving of accelerator data.
@@ -456,6 +639,13 @@ int fz_authenticate_password(fz_context *ctx, fz_document *doc, const char *pass
 fz_outline *fz_load_outline(fz_context *ctx, fz_document *doc);
 
 /**
+	Get an iterator for the document outline.
+
+	Should be freed by fz_drop_outline_iterator.
+*/
+fz_outline_iterator *fz_new_outline_iterator(fz_context *ctx, fz_document *doc);
+
+/**
 	Is the document reflowable.
 
 	Returns 1 to indicate reflowable documents, otherwise 0.
@@ -490,6 +680,21 @@ fz_location fz_lookup_bookmark(fz_context *ctx, fz_document *doc, fz_bookmark ma
 int fz_count_pages(fz_context *ctx, fz_document *doc);
 
 /**
+	Resolve an internal link to a page number, location, and possible viewing parameters.
+
+	Returns location (-1,-1) if the URI cannot be resolved.
+*/
+fz_link_dest fz_resolve_link_dest(fz_context *ctx, fz_document *doc, const char *uri);
+
+/**
+	Format an internal link to a page number, location, and possible viewing parameters,
+	suitable for use with fz_create_link.
+
+	Returns a newly allocated string that the caller must free.
+*/
+char *fz_format_link_uri(fz_context *ctx, fz_document *doc, fz_link_dest dest);
+
+/**
 	Resolve an internal link to a page number.
 
 	xp, yp: Pointer to store coordinate of destination on the page.
@@ -497,6 +702,23 @@ int fz_count_pages(fz_context *ctx, fz_document *doc);
 	Returns (-1,-1) if the URI cannot be resolved.
 */
 fz_location fz_resolve_link(fz_context *ctx, fz_document *doc, const char *uri, float *xp, float *yp);
+
+/**
+	Run the document structure through a device.
+
+	doc: Document in question.
+
+	dev: Device obtained from fz_new_*_device.
+
+	cookie: Communication mechanism between caller and library.
+	Intended for multi-threaded applications, while
+	single-threaded applications set cookie to NULL. The
+	caller may abort an ongoing rendering of a page. Cookie also
+	communicates progress information back to the caller. The
+	fields inside cookie are continually updated while the page is
+	rendering.
+*/
+void fz_run_document_structure(fz_context *ctx, fz_document *doc, fz_device *dev, fz_cookie *cookie);
 
 /**
 	Function to get the location for the last page in the document.
@@ -595,6 +817,7 @@ fz_page *fz_new_page_of_size(fz_context *ctx, int size, fz_document *doc);
 	Determine the size of a page at 72 dpi.
 */
 fz_rect fz_bound_page(fz_context *ctx, fz_page *page);
+fz_rect fz_bound_page_box(fz_context *ctx, fz_page *page, fz_box_type box);
 
 /**
 	Run a page through a device.
@@ -680,6 +903,11 @@ void fz_drop_page(fz_context *ctx, fz_page *page);
 fz_transition *fz_page_presentation(fz_context *ctx, fz_page *page, fz_transition *transition, float *duration);
 
 /**
+	Get page label for a given page.
+*/
+const char *fz_page_label(fz_context *ctx, fz_page *page, char *buf, int size);
+
+/**
 	Check permission flags on document.
 */
 int fz_has_permission(fz_context *ctx, fz_document *doc, fz_permission p);
@@ -719,10 +947,17 @@ int fz_lookup_metadata(fz_context *ctx, fz_document *doc, const char *key, char 
 #define FZ_META_FORMAT "format"
 #define FZ_META_ENCRYPTION "encryption"
 
-#define FZ_META_INFO_AUTHOR "info:Author"
+#define FZ_META_INFO "info:"
 #define FZ_META_INFO_TITLE "info:Title"
+#define FZ_META_INFO_AUTHOR "info:Author"
+#define FZ_META_INFO_SUBJECT "info:Subject"
+#define FZ_META_INFO_KEYWORDS "info:Keywords"
 #define FZ_META_INFO_CREATOR "info:Creator"
 #define FZ_META_INFO_PRODUCER "info:Producer"
+#define FZ_META_INFO_CREATIONDATE "info:CreationDate"
+#define FZ_META_INFO_MODIFICATIONDATE "info:ModDate"
+
+void fz_set_metadata(fz_context *ctx, fz_document *doc, const char *key, const char *value);
 
 /**
 	Find the output intent colorspace if the document has defined
@@ -753,6 +988,25 @@ int fz_page_uses_overprint(fz_context *ctx, fz_page *page);
 */
 fz_link *fz_create_link(fz_context *ctx, fz_page *page, fz_rect bbox, const char *uri);
 
+/**
+	Delete an existing link on a page.
+*/
+void fz_delete_link(fz_context *ctx, fz_page *page, fz_link *link);
+
+/**
+	Iterates over all opened pages of the document, calling the
+	provided callback for each page for processing. If the callback
+	returns non-NULL then the iteration stops and that value is returned
+	to the called of fz_process_opened_pages().
+
+	The state pointer provided to fz_process_opened_pages() is
+	passed on to the callback but is owned by the caller.
+
+	Returns the first non-NULL value returned by the callback,
+	or NULL if the callback returned NULL for all opened pages.
+*/
+void *fz_process_opened_pages(fz_context *ctx, fz_document *doc, fz_process_opened_page_fn *process_openend_page, void *state);
+
 /* Implementation details: subject to change. */
 
 /**
@@ -762,7 +1016,7 @@ fz_link *fz_create_link(fz_context *ctx, fz_page *page, fz_rect bbox, const char
 struct fz_page
 {
 	int refs;
-	fz_document *doc; /* reference to parent document */
+	fz_document *doc; /* kept reference to parent document. Guaranteed non-NULL. */
 	int chapter; /* chapter number */
 	int number; /* page number in chapter */
 	int incomplete; /* incomplete from progressive loading; don't cache! */
@@ -778,7 +1032,14 @@ struct fz_page
 	fz_page_separations_fn *separations;
 	fz_page_uses_overprint_fn *overprint;
 	fz_page_create_link_fn *create_link;
-	fz_page **prev, *next; /* linked list of currently open pages */
+	fz_page_delete_link_fn *delete_link;
+
+	/* linked list of currently open pages. This list is maintained
+	 * by fz_load_chapter_page and fz_drop_page. All pages hold a
+	 * kept reference to the document, so the document cannot disappear
+	 * while pages exist. 'Incomplete' pages are NOT kept in this
+	 * list. */
+	fz_page **prev, *next;
 };
 
 /**
@@ -795,31 +1056,46 @@ struct fz_document
 	fz_document_authenticate_password_fn *authenticate_password;
 	fz_document_has_permission_fn *has_permission;
 	fz_document_load_outline_fn *load_outline;
+	fz_document_outline_iterator_fn *outline_iterator;
 	fz_document_layout_fn *layout;
 	fz_document_make_bookmark_fn *make_bookmark;
 	fz_document_lookup_bookmark_fn *lookup_bookmark;
-	fz_document_resolve_link_fn *resolve_link;
+	fz_document_resolve_link_dest_fn *resolve_link_dest;
+	fz_document_format_link_uri_fn *format_link_uri;
 	fz_document_count_chapters_fn *count_chapters;
 	fz_document_count_pages_fn *count_pages;
 	fz_document_load_page_fn *load_page;
+	fz_document_page_label_fn *page_label;
 	fz_document_lookup_metadata_fn *lookup_metadata;
+	fz_document_set_metadata_fn *set_metadata;
 	fz_document_output_intent_fn *get_output_intent;
 	fz_document_output_accelerator_fn *output_accelerator;
+	fz_document_run_structure_fn *run_structure;
+	fz_document_as_pdf_fn *as_pdf;
 	int did_layout;
 	int is_reflowable;
-	fz_page *open; /* linked list of currently open pages */
+
+	/* Linked list of currently open pages. These are not
+	 * references, but just a linked list of open pages,
+	 * maintained by fz_load_chapter_page, and fz_drop_page.
+	 * Every page holds a kept reference to the document, so
+	 * the document cannot be destroyed while a page exists.
+	 * Incomplete pages are NOT inserted into this list, but
+	 * do still hold a real document reference. */
+	fz_page *open;
 };
 
 struct fz_document_handler
 {
+	/* These fields are initialised by the handler when it is registered. */
 	fz_document_recognize_fn *recognize;
 	fz_document_open_fn *open;
-	fz_document_open_with_stream_fn *open_with_stream;
 	const char **extensions;
 	const char **mimetypes;
-	fz_document_open_accel_fn *open_accel;
-	fz_document_open_accel_with_stream_fn *open_accel_with_stream;
+	fz_document_recognize_content_fn *recognize_content;
+	int wants_dir;
+	int wants_file;
+	fz_document_handler_fin_fn *fin;
 };
-
 
 #endif

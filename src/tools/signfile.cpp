@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 // signfile produces a cryptographic signature of a given file
@@ -14,15 +14,15 @@
 // sumatra-app.cer
 
 #include "utils/BaseUtil.h"
-#include "utils/CmdLineParser.h"
+#include "utils/CmdLineArgsIter.h"
 #include "utils/CryptoUtil.h"
 #include "utils/FileUtil.h"
 
-#define ErrOut(msg, ...) fwprintf(stderr, TEXT(msg) TEXT("\n"), __VA_ARGS__)
-#define ErrOut1(msg) fwprintf(stderr, TEXT("%s"), TEXT(msg) TEXT("\n"))
+#define ErrOut(msg, ...) fprintf(stderr, msg "\n", __VA_ARGS__)
+#define ErrOut1(msg) fprintf(stderr, "%s", msg "\n")
 
-void ShowUsage(const WCHAR* exeName) {
-    ErrOut("Syntax: %s", path::GetBaseNameNoFree(exeName));
+void ShowUsage(const char* exeName) {
+    ErrOut("Syntax: %s", path::GetBaseNameTemp(exeName));
     ErrOut1("\t[-cert CertName]\t- name of the certificate to use");      // when omitted uses first available
     ErrOut1("\t[-out filename.out]\t- where to save the signature file"); // when omitted uses stdout
     ErrOut1("\t[-comment #]\t\t- comment syntax for signed text files");  // needed when saving the signature into the
@@ -32,7 +32,7 @@ void ShowUsage(const WCHAR* exeName) {
     ErrOut1("");
 
     HCERTSTORE hStore = CertOpenSystemStore(NULL, L"My");
-    CrashAlwaysIf(!hStore);
+    ReportIf(!hStore);
     bool hasCert = false;
     PCCERT_CONTEXT pCertCtx = nullptr;
     while ((pCertCtx = CertEnumCertificatesInStore(hStore, pCertCtx)) != nullptr) {
@@ -50,7 +50,8 @@ void ShowUsage(const WCHAR* exeName) {
             ErrOut1("Available certificates:");
             hasCert = true;
         }
-        ErrOut("\"%s\"", name);
+        // fprintf(stderr, "\"%s\"\n", name);
+        fprintf(stderr, "%s\n", ToUtf8Temp(name));
     }
     if (!hasCert)
         ErrOut1("Warning: Failed to find a signature certificate in store \"My\"!");
@@ -58,52 +59,57 @@ void ShowUsage(const WCHAR* exeName) {
 }
 
 int main() {
-    WStrVec args;
-    ParseCmdLine(GetCommandLine(), args);
+    StrVec args;
+    ParseCmdLine(GetCommandLineW(), args);
 
-    const WCHAR* filePath = nullptr;
-    const WCHAR* certName = nullptr;
-    const WCHAR* signFilePath = nullptr;
-    const WCHAR* pubkeyPath = nullptr;
-    AutoFree inFileCommentSyntax;
+    const char* filePath = nullptr;
+    const char* certName = nullptr;
+    const char* signFilePath = nullptr;
+    const char* pubkeyPath = nullptr;
+    AutoFreeStr inFileCommentSyntax;
+    // find certificate
+    HCERTSTORE hStore = nullptr;
+    PCCERT_CONTEXT pCertCtx = nullptr;
+    HCRYPTPROV hProv = NULL;
+    HCRYPTKEY hKey = NULL;
+    HCRYPTHASH hHash = NULL;
+    int errorCode = 2;
+    DWORD pubkeyLen = 0;
+    DWORD sigLen = 0;
 
-#define is_arg(name, var) (str::EqI(args.at(i), TEXT(name)) && i + 1 < args.size() && !var)
-    for (size_t i = 1; i < args.size(); i++) {
+    ScopedMem<BYTE> pubkey;
+    AutoFreeStr data;
+    AutoFreeStr hexSignature;
+    ScopedMem<BYTE> signature;
+    BOOL ok;
+    const char* sig = nullptr;
+
+#define is_arg(name, var) (str::EqI(args[i], name) && i + 1 < args.Size() && !var)
+    for (int i = 1; i < args.Size(); i++) {
         if (is_arg("-cert", certName))
-            certName = args.at(++i);
+            certName = args.At(++i);
         else if (is_arg("-out", signFilePath))
-            signFilePath = args.at(++i);
+            signFilePath = args.At(++i);
         else if (is_arg("-pubkey", pubkeyPath))
-            pubkeyPath = args.at(++i);
+            pubkeyPath = args.At(++i);
         else if (is_arg("-comment", inFileCommentSyntax)) {
-            auto tmp = strconv::ToUtf8(args.at(++i));
-            inFileCommentSyntax.Set(tmp.StealData());
+            auto tmp = args.At(++i);
+            inFileCommentSyntax.SetCopy(tmp);
         } else if (!filePath)
-            filePath = args.at(i);
+            filePath = args.At(i);
         else
             goto SyntaxError;
     }
 #undef is_arg
     if (!filePath && !pubkeyPath) {
     SyntaxError:
-        ShowUsage(args.at(0));
+        ShowUsage(args.At(0));
         return 1;
     }
 
     // find certificate
-    HCERTSTORE hStore = CertOpenSystemStore(NULL, L"My");
-    CrashAlwaysIf(!hStore);
-    PCCERT_CONTEXT pCertCtx = nullptr;
-    HCRYPTPROV hProv = NULL;
-    HCRYPTKEY hKey = NULL;
-    HCRYPTHASH hHash = NULL;
-    int errorCode = 2;
-
-    ScopedMem<BYTE> pubkey;
-    AutoFree data;
-    AutoFree hexSignature;
-    ScopedMem<BYTE> signature;
-    BOOL ok;
+    hStore = CertOpenSystemStoreW(NULL, L"My");
+    ReportIf(!hStore);
 
 #define QuitIfNot(cond, msg, ...) \
     if (!(cond)) {                \
@@ -141,14 +147,14 @@ int main() {
     // extract public key for verficiation and export
     ok = CryptGetUserKey(hProv, AT_SIGNATURE, &hKey);
     QuitIfNot(ok, "%s", "Error: Failed to export the public key!");
-    DWORD pubkeyLen = 0;
     ok = CryptExportKey(hKey, NULL, PUBLICKEYBLOB, 0, nullptr, &pubkeyLen);
     QuitIfNot(ok, "%s", "Error: Failed to export the public key!");
     pubkey.Set(AllocArray<BYTE>(pubkeyLen));
     ok = CryptExportKey(hKey, NULL, PUBLICKEYBLOB, 0, pubkey.Get(), &pubkeyLen);
     QuitIfNot(ok, "%s", "Error: Failed to export the public key!");
     if (pubkeyPath) {
-        ok = file::WriteFile(pubkeyPath, pubkey.Get(), pubkeyLen);
+        ByteSlice d(pubkey.Get(), pubkeyLen);
+        ok = file::WriteFile(pubkeyPath, d);
         QuitIfNot(ok, "Error: Failed to write the public key to \"%s\"!", pubkeyPath);
         QuitIfNot(filePath, "Wrote the public key to \"%s\", no file to sign.", pubkeyPath);
     }
@@ -156,9 +162,9 @@ int main() {
     // prepare data for signing
     size_t dataLen;
     {
-        AutoFree tmp(file::ReadFile(filePath));
-        dataLen = tmp.size;
-        data.Set(tmp.StealData());
+        ByteSlice tmp(file::ReadFile(filePath));
+        dataLen = tmp.size();
+        data.Set(tmp);
     }
     QuitIfNot(data && dataLen <= UINT_MAX, "Error: Failed to read from \"%s\" (or file is too large)!", filePath);
     ok = !inFileCommentSyntax || (dataLen > 0 && !memchr(data.Get(), 0, dataLen));
@@ -173,7 +179,7 @@ int main() {
             str::StartsWith(lastLine + str::Len(inFileCommentSyntax), " Signature sha1:")) {
             strcpy_s(lastLine, 3, lf);
         } else {
-            data.Set(str::Format("%s%s", data, lf));
+            data.Set(str::Format("%s%s", data.Get(), lf));
         }
         dataLen = str::Len(data);
     }
@@ -194,7 +200,6 @@ int main() {
     ok = CryptHashData(hHash, (const BYTE*)data.Get(), dataLen, 0);
 #endif
     QuitIfNot(ok, "%s", "Error: Failed to calculate the SHA-1 hash!");
-    DWORD sigLen = 0;
     ok = CryptSignHash(hHash, AT_SIGNATURE, nullptr, 0, nullptr, &sigLen);
     QuitIfNot(ok, "%s", "Error: Failed to sign the SHA-1 hash!");
     signature.Set(AllocArray<BYTE>(sigLen));
@@ -205,14 +210,14 @@ int main() {
     hexSignature.Set(str::MemToHex((const u8*)signature.Get(), sigLen));
     if (inFileCommentSyntax) {
         const char* lf = str::Find(data, "\r\n") || !str::FindChar(data, '\n') ? "\r\n" : "\n";
-        data.Set(str::Format("%s%s Signature sha1:%s%s", data, inFileCommentSyntax, hexSignature, lf));
+        data.Set(
+            str::Format("%s%s Signature sha1:%s%s", data.Get(), inFileCommentSyntax.Get(), hexSignature.Get(), lf));
         dataLen = str::Len(data);
         hexSignature.SetCopy(data);
     } else {
-        hexSignature.Set(str::Format("sha1:%s\r\n", hexSignature));
+        hexSignature.Set(str::Format("sha1:%s\r\n", hexSignature.Get()));
     }
 
-    const char* sig = nullptr;
     if (!inFileCommentSyntax) {
         sig = hexSignature.Get();
     }
@@ -221,7 +226,10 @@ int main() {
 
     // save/display signature
     if (signFilePath) {
-        ok = file::WriteFile(signFilePath, hexSignature.Get(), str::Len(hexSignature));
+        char* s = hexSignature.Get();
+        size_t sLen = str::Len(s);
+        ByteSlice d((u8*)s, sLen);
+        ok = file::WriteFile(signFilePath, d);
         QuitIfNot(ok, "Error: Failed to write signature to \"%s\"!", signFilePath);
     } else {
         fprintf(stdout, "%s", hexSignature.Get());

@@ -1,17 +1,18 @@
 #include "test-app.h"
 #include "utils/BaseUtil.h"
+#include "utils/WinUtil.h"
 
-#include "wingui/WinGui.h"
+#include "wingui/UIModels.h"
+
 #include "wingui/Layout.h"
-#include "wingui/Window.h"
-#include "wingui/ButtonCtrl.h"
+#include "wingui/WinGui.h"
+
+#include "utils/Log.h"
 
 // in TestTab.cpp
 extern int TestTab(HINSTANCE hInstance, int nCmdShow);
 // in TestLayout.cpp
 extern int TestLayout(HINSTANCE hInstance, int nCmdShow);
-// in TestLice.cpp
-extern int TestLice(HINSTANCE hInstance, int nCmdShow);
 
 HINSTANCE gHinst = nullptr;
 
@@ -23,10 +24,6 @@ static void LaunchLayout() {
     TestLayout(gHinst, SW_SHOW);
 }
 
-static void LaunchLice() {
-    TestLice(gHinst, SW_SHOW);
-}
-
 static ILayout* CreateMainLayout(HWND hwnd) {
     auto* vbox = new VBox();
 
@@ -34,39 +31,48 @@ static ILayout* CreateMainLayout(HWND hwnd) {
     vbox->alignCross = CrossAxisAlign::CrossCenter;
 
     {
-        auto b = CreateButton(hwnd, "Tabs test", LaunchTabs);
+        auto b = CreateButton(hwnd, "Tabs test", MkFunc0Void(LaunchTabs));
         vbox->AddChild(b);
     }
 
     {
-        auto b = CreateButton(hwnd, "Layout test", LaunchLayout);
+        auto b = CreateButton(hwnd, "Layout test", MkFunc0Void(LaunchLayout));
         vbox->AddChild(b);
     }
 
-    {
-        auto b = CreateButton(hwnd, "Lice test", LaunchLice);
-        vbox->AddChild(b);
-    }
     auto padding = new Padding(vbox, DefaultInsets());
     return padding;
 }
 
+struct TestWnd : Wnd {
+};
+
+static void OnDestroy(Wnd::DestroyEvent*) {
+    ::PostQuitMessage(0);
+}
+
+// in Window.cpp
+int RunMessageLoop(HACCEL accelTable, HWND hwndDialog);
+
 void TestApp(HINSTANCE hInstance) {
     gHinst = hInstance;
 
-    // return TestDirectDraw(hInstance, nCmdShow);
-    // return TestTab(hInstance, nCmdShow);
-    // return TestLayout(hInstance, nCmdShow);
+    auto w = new TestWnd();
+    auto fn = MkFunc1Void<Wnd::DestroyEvent*>(OnDestroy);
+    w->onDestroy = fn;
 
-    auto w = new Window();
-    w->backgroundColor = MkRgb((u8)0xae, (u8)0xae, (u8)0xae);
-    w->SetTitle("this is a title");
-    w->initialPos = {100, 100};
-    w->initialSize = {480, 640};
-    bool ok = w->Create();
-    CrashIf(!ok);
+    // w->backgroundColor = MkColor((u8)0xae, (u8)0xae, (u8)0xae);
+    CreateCustomArgs args;
+    args.pos = {CW_USEDEFAULT, CW_USEDEFAULT, 480, 640};
+    args.title = "a little test app";
+    HWND hwnd = w->CreateCustom(args);
+    ReportIf(!hwnd);
 
-    auto l = CreateMainLayout(w->hwnd);
+    w->layout = CreateMainLayout(w->hwnd);
+    LayoutToSize(w->layout, {480, 640});
+    InvalidateRect(hwnd, nullptr, false);
+
+#if 0
     w->onSize = [&](SizeEvent* args) {
         HWND hwnd = args->hwnd;
         int dx = args->dx;
@@ -77,11 +83,12 @@ void TestApp(HINSTANCE hInstance) {
         LayoutToSize(l, {dx, dy});
         InvalidateRect(hwnd, nullptr, false);
     };
-
+#endif
     // important to call this after hooking up onSize to ensure
     // first layout is triggered
     w->SetIsVisible(true);
 
-    auto res = RunMessageLoop(nullptr, w->hwnd);
+    RunMessageLoop(nullptr, w->hwnd);
+    delete w;
     return;
 }

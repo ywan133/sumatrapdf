@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2022 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "xps-imp.h"
 
@@ -13,7 +35,7 @@ xps_load_links_in_element(fz_context *ctx, xps_document *doc, fz_matrix ctm,
 static void
 xps_add_link(fz_context *ctx, xps_document *doc, fz_rect area, char *base_uri, char *target_uri, fz_link **head)
 {
-	fz_link *link = fz_new_link(ctx, area, target_uri);
+	fz_link *link = fz_new_derived_link(ctx, fz_link, area, target_uri);
 	link->next = *head;
 	*head = link;
 }
@@ -46,8 +68,12 @@ xps_load_links_in_path(fz_context *ctx, xps_document *doc, fz_matrix ctm,
 			path = xps_parse_path_geometry(ctx, doc, dict, data_tag, 0, &fill_rule);
 		if (path)
 		{
-			area = fz_bound_path(ctx, path, NULL, ctm);
-			fz_drop_path(ctx, path);
+			fz_try(ctx)
+				area = fz_bound_path(ctx, path, NULL, ctm);
+			fz_always(ctx)
+				fz_drop_path(ctx, path);
+			fz_catch(ctx)
+				fz_rethrow(ctx);
 			xps_add_link(ctx, doc, area, base_uri, navigate_uri_att, link);
 		}
 	}
@@ -76,7 +102,7 @@ xps_load_links_in_glyphs(fz_context *ctx, xps_document *doc, fz_matrix ctm,
 		int is_sideways = 0;
 		int bidi_level = 0;
 		fz_font *font;
-		fz_text *text;
+		fz_text *text = NULL;
 		fz_rect area;
 
 		xps_resolve_resource_reference(ctx, doc, dict, &transform_att, &transform_tag, NULL);
@@ -91,12 +117,22 @@ xps_load_links_in_glyphs(fz_context *ctx, xps_document *doc, fz_matrix ctm,
 		font = xps_lookup_font(ctx, doc, base_uri, font_uri_att, style_att);
 		if (!font)
 			return;
-		text = xps_parse_glyphs_imp(ctx, doc, ctm, font, fz_atof(font_size_att),
-				fz_atof(origin_x_att), fz_atof(origin_y_att),
-				is_sideways, bidi_level, indices_att, unicode_att);
-		area = fz_bound_text(ctx, text, NULL, ctm);
-		fz_drop_text(ctx, text);
-		fz_drop_font(ctx, font);
+
+		fz_var(text);
+		fz_try(ctx)
+		{
+			text = xps_parse_glyphs_imp(ctx, doc, ctm, font, fz_atof(font_size_att),
+					fz_atof(origin_x_att), fz_atof(origin_y_att),
+					is_sideways, bidi_level, indices_att, unicode_att);
+			area = fz_bound_text(ctx, text, NULL, ctm);
+		}
+		fz_always(ctx)
+		{
+			fz_drop_text(ctx, text);
+			fz_drop_font(ctx, font);
+		}
+		fz_catch(ctx)
+			fz_rethrow(ctx);
 
 		xps_add_link(ctx, doc, area, base_uri, navigate_uri_att, link);
 	}

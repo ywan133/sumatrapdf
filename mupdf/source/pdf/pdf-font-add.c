@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
@@ -14,13 +36,16 @@
 #define FT_SFNT_HEAD ft_sfnt_head
 #endif
 
-static int ft_font_file_kind(FT_Face face)
+static int ft_font_file_kind(fz_context *ctx, FT_Face face)
 {
+	const char *kind;
+	fz_ft_lock(ctx);
 #ifdef FT_FONT_FORMATS_H
-	const char *kind = FT_Get_Font_Format(face);
+	kind = FT_Get_Font_Format(face);
 #else
-	const char *kind = FT_Get_X11_Font_Format(face);
+	kind = FT_Get_X11_Font_Format(face);
 #endif
+	fz_ft_unlock(ctx);
 	if (!strcmp(kind, "TrueType")) return 2;
 	if (!strcmp(kind, "Type 1")) return 1;
 	if (!strcmp(kind, "CFF")) return 3;
@@ -30,17 +55,19 @@ static int ft_font_file_kind(FT_Face face)
 
 static int is_ttc(fz_font *font)
 {
+	if (!font || !font->buffer || font->buffer->len < 4)
+		return 0;
 	return !memcmp(font->buffer->data, "ttcf", 4);
 }
 
-static int is_truetype(FT_Face face)
+static int is_truetype(fz_context *ctx, FT_Face face)
 {
-	return ft_font_file_kind(face) == 2;
+	return ft_font_file_kind(ctx, face) == 2;
 }
 
-static int is_postscript(FT_Face face)
+static int is_postscript(fz_context *ctx, FT_Face face)
 {
-	int kind = ft_font_file_kind(face);
+	int kind = ft_font_file_kind(ctx, face);
 	return (kind == 1 || kind == 3);
 }
 
@@ -60,6 +87,7 @@ pdf_add_font_file(fz_context *ctx, pdf_document *doc, fz_font *font)
 	fz_buffer *buf = font->buffer;
 	pdf_obj *obj = NULL;
 	pdf_obj *ref = NULL;
+	int drop_buf = 0;
 
 	fz_var(obj);
 	fz_var(ref);
@@ -68,12 +96,20 @@ pdf_add_font_file(fz_context *ctx, pdf_document *doc, fz_font *font)
 	if (font->flags.ft_substitute)
 		return NULL;
 
+	if (is_ttc(font))
+	{
+		buf = NULL;
+		drop_buf = 1;
+		buf = fz_extract_ttf_from_ttc(ctx, font);
+	}
+
 	fz_try(ctx)
 	{
 		size_t len = fz_buffer_storage(ctx, buf, NULL);
+		int is_opentype;
 		obj = pdf_new_dict(ctx, doc, 3);
 		pdf_dict_put_int(ctx, obj, PDF_NAME(Length1), (int)len);
-		switch (ft_font_file_kind(font->ft_face))
+		switch (ft_font_file_kind(ctx, font->ft_face))
 		{
 		case 1:
 			/* TODO: these may not be the correct values, but I doubt it matters */
@@ -83,10 +119,13 @@ pdf_add_font_file(fz_context *ctx, pdf_document *doc, fz_font *font)
 		case 2:
 			break;
 		case 3:
-			if (FT_Get_Sfnt_Table(font->ft_face, FT_SFNT_HEAD))
+			fz_ft_lock(ctx);
+			is_opentype = !!FT_Get_Sfnt_Table(font->ft_face, FT_SFNT_HEAD);
+			fz_ft_unlock(ctx);
+			if (is_opentype)
 				pdf_dict_put(ctx, obj, PDF_NAME(Subtype), PDF_NAME(OpenType));
 			else
-				pdf_dict_put(ctx, obj, PDF_NAME(Subtype), PDF_NAME(Type1C));
+				pdf_dict_put(ctx, obj, PDF_NAME(Subtype), PDF_NAME(CIDFontType0C));
 			break;
 		}
 		ref = pdf_add_object(ctx, doc, obj);
@@ -95,6 +134,8 @@ pdf_add_font_file(fz_context *ctx, pdf_document *doc, fz_font *font)
 	fz_always(ctx)
 	{
 		pdf_drop_obj(ctx, obj);
+		if (drop_buf)
+			fz_drop_buffer(ctx, buf);
 	}
 	fz_catch(ctx)
 	{
@@ -133,7 +174,7 @@ pdf_add_font_descriptor(fz_context *ctx, pdf_document *doc, pdf_obj *fobj, fz_fo
 		fileref = pdf_add_font_file(ctx, doc, font);
 		if (fileref)
 		{
-			switch (ft_font_file_kind(face))
+			switch (ft_font_file_kind(ctx, face))
 			{
 			default:
 			case 1: pdf_dict_put_drop(ctx, fdobj, PDF_NAME(FontFile), fileref); break;
@@ -196,7 +237,7 @@ pdf_add_cid_system_info(fz_context *ctx, pdf_document *doc, pdf_obj *fobj, const
 }
 
 /* Different states of starting, same width as last, or consecutive glyph */
-enum { FW_START, FW_SAME, FW_RUN };
+enum { FW_START = 0, FW_SAME, FW_DIFFER };
 
 /* ToDo: Ignore the default sized characters */
 static void
@@ -206,64 +247,72 @@ pdf_add_cid_font_widths(fz_context *ctx, pdf_document *doc, pdf_obj *fobj, fz_fo
 	pdf_obj *run_obj = NULL;
 	pdf_obj *fw;
 	int curr_code;
-	int prev_code;
 	int curr_size;
-	int prev_size;
 	int first_code;
-	int new_first_code;
 	int state = FW_START;
-	int new_state = FW_START;
-	int publish = 0;
 
 	fz_var(run_obj);
 
 	fw = pdf_add_new_array(ctx, doc, 10);
 	fz_try(ctx)
 	{
-		prev_code = 0;
-		prev_size = fz_advance_glyph(ctx, font, 0, 0) * 1000;
-		first_code = prev_code;
+		curr_code = 0;
+		curr_size = fz_advance_glyph(ctx, font, 0, 0) * 1000;
+		first_code = 0;
 
-		for (;;)
+		for (curr_code = 1; curr_code < face->num_glyphs; curr_code++)
 		{
-			curr_code = prev_code + 1;
-			if (curr_code >= face->num_glyphs)
-				break;
+			int prev_size = curr_size;
+
 			curr_size = fz_advance_glyph(ctx, font, curr_code, 0) * 1000;
 
+			/* So each time around the loop when we reach here, we have sizes
+			 * for curr_code-1 (prev_size) and curr_code (curr_size), neither
+			 * of which have been published yet. By the time we reach the end
+			 * of the loop we must have disposed of prev_size. */
 			switch (state)
 			{
 			case FW_SAME:
+				/* Until now, we've been in a run of identical values, extending
+				 * from first_code to curr_code-1. If the current and prev sizes
+				 * match, then this now extends from first_code to curr_code and
+				 * we don't need to do anything. If not, we need to flush and
+				 * restart. */
 				if (curr_size != prev_size)
 				{
-					/* End of same widths for consecutive ids. Current will
-					 * be pushed as prev. below during next iteration */
-					publish = 1;
-					if (curr_code < face->num_glyphs)
-						run_obj = pdf_new_array(ctx, doc, 10);
-					new_state = FW_RUN;
-					/* And the new first code is our current code */
-					new_first_code = curr_code;
+					/* Add three entries. First cid, last cid and width */
+					pdf_array_push_int(ctx, fw, first_code);
+					pdf_array_push_int(ctx, fw, curr_code-1);
+					pdf_array_push_int(ctx, fw, prev_size);
+					/* And the new first code is our current code. */
+					first_code = curr_code;
+					state = FW_START;
 				}
 				break;
-			case FW_RUN:
+			case FW_DIFFER:
+				/* Until now, we've been in a run of differing values, extending
+				 * from first_code to curr_code-1 (though prev_size, the size for
+				 * curr_code-1 has not yet been pushed). */
 				if (curr_size == prev_size)
 				{
-					/* Same width, so start a new same entry starting with
-					 * the previous code. i.e. the prev size is not put
-					 * in the run */
-					publish = 1;
-					new_state = FW_SAME;
-					new_first_code = prev_code;
+					/* Same width, so flush the run of differences. */
+					pdf_array_push_int(ctx, fw, first_code);
+					pdf_array_push(ctx, fw, run_obj);
+					pdf_drop_obj(ctx, run_obj);
+					run_obj = NULL;
+					/* Start a new 'same' entry starting with curr_code-1.
+					 * i.e. the prev size is not put in the run. */
+					state = FW_SAME;
+					first_code = curr_code-1;
 				}
 				else
 				{
-					/* Add prev size to run_obj */
+					/* Continue our differing run by adding prev size to run_obj. */
 					pdf_array_push_int(ctx, run_obj, prev_size);
 				}
 				break;
 			case FW_START:
-				/* Starting fresh. Determine our state */
+				/* Starting fresh. Determine our state. */
 				if (curr_size == prev_size)
 				{
 					state = FW_SAME;
@@ -272,55 +321,38 @@ pdf_add_cid_font_widths(fz_context *ctx, pdf_document *doc, pdf_obj *fobj, fz_fo
 				{
 					run_obj = pdf_new_array(ctx, doc, 10);
 					pdf_array_push_int(ctx, run_obj, prev_size);
-					state = FW_RUN;
+					state = FW_DIFFER;
 				}
-				new_first_code = prev_code;
 				break;
 			}
-
-			if (publish || curr_code == face->num_glyphs)
-			{
-				switch (state)
-				{
-				case FW_SAME:
-					/* Add three entries. First cid, last cid and width */
-					pdf_array_push_int(ctx, fw, first_code);
-					pdf_array_push_int(ctx, fw, prev_code);
-					pdf_array_push_int(ctx, fw, prev_size);
-					break;
-				case FW_RUN:
-					if (pdf_array_len(ctx, run_obj) > 0)
-					{
-						pdf_array_push_int(ctx, fw, first_code);
-						pdf_array_push(ctx, fw, run_obj);
-					}
-					pdf_drop_obj(ctx, run_obj);
-					run_obj = NULL;
-					break;
-				case FW_START:
-					/* Lone wolf. Not part of a consecutive run */
-					pdf_array_push_int(ctx, fw, prev_code);
-					pdf_array_push_int(ctx, fw, prev_code);
-					pdf_array_push_int(ctx, fw, prev_size);
-					break;
-				}
-
-				if (curr_code < face->num_glyphs)
-				{
-					state = new_state;
-					first_code = new_first_code;
-					publish = 0;
-				}
-			}
-
-			prev_size = curr_size;
-			prev_code = curr_code;
 		}
 
-		if (pdf_array_len(ctx, run_obj) > 0)
+		/* So curr_code-1 is the last valid char, and curr_size was its size. */
+		switch (state)
 		{
+		case FW_SAME:
+			/* We have an unflushed run of same entries. */
+			if (first_code != curr_code-1)
+			{
+				pdf_array_push_int(ctx, fw, first_code);
+				pdf_array_push_int(ctx, fw, curr_code-1);
+				pdf_array_push_int(ctx, fw, curr_size);
+			}
+			break;
+		case FW_DIFFER:
+			/* We have not yet pushed curr_size to the object. */
 			pdf_array_push_int(ctx, fw, first_code);
+			pdf_array_push_int(ctx, run_obj, curr_size);
 			pdf_array_push(ctx, fw, run_obj);
+			pdf_drop_obj(ctx, run_obj);
+			run_obj = NULL;
+			break;
+		case FW_START:
+			/* Lone wolf! */
+			pdf_array_push_int(ctx, fw, curr_code-1);
+			pdf_array_push_int(ctx, fw, curr_code-1);
+			pdf_array_push_int(ctx, fw, curr_size);
+			break;
 		}
 
 		if (font->width_table != NULL)
@@ -349,14 +381,16 @@ pdf_add_descendant_cid_font(fz_context *ctx, pdf_document *doc, fz_font *font)
 	fz_try(ctx)
 	{
 		pdf_dict_put(ctx, fobj, PDF_NAME(Type), PDF_NAME(Font));
-		if (is_truetype(face))
+		if (is_truetype(ctx, face))
 			pdf_dict_put(ctx, fobj, PDF_NAME(Subtype), PDF_NAME(CIDFontType2));
 		else
 			pdf_dict_put(ctx, fobj, PDF_NAME(Subtype), PDF_NAME(CIDFontType0));
 
 		pdf_add_cid_system_info(ctx, doc, fobj, "Adobe", "Identity", 0);
 
+		fz_ft_lock(ctx);
 		ps_name = FT_Get_Postscript_Name(face);
+		fz_ft_unlock(ctx);
 		if (ps_name)
 			pdf_dict_put_name(ctx, fobj, PDF_NAME(BaseFont), ps_name);
 		else
@@ -394,7 +428,7 @@ static void
 pdf_add_to_unicode(fz_context *ctx, pdf_document *doc, pdf_obj *fobj, fz_font *font)
 {
 	FT_Face face = font->ft_face;
-	fz_buffer *buf;
+	fz_buffer *buf = NULL;
 
 	int *table;
 	int num_seq = 0;
@@ -407,7 +441,7 @@ pdf_add_to_unicode(fz_context *ctx, pdf_document *doc, pdf_obj *fobj, fz_font *f
 		FT_UInt gid;
 
 		table = fz_calloc(ctx, face->num_glyphs, sizeof *table);
-		fz_lock(ctx, FZ_LOCK_FREETYPE);
+		fz_ft_lock(ctx);
 		ucs = FT_Get_First_Char(face, &gid);
 		while (gid > 0)
 		{
@@ -415,7 +449,7 @@ pdf_add_to_unicode(fz_context *ctx, pdf_document *doc, pdf_obj *fobj, fz_font *f
 				table[gid] = ucs;
 			ucs = FT_Get_Next_Char(face, ucs, &gid);
 		}
-		fz_unlock(ctx, FZ_LOCK_FREETYPE);
+		fz_ft_unlock(ctx);
 	}
 
 	for (k = 0; k < face->num_glyphs; k += n)
@@ -435,9 +469,12 @@ pdf_add_to_unicode(fz_context *ctx, pdf_document *doc, pdf_obj *fobj, fz_font *f
 		return;
 	}
 
-	buf = fz_new_buffer(ctx, 0);
+	fz_var(buf);
+
 	fz_try(ctx)
 	{
+		buf = fz_new_buffer(ctx, 0);
+
 		/* Header boiler plate */
 		fz_append_string(ctx, buf, "/CIDInit /ProcSet findresource begin\n");
 		fz_append_string(ctx, buf, "12 dict begin\n");
@@ -642,14 +679,17 @@ pdf_add_simple_font(fz_context *ctx, pdf_document *doc, fz_font *font, int encod
 	fz_try(ctx)
 	{
 		pdf_dict_put(ctx, fobj, PDF_NAME(Type), PDF_NAME(Font));
-		if (is_truetype(face))
+		if (is_truetype(ctx, face))
 			pdf_dict_put(ctx, fobj, PDF_NAME(Subtype), PDF_NAME(TrueType));
 		else
 			pdf_dict_put(ctx, fobj, PDF_NAME(Subtype), PDF_NAME(Type1));
 
 		if (!is_builtin_font(ctx, font))
 		{
-			const char *ps_name = FT_Get_Postscript_Name(face);
+			const char *ps_name;
+			fz_ft_lock(ctx);
+			ps_name = FT_Get_Postscript_Name(face);
+			fz_ft_unlock(ctx);
 			if (!ps_name)
 				ps_name = font->name;
 			pdf_dict_put_name(ctx, fobj, PDF_NAME(BaseFont), ps_name);
@@ -677,15 +717,15 @@ pdf_add_simple_font(fz_context *ctx, pdf_document *doc, fz_font *font, int encod
 }
 
 int
-pdf_font_writing_supported(fz_font *font)
+pdf_font_writing_supported(fz_context *ctx, fz_font *font)
 {
-	if (font->ft_face == NULL || font->buffer == NULL || font->buffer->len < 4)
+	if (font->ft_face == NULL || font->buffer == NULL || font->buffer->len < 4 || !font->flags.embed || font->flags.never_embed)
 		return 0;
 	if (is_ttc(font))
-		return 0;
-	if (is_truetype(font->ft_face))
 		return 1;
-	if (is_postscript(font->ft_face))
+	if (is_truetype(ctx, font->ft_face))
+		return 1;
+	if (is_postscript(ctx, font->ft_face))
 		return 1;
 	return 0;
 }
@@ -777,4 +817,11 @@ pdf_add_cjk_font(fz_context *ctx, pdf_document *doc, fz_font *fzfont, int script
 		fz_rethrow(ctx);
 
 	return fref;
+}
+
+pdf_obj *
+pdf_add_substitute_font(fz_context *ctx, pdf_document *doc, fz_font *font)
+{
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "substitute font creation is not implemented yet");
+	return NULL;
 }

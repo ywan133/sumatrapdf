@@ -1,12 +1,50 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* PDFDocument interface */
 
-static void event_cb(fz_context *ctx, pdf_document *doc, pdf_doc_event *event, void *data)
+static void free_event_cb_data(fz_context *ctx, void *data)
 {
 	jobject jlistener = (jobject)data;
 	jboolean detach = JNI_FALSE;
 	JNIEnv *env;
 
-	env = jni_attach_thread(ctx, &detach);
+	env = jni_attach_thread(&detach);
+	if (env == NULL)
+		fz_warn(ctx, "cannot attach to JVM in free_event_cb_data");
+	else
+	{
+		(*env)->DeleteGlobalRef(env, jlistener);
+		jni_detach_thread(detach);
+	}
+}
+
+static void event_cb(fz_context *ctx, pdf_document *pdf, pdf_doc_event *event, void *data)
+{
+	jobject jlistener = (jobject)data;
+	jboolean detach = JNI_FALSE;
+	JNIEnv *env;
+
+	env = jni_attach_thread(&detach);
 	if (env == NULL)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot attach to JVM in event_cb");
 
@@ -15,17 +53,41 @@ static void event_cb(fz_context *ctx, pdf_document *doc, pdf_doc_event *event, v
 	case PDF_DOCUMENT_EVENT_ALERT:
 		{
 			pdf_alert_event *alert;
-			jstring jstring = NULL;
+			jstring jtitle = NULL;
+			jstring jmessage = NULL;
+			jstring jcheckboxmsg = NULL;
+			jobject jalertresult;
+			jobject jpdf;
 
 			alert = pdf_access_alert_event(ctx, event);
 
-			jstring = (*env)->NewStringUTF(env, alert->message);
-			if (!jstring || (*env)->ExceptionCheck(env))
+			jpdf = to_PDFDocument_safe(ctx, env, pdf);
+			if (!jpdf || (*env)->ExceptionCheck(env))
 				fz_throw_java_and_detach_thread(ctx, env, detach);
 
-			(*env)->CallVoidMethod(env, jlistener, mid_PDFDocument_JsEventListener_onAlert, jstring);
+			jtitle = (*env)->NewStringUTF(env, alert->title);
+			if (!jtitle || (*env)->ExceptionCheck(env))
+				fz_throw_java_and_detach_thread(ctx, env, detach);
+
+			jmessage = (*env)->NewStringUTF(env, alert->message);
+			if (!jmessage || (*env)->ExceptionCheck(env))
+				fz_throw_java_and_detach_thread(ctx, env, detach);
+
+			if (alert->has_check_box) {
+				jcheckboxmsg = (*env)->NewStringUTF(env, alert->check_box_message);
+				if (!jcheckboxmsg || (*env)->ExceptionCheck(env))
+					fz_throw_java_and_detach_thread(ctx, env, detach);
+			}
+
+			jalertresult = (*env)->CallObjectMethod(env, jlistener, mid_PDFDocument_JsEventListener_onAlert, jpdf, jtitle, jmessage, alert->icon_type, alert->button_group_type, alert->has_check_box, jcheckboxmsg, alert->initially_checked);
 			if ((*env)->ExceptionCheck(env))
 				fz_throw_java_and_detach_thread(ctx, env, detach);
+
+			if (jalertresult)
+			{
+				alert->button_pressed = (*env)->GetIntField(env, jalertresult, fid_AlertResult_buttonPressed);
+				alert->finally_checked = (*env)->GetBooleanField(env, jalertresult, fid_AlertResult_checkboxChecked);
+			}
 		}
 		break;
 
@@ -58,11 +120,7 @@ FUN(PDFDocument_finalize)(JNIEnv *env, jobject self)
 {
 	fz_context *ctx = get_context(env);
 	pdf_document *pdf = from_PDFDocument_safe(env, self);
-	void *data = NULL;
 	if (!ctx || !pdf) return;
-	data = pdf_get_doc_event_callback_data(ctx, pdf);
-	if (data)
-		(*env)->DeleteGlobalRef(env, data);
 	FUN(Document_finalize)(env, self); /* Call super.finalize() */
 }
 
@@ -321,7 +379,6 @@ FUN(PDFDocument_findPage)(JNIEnv *env, jobject self, jint jat)
 	pdf_obj *obj = NULL;
 
 	if (!ctx || !pdf) return NULL;
-	if (jat < 0 || jat >= pdf_count_pages(ctx, pdf)) jni_throw_oob(env, "at is not a valid page");
 
 	fz_try(ctx)
 		obj = pdf_lookup_page_obj(ctx, pdf, jat);
@@ -498,8 +555,6 @@ FUN(PDFDocument_addPageBuffer)(JNIEnv *env, jobject self, jobject jmediabox, jin
 	pdf_obj *ind = NULL;
 
 	if (!ctx || !pdf) return NULL;
-	if (!resources) jni_throw_arg(env, "resources must not be null");
-	if (!contents) jni_throw_arg(env, "contents must not be null");
 
 	fz_try(ctx)
 		ind = pdf_add_page(ctx, pdf, mediabox, rotate, resources, contents);
@@ -521,8 +576,6 @@ FUN(PDFDocument_addPageString)(JNIEnv *env, jobject self, jobject jmediabox, jin
 	pdf_obj *ind = NULL;
 
 	if (!ctx || !pdf) return NULL;
-	if (!resources) jni_throw_arg(env, "resources must not be null");
-	if (!jcontents) jni_throw_arg(env, "contents must not be null");
 
 	scontents = (*env)->GetStringUTFChars(env, jcontents, NULL);
 	if (!scontents) return NULL;
@@ -554,7 +607,6 @@ FUN(PDFDocument_insertPage)(JNIEnv *env, jobject self, jint jat, jobject jpage)
 	pdf_obj *page = from_PDFObject(env, jpage);
 
 	if (!ctx || !pdf) return;
-	if (jat != INT_MAX && jat >= pdf_count_pages(ctx, pdf)) jni_throw_oob_void(env, "at is not a valid page");
 	if (!page) jni_throw_arg_void(env, "page must not be null");
 
 	fz_try(ctx)
@@ -571,7 +623,6 @@ FUN(PDFDocument_deletePage)(JNIEnv *env, jobject self, jint jat)
 	int at = jat;
 
 	if (!ctx || !pdf) return;
-	if (jat < 0 || jat >= pdf_count_pages(ctx, pdf)) jni_throw_oob_void(env, "at is not a valid page");
 
 	fz_try(ctx)
 		pdf_delete_page(ctx, pdf, at);
@@ -771,6 +822,7 @@ FUN(PDFDocument_nativeSaveWithStream)(JNIEnv *env, jobject self, jobject jstream
 			out = fz_new_output(ctx, sizeof state->buffer, state, SeekableOutputStream_write, NULL, SeekableOutputStream_drop);
 			out->seek = SeekableOutputStream_seek;
 			out->tell = SeekableOutputStream_tell;
+			out->truncate = SeekableOutputStream_truncate;
 			out->as_stream = SeekableOutputStream_as_stream;
 
 			/* these are now owned by 'out' */
@@ -885,7 +937,6 @@ FUN(PDFDocument_setJsEventListener)(JNIEnv *env, jobject self, jobject jlistener
 {
 	fz_context *ctx = get_context(env);
 	pdf_document *pdf = from_PDFDocument_safe(env, self);
-	void *data = NULL;
 
 	if (!ctx || !pdf) return;
 	if (!jlistener) jni_throw_arg_void(env, "listener must not be null");
@@ -894,12 +945,7 @@ FUN(PDFDocument_setJsEventListener)(JNIEnv *env, jobject self, jobject jlistener
 	if (!jlistener) jni_throw_arg_void(env, "unable to get reference to listener");
 
 	fz_try(ctx)
-	{
-		data = pdf_get_doc_event_callback_data(ctx, pdf);
-		if (data)
-			(*env)->DeleteGlobalRef(env, data);
-		pdf_set_doc_event_callback(ctx, pdf, event_cb, jlistener);
-	}
+		pdf_set_doc_event_callback(ctx, pdf, event_cb, free_event_cb_data, jlistener);
 	fz_catch(ctx)
 		jni_rethrow_void(env, ctx);
 }
@@ -1029,6 +1075,205 @@ FUN(PDFDocument_enableJournal)(JNIEnv *env, jobject self)
 	if (!ctx || !pdf) return;
 
 	pdf_enable_journal(ctx, pdf);
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFDocument_saveJournalWithStream)(JNIEnv *env, jobject self, jobject jstream)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument(env, self);
+	SeekableStreamState *state = NULL;
+	jobject stream = NULL;
+	jbyteArray array = NULL;
+	fz_output *out = NULL;
+
+	if (!ctx || !pdf)
+		return;
+	if (!jstream)
+		jni_throw_arg_void(env, "stream must not be null");
+
+	fz_var(state);
+	fz_var(out);
+	fz_var(stream);
+	fz_var(array);
+
+	stream = (*env)->NewGlobalRef(env, jstream);
+	if (!stream)
+		jni_throw_run_void(env, "invalid stream");
+
+	array = (*env)->NewByteArray(env, sizeof state->buffer);
+	if ((*env)->ExceptionCheck(env))
+	{
+		(*env)->DeleteGlobalRef(env, stream);
+		return;
+	}
+	if (!array)
+	{
+		(*env)->DeleteGlobalRef(env, stream);
+		jni_throw_run_void(env, "cannot create byte array");
+	}
+
+	array = (*env)->NewGlobalRef(env, array);
+	if (!array)
+	{
+		(*env)->DeleteGlobalRef(env, stream);
+		jni_throw_run_void(env, "cannot create global reference");
+	}
+
+	fz_try(ctx)
+	{
+		/* No exceptions can occur from here to stream owning state, so we must not free state. */
+		state = Memento_label(fz_malloc(ctx, sizeof(SeekableStreamState)), "SeekableStreamState_state");
+		state->stream = stream;
+		state->array = array;
+
+		/* Ownership transferred to state. */
+		stream = NULL;
+		array = NULL;
+
+		/* Stream takes ownership of state. */
+		out = fz_new_output(ctx, sizeof state->buffer, state, SeekableOutputStream_write, NULL, SeekableOutputStream_drop);
+		out->seek = SeekableOutputStream_seek;
+		out->tell = SeekableOutputStream_tell;
+		out->truncate = SeekableOutputStream_truncate;
+		out->as_stream = SeekableOutputStream_as_stream;
+
+		/* these are now owned by 'out' */
+		state = NULL;
+
+		pdf_write_journal(ctx, pdf, out);
+		fz_close_output(ctx, out);
+	}
+	fz_always(ctx)
+	{
+		fz_drop_output(ctx, out);
+	}
+	fz_catch(ctx)
+	{
+		(*env)->DeleteGlobalRef(env, array);
+		(*env)->DeleteGlobalRef(env, stream);
+		jni_rethrow_void(env, ctx);
+	}
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFDocument_loadJournalWithStream)(JNIEnv *env, jobject self, jobject jstream)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument(env, self);
+	SeekableStreamState *state = NULL;
+	jobject stream = NULL;
+	jbyteArray array = NULL;
+	fz_stream *stm = NULL;
+
+	if (!ctx || !pdf)
+		return;
+	if (!jstream)
+		jni_throw_arg_void(env, "stream must not be null");
+
+	fz_var(state);
+	fz_var(stm);
+	fz_var(stream);
+	fz_var(array);
+
+	stream = (*env)->NewGlobalRef(env, jstream);
+	if (!stream)
+		jni_throw_run_void(env, "invalid stream");
+
+	array = (*env)->NewByteArray(env, sizeof state->buffer);
+	if ((*env)->ExceptionCheck(env))
+	{
+		(*env)->DeleteGlobalRef(env, stream);
+		return;
+	}
+	if (!array)
+	{
+		(*env)->DeleteGlobalRef(env, stream);
+		jni_throw_run_void(env, "cannot create byte array");
+	}
+
+	array = (*env)->NewGlobalRef(env, array);
+	if (!array)
+	{
+		(*env)->DeleteGlobalRef(env, stream);
+		jni_throw_run_void(env, "cannot create global reference");
+	}
+
+	fz_try(ctx)
+	{
+		/* No exceptions can occur from here to stream owning state, so we must not free state. */
+		state = Memento_label(fz_malloc(ctx, sizeof(SeekableStreamState)), "SeekableStreamState_state");
+		state->stream = stream;
+		state->array = array;
+
+		/* Ownership transferred to state. */
+		stream = NULL;
+		array = NULL;
+
+		/* Stream takes ownership of accstate. */
+		stm = fz_new_stream(ctx, state, SeekableInputStream_next, SeekableInputStream_drop);
+		stm->seek = SeekableInputStream_seek;
+
+		pdf_read_journal(ctx, pdf, stm);
+	}
+	fz_always(ctx)
+	{
+		fz_drop_stream(ctx, stm);
+	}
+	fz_catch(ctx)
+	{
+		(*env)->DeleteGlobalRef(env, array);
+		(*env)->DeleteGlobalRef(env, stream);
+		jni_rethrow_void(env, ctx);
+	}
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFDocument_saveJournal)(JNIEnv *env, jobject self, jstring jfilename)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument(env, self);
+	const char *filename = NULL;
+
+	if (!ctx || !pdf)
+		return;
+	if (!jfilename)
+		jni_throw_arg_void(env, "filename must not be null");
+
+	filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+	if (!filename)
+		jni_throw_run_void(env, "cannot get characters in filename");
+
+	fz_try(ctx)
+		pdf_save_journal(ctx, pdf, filename);
+	fz_always(ctx)
+		(*env)->ReleaseStringUTFChars(env, jfilename, filename);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFDocument_loadJournal)(JNIEnv *env, jobject self, jstring jfilename)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument(env, self);
+	const char *filename = NULL;
+
+	if (!ctx || !pdf)
+		return;
+	if (!jfilename)
+		jni_throw_arg_void(env, "filename must not be null");
+
+	filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+	if (!filename)
+		jni_throw_run_void(env, "cannot get characters in filename");
+
+	fz_try(ctx)
+		pdf_load_journal(ctx, pdf, filename);
+	fz_always(ctx)
+		(*env)->ReleaseStringUTFChars(env, jfilename, filename);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
 }
 
 JNIEXPORT jint JNICALL
@@ -1168,4 +1413,490 @@ FUN(PDFDocument_endOperation)(JNIEnv *env, jobject self)
 		pdf_end_operation(ctx, pdf);
 	fz_catch(ctx)
 		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFDocument_abandonOperation)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument(env, self);
+
+	if (!ctx || !pdf) return;
+
+	fz_try(ctx)
+		pdf_abandon_operation(ctx, pdf);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT jboolean JNICALL
+FUN(PDFDocument_isRedacted)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument(env, self);
+
+	if (!ctx || !pdf) return JNI_FALSE;
+	return pdf->redacted;
+}
+
+JNIEXPORT jint JNICALL
+FUN(PDFDocument_getLanguage)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument(env, self);
+	int lang;
+
+	if (!ctx || !pdf) return FZ_LANG_UNSET;
+
+	fz_try(ctx)
+		lang = pdf_document_language(ctx, pdf);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return lang;
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFDocument_setLanguage)(JNIEnv *env, jobject self, jint lang)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument(env, self);
+
+	if (!ctx || !pdf) return;
+
+	fz_try(ctx)
+		pdf_set_document_language(ctx, pdf, lang);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT jint JNICALL
+FUN(PDFDocument_countSignatures)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument_safe(env, self);
+	jint val = -1;
+
+	if (!ctx || !pdf) return -1;
+
+	fz_try(ctx)
+		val = pdf_count_signatures(ctx, pdf);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return val;
+}
+
+JNIEXPORT jobject JNICALL
+FUN(PDFDocument_addEmbeddedFile)(JNIEnv *env, jobject self, jstring jfilename, jstring jmimetype, jobject jcontents, jlong created, jlong modified, jboolean addChecksum)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument_safe(env, self);
+	const char *filename = NULL;
+	const char *mimetype = NULL;
+	fz_buffer *contents = from_Buffer(env, jcontents);
+	pdf_obj *fs = NULL;
+
+	if (!ctx || !pdf) return NULL;
+	if (!jfilename) jni_throw_arg(env, "filename must not be null");
+
+	filename = (*env)->GetStringUTFChars(env, jfilename, NULL);
+	if (!filename) return NULL;
+
+	if (jmimetype)
+	{
+		mimetype = (*env)->GetStringUTFChars(env, jmimetype, NULL);
+		if (!mimetype)
+		{
+			(*env)->ReleaseStringUTFChars(env, jfilename, filename);
+			return NULL;
+		}
+	}
+
+	fz_try(ctx)
+		fs = pdf_add_embedded_file(ctx, pdf, filename, mimetype, contents, created, modified, addChecksum);
+	fz_always(ctx)
+	{
+		if (mimetype)
+			(*env)->ReleaseStringUTFChars(env, jmimetype, mimetype);
+		(*env)->ReleaseStringUTFChars(env, jfilename, filename);
+	}
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return to_PDFObject_safe(ctx, env, fs);
+}
+
+JNIEXPORT jstring JNICALL
+FUN(PDFDocument_getEmbeddedFileParams)(JNIEnv *env, jobject self, jobject jfs)
+{
+	return FUN(PDFDocument_getFilespecParams)(env, self, jfs);
+}
+
+JNIEXPORT jstring JNICALL
+FUN(PDFDocument_getFilespecParams)(JNIEnv *env, jobject self, jobject jfs)
+{
+	fz_context *ctx = get_context(env);
+	pdf_obj *fs = from_PDFObject_safe(env, jfs);
+	pdf_embedded_file_params params;
+	jstring jfilename = NULL;
+	jstring jmimetype = NULL;
+
+	fz_try(ctx)
+		pdf_get_embedded_file_params(ctx, fs, &params);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	jfilename = (*env)->NewStringUTF(env, params.filename);
+	if (!jfilename || (*env)->ExceptionCheck(env))
+		return NULL;
+
+	jmimetype = (*env)->NewStringUTF(env, params.mimetype);
+	if (!jmimetype || (*env)->ExceptionCheck(env))
+		return NULL;
+
+	return (*env)->NewObject(env, cls_PDFDocument_PDFEmbeddedFileParams, mid_PDFDocument_PDFEmbeddedFileParams_init,
+		jfilename, jmimetype, params.size, params.created * 1000, params.modified * 1000);
+}
+
+JNIEXPORT jobject JNICALL
+FUN(PDFDocument_loadEmbeddedFileContents)(JNIEnv *env, jobject self, jobject jfs)
+{
+	fz_context *ctx = get_context(env);
+	pdf_obj *fs = from_PDFObject_safe(env, jfs);
+	fz_buffer *contents = NULL;
+
+	fz_try(ctx)
+		contents = pdf_load_embedded_file_contents(ctx, fs);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return to_Buffer_safe(ctx, env, contents);
+}
+
+JNIEXPORT jboolean JNICALL
+FUN(PDFDocument_verifyEmbeddedFileChecksum)(JNIEnv *env, jobject self, jobject jfs)
+{
+	fz_context *ctx = get_context(env);
+	pdf_obj *fs = from_PDFObject_safe(env, jfs);
+	int valid = 0;
+
+	fz_try(ctx)
+		valid = pdf_verify_embedded_file_checksum(ctx, fs);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return valid ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+FUN(PDFDocument_isEmbeddedFile)(JNIEnv *env, jobject self, jobject jfs)
+{
+	fz_context *ctx = get_context(env);
+	pdf_obj *fs = from_PDFObject_safe(env, jfs);
+	int embedded = 0;
+
+	fz_try(ctx)
+		embedded = pdf_is_embedded_file(ctx, fs);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return embedded ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFDocument_setPageLabels)(JNIEnv *env, jobject self, jint index, jint style, jstring jprefix, jint start)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument_safe(env, self);
+	const char *prefix = NULL;
+
+	if (jprefix)
+	{
+		prefix = (*env)->GetStringUTFChars(env, jprefix, NULL);
+		if (!prefix) return;
+	}
+
+	fz_try(ctx)
+	{
+		pdf_set_page_labels(ctx, pdf, index, style, prefix, start);
+	}
+	fz_always(ctx)
+	{
+		if (jprefix)
+			(*env)->ReleaseStringUTFChars(env, jprefix, prefix);
+	}
+	fz_catch(ctx)
+	{
+		jni_rethrow_void(env, ctx);
+	}
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFDocument_deletePageLabels)(JNIEnv *env, jobject self, jint index)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument_safe(env, self);
+	fz_try(ctx)
+		pdf_delete_page_labels(ctx, pdf, index);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT jint JNICALL
+FUN(PDFDocument_getVersion)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument(env, self);
+	int version = 0;
+
+	if (!ctx || !pdf) return 0;
+
+	fz_try(ctx)
+		version = pdf_version(ctx, pdf);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return version;
+}
+
+JNIEXPORT jstring JNICALL
+FUN(PDFDocument_formatURIFromPathAndNamedDest)(JNIEnv *env, jclass cls, jstring jpath, jstring jname)
+{
+	fz_context *ctx = get_context(env);
+	char *uri = NULL;
+	jobject juri;
+	const char *path = NULL;
+	const char *name = NULL;
+
+	if (jpath)
+	{
+		path = (*env)->GetStringUTFChars(env, jpath, NULL);
+		if (!path) return NULL;
+	}
+	if (jname)
+	{
+		name = (*env)->GetStringUTFChars(env, jname, NULL);
+		if (!name) return NULL;
+	}
+
+	fz_try(ctx)
+		uri = pdf_new_uri_from_path_and_named_dest(ctx, path, name);
+	fz_always(ctx)
+	{
+		if (jname)
+			(*env)->ReleaseStringUTFChars(env, jname, name);
+		if (jpath)
+			(*env)->ReleaseStringUTFChars(env, jpath, path);
+	}
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	juri = (*env)->NewStringUTF(env, uri);
+	fz_free(ctx, uri);
+	return juri;
+}
+
+JNIEXPORT jstring JNICALL
+FUN(PDFDocument_formatURIFromPathAndExplicitDest)(JNIEnv *env, jclass cls, jstring jpath, jobject jdest)
+{
+	fz_context *ctx = get_context(env);
+	fz_link_dest dest = from_LinkDestination(env, jdest);
+	char *uri = NULL;
+	jobject juri;
+	const char *path = NULL;
+
+	if (jpath)
+	{
+		path = (*env)->GetStringUTFChars(env, jpath, NULL);
+		if (!path) return NULL;
+	}
+
+	fz_try(ctx)
+		uri = pdf_new_uri_from_path_and_explicit_dest(ctx, path, dest);
+	fz_always(ctx)
+	{
+		if (jpath)
+			(*env)->ReleaseStringUTFChars(env, jpath, path);
+	}
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	juri = (*env)->NewStringUTF(env, uri);
+	fz_free(ctx, uri);
+	return juri;
+}
+
+JNIEXPORT jstring JNICALL
+FUN(PDFDocument_appendNamedDestToURI)(JNIEnv *env, jclass cls, jstring jurl, jstring jname)
+{
+	fz_context *ctx = get_context(env);
+	char *uri = NULL;
+	jobject juri;
+	const char *url = NULL;
+	const char *name = NULL;
+
+	if (jurl)
+	{
+		url = (*env)->GetStringUTFChars(env, jurl, NULL);
+		if (!url) return NULL;
+	}
+	if (jname)
+	{
+		name = (*env)->GetStringUTFChars(env, jname, NULL);
+		if (!name) return NULL;
+	}
+
+	fz_try(ctx)
+		uri = pdf_append_named_dest_to_uri(ctx, url, name);
+	fz_always(ctx)
+	{
+		if (jname)
+			(*env)->ReleaseStringUTFChars(env, jname, name);
+		if (jurl)
+			(*env)->ReleaseStringUTFChars(env, jurl, url);
+	}
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	juri = (*env)->NewStringUTF(env, uri);
+	fz_free(ctx, uri);
+	return juri;
+}
+
+JNIEXPORT jstring JNICALL
+FUN(PDFDocument_appendExplicitDestToURI)(JNIEnv *env, jclass cls, jstring jurl, jobject jdest)
+{
+	fz_context *ctx = get_context(env);
+	fz_link_dest dest = from_LinkDestination(env, jdest);
+	char *uri = NULL;
+	jobject juri;
+	const char *url = NULL;
+
+	if (jurl)
+	{
+		url = (*env)->GetStringUTFChars(env, jurl, NULL);
+		if (!url) return NULL;
+	}
+
+	fz_try(ctx)
+		uri = pdf_append_explicit_dest_to_uri(ctx, url, dest);
+	fz_always(ctx)
+	{
+		if (jurl)
+			(*env)->ReleaseStringUTFChars(env, jurl, url);
+	}
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	juri = (*env)->NewStringUTF(env, uri);
+	fz_free(ctx, uri);
+	return juri;
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFDocument_rearrangePages)(JNIEnv *env, jobject self, jobject jpages)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *pdf = from_PDFDocument(env, self);
+	jsize len = 0;
+	int *pages = NULL;
+
+	if (!ctx || !pdf) return;
+
+	len = (*env)->GetArrayLength(env, jpages);
+	fz_try(ctx)
+		pages = fz_malloc_array(ctx, len, int);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+
+	(*env)->GetIntArrayRegion(env, jpages, 0, len, pages);
+	if ((*env)->ExceptionCheck(env))
+	{
+		fz_free(ctx, pages);
+		return;
+	}
+
+	fz_try(ctx)
+		pdf_rearrange_pages(ctx, pdf, len, pages);
+	fz_always(ctx)
+		fz_free(ctx, pages);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT jint JNICALL
+FUN(PDFDocument_countAssociatedFiles)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *doc = from_PDFDocument(env, self);
+	int n;
+
+	fz_try(ctx)
+		n = pdf_count_document_associated_files(ctx, doc);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return n;
+}
+
+JNIEXPORT jobject JNICALL
+FUN(PDFDocument_associatedFile)(JNIEnv *env, jobject self, jint idx)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *doc = from_PDFDocument(env, self);
+	pdf_obj *af;
+
+	fz_try(ctx)
+		af = pdf_document_associated_file(ctx, doc, idx);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return to_PDFObject_safe_own(ctx, env, af);
+}
+
+JNIEXPORT jint JNICALL
+FUN(PDFDocument_zugferdProfile)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *doc = from_PDFDocument(env, self);
+	enum pdf_zugferd_profile p;
+	float version;
+
+	fz_try(ctx)
+		p = pdf_zugferd_profile(ctx, doc, &version);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return (int)p;
+}
+
+JNIEXPORT jfloat JNICALL
+FUN(PDFDocument_zugferdVersion)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *doc = from_PDFDocument(env, self);
+	float version;
+
+	fz_try(ctx)
+		(void) pdf_zugferd_profile(ctx, doc, &version);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return (jfloat)version;
+}
+
+JNIEXPORT jobject JNICALL
+FUN(PDFDocument_zugferdXML)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_document *doc = from_PDFDocument(env, self);
+	fz_buffer *buf;
+
+	fz_try(ctx)
+		buf = pdf_zugferd_xml(ctx, doc);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return to_Buffer_safe_own(ctx, env, buf);
 }

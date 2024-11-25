@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* Device interface */
 
 /*
@@ -270,10 +292,12 @@ fz_java_device_begin_mask(fz_context *ctx, fz_device *dev, fz_rect rect, int lum
 }
 
 static void
-fz_java_device_end_mask(fz_context *ctx, fz_device *dev)
+fz_java_device_end_mask(fz_context *ctx, fz_device *dev, fz_function *tr)
 {
 	fz_java_device *jdev = (fz_java_device *)dev;
 	JNIEnv *env = jdev->env;
+
+	// TODO: pass transfer function
 
 	(*env)->CallVoidMethod(env, jdev->self, mid_Device_endMask);
 	if ((*env)->ExceptionCheck(env))
@@ -333,6 +357,83 @@ fz_java_device_end_tile(fz_context *ctx, fz_device *dev)
 }
 
 static void
+fz_java_device_render_flags(fz_context *ctx, fz_device *dev, int set, int clear)
+{
+	fz_java_device *jdev = (fz_java_device *)dev;
+	JNIEnv *env = jdev->env;
+
+	(*env)->CallVoidMethod(env, jdev->self, mid_Device_renderFlags, set, clear);
+	if ((*env)->ExceptionCheck(env))
+		fz_throw_java(ctx, env);
+}
+
+static void
+fz_java_device_set_default_colorspaces(fz_context *ctx, fz_device *dev, fz_default_colorspaces *dcs)
+{
+	fz_java_device *jdev = (fz_java_device *)dev;
+	JNIEnv *env = jdev->env;
+	jobject jdcs = to_DefaultColorSpaces(ctx, env, dcs);
+
+	(*env)->CallVoidMethod(env, jdev->self, mid_Device_setDefaultColorSpaces, jdcs);
+	if ((*env)->ExceptionCheck(env))
+		fz_throw_java(ctx, env);
+}
+
+static void
+fz_java_device_begin_structure(fz_context *ctx, fz_device *dev, fz_structure standard, const char *raw, int idx)
+{
+	fz_java_device *jdev = (fz_java_device *)dev;
+	JNIEnv *env = jdev->env;
+	jstring jraw;
+
+	jraw = (*env)->NewStringUTF(env, raw);
+	if (!jraw || (*env)->ExceptionCheck(env))
+		fz_throw_java(ctx, env);
+
+	(*env)->CallVoidMethod(env, jdev->self, mid_Device_beginStructure, standard, jraw, idx);
+	if ((*env)->ExceptionCheck(env))
+		fz_throw_java(ctx, env);
+}
+
+static void
+fz_java_device_end_structure(fz_context *ctx, fz_device *dev)
+{
+	fz_java_device *jdev = (fz_java_device *)dev;
+	JNIEnv *env = jdev->env;
+
+	(*env)->CallVoidMethod(env, jdev->self, mid_Device_endStructure);
+	if ((*env)->ExceptionCheck(env))
+		fz_throw_java(ctx, env);
+}
+
+static void
+fz_java_device_begin_metatext(fz_context *ctx, fz_device *dev, fz_metatext meta, const char *text)
+{
+	fz_java_device *jdev = (fz_java_device *)dev;
+	JNIEnv *env = jdev->env;
+	jstring jtext;
+
+	jtext = (*env)->NewStringUTF(env, text);
+	if (!jtext || (*env)->ExceptionCheck(env))
+		fz_throw_java(ctx, env);
+
+	(*env)->CallVoidMethod(env, jdev->self, mid_Device_beginMetatext, meta, jtext);
+	if ((*env)->ExceptionCheck(env))
+		fz_throw_java(ctx, env);
+}
+
+static void
+fz_java_device_end_metatext(fz_context *ctx, fz_device *dev)
+{
+	fz_java_device *jdev = (fz_java_device *)dev;
+	JNIEnv *env = jdev->env;
+
+	(*env)->CallVoidMethod(env, jdev->self, mid_Device_endMetatext);
+	if ((*env)->ExceptionCheck(env))
+		fz_throw_java(ctx, env);
+}
+
+static void
 fz_java_device_drop(fz_context *ctx, fz_device *dev)
 {
 	fz_java_device *jdev = (fz_java_device *)dev;
@@ -383,8 +484,17 @@ static fz_device *fz_new_java_device(fz_context *ctx, JNIEnv *env, jclass cls)
 		dev->super.begin_tile = fz_java_device_begin_tile;
 		dev->super.end_tile = fz_java_device_end_tile;
 
+		dev->super.render_flags = fz_java_device_render_flags;
+		dev->super.set_default_colorspaces = fz_java_device_set_default_colorspaces;
+
 		dev->super.begin_layer = fz_java_device_begin_layer;
 		dev->super.end_layer = fz_java_device_end_layer;
+
+		dev->super.begin_structure = fz_java_device_begin_structure;
+		dev->super.end_structure = fz_java_device_end_structure;
+
+		dev->super.begin_metatext = fz_java_device_begin_metatext;
+		dev->super.end_metatext = fz_java_device_end_metatext;
 	}
 	fz_catch(ctx)
 	{

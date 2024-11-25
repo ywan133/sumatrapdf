@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2022 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "gl-app.h"
 
 #include <string.h>
@@ -122,8 +144,28 @@ static void ui_input_delete_selection(struct input *input)
 	input->p = input->q = p;
 }
 
-static void ui_input_paste(struct input *input, const char *buf, int n)
+static void ui_input_paste(struct input *input, const char *buf)
 {
+	int n = (int)strlen(buf);
+	if (input->widget)
+	{
+		char *newtext;
+		int selStart = input->p - input->text;
+		int selEnd = input->q - input->text;
+		if (pdf_edit_text_field_value(ctx, input->widget, input->text, buf, &selStart, &selEnd, &newtext))
+		{
+			size_t len = strlen(newtext);
+			if (len > sizeof(input->text)-1)
+				len = sizeof(input->text)-1;
+			memcpy(input->text, newtext, len);
+			input->text[len] = 0;
+			fz_free(ctx, newtext);
+			input->p = input->text + selStart;
+			input->q = input->p;
+			input->end = input->text + len;
+		}
+		return;
+	}
 	if (input->p != input->q)
 		ui_input_delete_selection(input);
 	if (input->end + n + 1 < input->text + sizeof(input->text))
@@ -159,11 +201,29 @@ static void ui_do_cut(struct input *input)
 	}
 }
 
-static void ui_do_paste(struct input *input)
+static void ui_do_paste(struct input *input, int multiline)
 {
 	const char *buf = ui_get_clipboard();
-	if (buf)
-		ui_input_paste(input, buf, (int)strlen(buf));
+	char *p, *oneline = NULL;
+
+	if (!buf)
+		return;
+
+	if (multiline)
+	{
+		ui_input_paste(input, buf);
+		return;
+	}
+
+	p = oneline = strdup(buf);
+	while (*p)
+	{
+		if (*p == '\n' || *p == '\r')
+			*p = ' ';
+		p++;
+	}
+	ui_input_paste(input, oneline);
+	free(oneline);
 }
 
 static int ui_input_key(struct input *input, int multiline)
@@ -281,14 +341,18 @@ static int ui_input_key(struct input *input, int multiline)
 			ui.focus = NULL;
 			return UI_INPUT_ACCEPT;
 		}
-		ui_input_paste(input, "\n", 1);
+		ui_input_paste(input, "\n");
 		break;
 	case KEY_BACKSPACE:
 		if (input->p != input->q)
 			ui_input_delete_selection(input);
 		else if (input->p > input->text)
 		{
-			char *pp = prev_char(input->p, input->text);
+			char *pp;
+			if (ui.mod == GLUT_ACTIVE_CTRL)
+				pp = prev_word(input->p, input->text);
+			else
+				pp = prev_char(input->p, input->text);
 			memmove(pp, input->p, input->end - input->p);
 			input->end -= input->p - pp;
 			*input->end = 0;
@@ -321,13 +385,13 @@ static int ui_input_key(struct input *input, int multiline)
 		ui_do_cut(input);
 		break;
 	case KEY_CTL_V:
-		ui_do_paste(input);
+		ui_do_paste(input, multiline);
 		break;
 	case KEY_INSERT:
 		if (ui.mod == GLUT_ACTIVE_CTRL)
 			ui_do_copy(input);
 		if (ui.mod == GLUT_ACTIVE_SHIFT)
-			ui_do_paste(input);
+			ui_do_paste(input, multiline);
 		break;
 	default:
 		if (ui.key >= 32 && ui.plain)
@@ -335,9 +399,10 @@ static int ui_input_key(struct input *input, int multiline)
 			int cat = ucdn_get_general_category(ui.key);
 			if (ui.key == ' ' || (cat >= UCDN_GENERAL_CATEGORY_LL && cat < UCDN_GENERAL_CATEGORY_ZL))
 			{
-				char buf[8];
+				char buf[9];
 				int n = fz_runetochar(buf, ui.key);
-				ui_input_paste(input, buf, n);
+				buf[n] = 0;
+				ui_input_paste(input, buf);
 			}
 		}
 		break;
@@ -376,10 +441,10 @@ int ui_input(struct input *input, int width, int height)
 	if (height > 1)
 		area.x1 -= ui.lineheight;
 
-	n = ui_break_lines(input->text, lines, nelem(lines), area.x1-area.x0-2, NULL);
+	n = ui_break_lines(input->text, lines, height > 1 ? nelem(lines) : 1, area.x1-area.x0-2, NULL);
 
 	if (height > 1)
-		ui_scrollbar(area.x1, area.y0, area.x1+ui.lineheight, area.y1, &input->scroll, 1, fz_maxi(0, n-height)+1);
+		ui_scrollbar(area.x1, area.y0, area.x1+ui.lineheight, area.y1, &input->scroll, 1, fz_maxi(0, n-height)+1, NULL);
 	else
 		input->scroll = 0;
 
@@ -469,4 +534,89 @@ int ui_input(struct input *input, int width, int height)
 	}
 
 	return state;
+}
+
+void ui_readline_init(struct readline *readline, const char *text)
+{
+	int i;
+
+	memset(readline->buffer, 0, sizeof readline->buffer);
+	for (i = 0; i < UI_READLINE_SIZE; i++)
+		readline->history[i] = &(readline->buffer[i][0]);
+
+	readline->used = 0;
+	readline->current = -1;
+
+	ui_input_init(&readline->input, text ? text : "");
+}
+
+const char *ui_readline(struct readline *readline, int width)
+{
+	int state;
+
+	/* Override key up/down to navigate history. */
+	switch (ui.key)
+	{
+	case KEY_UP:
+		ui.key = 0;
+
+		if (readline->current == -1) /* no history entries */
+			break;
+		if (readline->current == 0) /* no older entries */
+			break;
+
+		readline->current--;
+		ui_input_init(&readline->input, readline->history[readline->current]);
+		readline->input.p = readline->input.q = readline->input.end;
+		break;
+	case KEY_DOWN:
+		ui.key = 0;
+
+		if (readline->current == -1) /* no history entries */
+			break;
+		if (readline->current == readline->used) /* no newer entries */
+			break;
+		if (readline->current == readline->used - 1) /* at insertion point */
+		{
+			readline->current++;
+			ui_input_init(&readline->input, "");
+			readline->input.p = readline->input.q = readline->input.end;
+			break;
+		}
+
+		readline->current++;
+		ui_input_init(&readline->input, readline->history[readline->current]);
+		readline->input.p = readline->input.q = readline->input.end;
+		break;
+	}
+
+	state = ui_input(&readline->input, width, 1);
+
+	/* Remember line in history. */
+	if (state == UI_INPUT_ACCEPT)
+	{
+		char *accepted;
+
+		if (readline->used == UI_READLINE_SIZE)
+		{
+			char *tmp = readline->history[0];
+			memmove(readline->history, readline->history + 1, (UI_READLINE_SIZE - 1) * sizeof(char *));
+			readline->history[UI_READLINE_SIZE - 1] = tmp;
+
+			fz_strlcpy(readline->history[UI_READLINE_SIZE - 1], readline->input.text, UI_INPUT_SIZE);
+			accepted = readline->history[UI_READLINE_SIZE - 1];
+			readline->current = UI_READLINE_SIZE;
+		}
+		else
+		{
+			fz_strlcpy(readline->history[readline->used], readline->input.text, UI_INPUT_SIZE);
+			accepted = readline->history[readline->used];
+			readline->used++;
+			readline->current = readline->used;
+		}
+
+		return accepted;
+	}
+
+	return NULL;
 }

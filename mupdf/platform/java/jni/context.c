@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* Context interface */
 
 /* Put the fz_context in thread-local storage */
@@ -58,6 +80,40 @@ static void drop_tls_context(void *arg)
 }
 #endif
 
+static void log_callback(void *user, const char *message)
+{
+	jboolean detach = JNI_FALSE;
+	JNIEnv *env = NULL;
+	jobject jcallback;
+	jstring jmessage;
+	jobject jlock;
+	jmethodID mid;
+
+	env = jni_attach_thread(&detach);
+	if (env == NULL)
+		return;
+
+	if (user != NULL)
+		mid = mid_Context_Log_error;
+	else
+		mid = mid_Context_Log_warning;
+
+	jcallback = (*env)->GetStaticObjectField(env, cls_Context, fid_Context_log);
+	if (jcallback)
+	{
+		jlock = (*env)->GetStaticObjectField(env, cls_Context, fid_Context_lock);
+		(*env)->MonitorEnter(env, jlock);
+		jmessage = (*env)->NewStringUTF(env, message);
+		(*env)->CallVoidMethod(env, jcallback, mid, jmessage);
+		(*env)->DeleteLocalRef(env, jmessage);
+		(*env)->MonitorExit(env, jlock);
+		(*env)->DeleteLocalRef(env, jcallback);
+		(*env)->DeleteLocalRef(env, jlock);
+	}
+
+	jni_detach_thread(detach);
+}
+
 static int init_base_context(JNIEnv *env)
 {
 	int i;
@@ -98,11 +154,15 @@ static int init_base_context(JNIEnv *env)
 		return -1;
 	}
 
+	fz_set_error_callback(base_context, log_callback, (void *) 1);
+	fz_set_warning_callback(base_context, log_callback, (void *) 0);
+
 	fz_try(base_context)
 		fz_register_document_handlers(base_context);
 	fz_catch(base_context)
 	{
-		LOGE("cannot register document handlers (%s)", fz_caught_message(base_context));
+		fz_report_error(base_context);
+		LOGE("cannot register document handlers");
 		fin_base_context(env);
 		return -1;
 	}
@@ -223,4 +283,51 @@ FUN(Context_getVersion)(JNIEnv *env, jclass cls)
 	(*env)->SetObjectField(env, jversion, fid_Context_Version_version, jvs);
 
 	return jversion;
+}
+
+JNIEXPORT void JNICALL
+FUN(Context_setUserCSS)(JNIEnv *env, jclass cls, jstring jcss)
+{
+	fz_context *ctx = get_context(env);
+	const char *css = NULL;
+
+	if (jcss)
+		css = (*env)->GetStringUTFChars(env, jcss, NULL);
+
+	fz_try(ctx)
+		fz_set_user_css(ctx, css);
+	fz_always(ctx)
+		if (jcss)
+			(*env)->ReleaseStringUTFChars(env, jcss, css);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT void JNICALL
+FUN(Context_useDocumentCSS)(JNIEnv *env, jclass cls, jboolean state)
+{
+	fz_context *ctx = get_context(env);
+
+	fz_try(ctx)
+		fz_set_use_document_css(ctx, state);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT jboolean JNICALL
+FUN(Context_shrinkStore)(JNIEnv *env, jclass cls, jint percent)
+{
+	fz_context *ctx = get_context(env);
+	int success = 0;
+
+	if (!ctx) return 0;
+	if (percent < 0) jni_throw_arg(env, "percent must not be negative");
+	if (percent > 100) jni_throw_arg(env, "percent must not be more than 100");
+
+	fz_try(ctx)
+		success = fz_shrink_store(ctx, percent);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return success != 0;
 }

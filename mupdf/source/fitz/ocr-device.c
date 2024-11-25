@@ -1,15 +1,32 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <assert.h>
 #include <string.h>
+#include <errno.h>
 
 #undef DEBUG_OCR
-
-#if !defined(HAVE_LEPTONICA) || !defined(HAVE_TESSERACT)
-#ifndef OCR_DISABLED
-#define OCR_DISABLED
-#endif
-#endif
 
 #ifndef OCR_DISABLED
 #include "tessocr.h"
@@ -116,6 +133,7 @@ typedef struct fz_ocr_device_s
 	word_record **words;
 
 	char *language;
+	char *datadir;
 } fz_ocr_device;
 
 static void
@@ -269,12 +287,12 @@ fz_ocr_begin_mask(fz_context *ctx, fz_device *dev, fz_rect rect, int luminosity,
 }
 
 static void
-fz_ocr_end_mask(fz_context *ctx, fz_device *dev)
+fz_ocr_end_mask(fz_context *ctx, fz_device *dev, fz_function *tr)
 {
 	fz_ocr_device *ocr = (fz_ocr_device *)dev;
 
-	fz_end_mask(ctx, ocr->list_dev);
-	fz_end_mask(ctx, ocr->draw_dev);
+	fz_end_mask_tr(ctx, ocr->list_dev, tr);
+	fz_end_mask_tr(ctx, ocr->draw_dev, tr);
 }
 
 static void
@@ -371,6 +389,7 @@ drop_ocr_device(fz_context *ctx, fz_ocr_device *ocr)
 	fz_free(ctx, ocr->words);
 	fz_free(ctx, ocr->chars);
 	fz_free(ctx, ocr->language);
+	fz_free(ctx, ocr->datadir);
 }
 
 static void
@@ -442,11 +461,11 @@ flush_word(fz_context *ctx, fz_ocr_device *ocr)
 			trm.a = 10.0f/6 * (char_bbox.x1 - char_bbox.x0);
 			trm.b = 0;
 			trm.c = 0;
-			trm.d = (char_bbox.y1 - char_bbox.y0);
+			trm.d = 10.0f/6 * (char_bbox.y1 - char_bbox.y0);
 			trm.e = char_bbox.x0;
 			trm.f = char_bbox.y0;
 			fz_show_glyph(ctx, text, ocr->font, trm,
-				ocr->chars[i], ocr->chars[i],
+				fz_encode_character(ctx, ocr->font, ocr->chars[i]), ocr->chars[i],
 					0, 0, FZ_BIDI_LTR, 0);
 		}
 
@@ -471,21 +490,6 @@ char_callback(fz_context *ctx, void *arg, int unicode,
 {
 	fz_ocr_device *ocr = (fz_ocr_device *)arg;
 	fz_rect bbox = { word_bbox[0]-1, word_bbox[1]-1, word_bbox[2]+1, word_bbox[3]+1 };
-
-	if (unicode == 'b')
-	{
-		fz_device *device = fz_new_draw_device(ctx, fz_identity, ocr->pixmap);
-		fz_path *path = fz_new_path(ctx);
-		fz_color_params params = {0};
-		fz_stroke_state stroke = { 0 };
-		float color = 0;
-		stroke.linewidth = 1;
-		fz_rectto(ctx, path, char_bbox[0], char_bbox[1], char_bbox[2], char_bbox[3]);
-		fz_stroke_path(ctx, device, path, &stroke, fz_identity, fz_device_gray(ctx), &color, 1, params);
-		fz_drop_path(ctx, path);
-		fz_close_device(ctx, device);
-		fz_drop_device(ctx, device);
-	}
 
 	if (bbox.x0 != ocr->word_bbox.x0 ||
 		bbox.y0 != ocr->word_bbox.y0 ||
@@ -530,11 +534,12 @@ fz_clone_text_span(fz_context *ctx, const fz_text_span *span)
 	cspan = fz_malloc_struct(ctx, fz_text_span);
 	*cspan = *span;
 	cspan->cap = cspan->len;
-	cspan->items = fz_malloc_no_throw(ctx, sizeof(*cspan->items) * cspan->len);
+	cspan->items = fz_calloc_no_throw(ctx, cspan->len, sizeof(*cspan->items));
 	if (cspan->items == NULL)
 	{
 		fz_free(ctx, cspan);
-		fz_throw(ctx, FZ_ERROR_MEMORY, "Failed to malloc while cloning text span");
+		errno = ENOMEM;
+		fz_throw(ctx, FZ_ERROR_SYSTEM, "calloc (%zu x %zu bytes) failed", (size_t)cspan->len, sizeof(*cspan->items));
 	}
 	memcpy(cspan->items, span->items, sizeof(*cspan->items) * cspan->len);
 	fz_keep_font(ctx, cspan->font);
@@ -664,7 +669,7 @@ rewrite_span(fz_context *ctx, fz_rewrite_device *dev, fz_matrix ctm, const fz_te
 
 	/* And do the actual rewriting */
 	for (i = 0; i < rspan->len; i++) {
-		float advance = fz_advance_glyph(ctx, span->font, rspan->items[i].gid, wmode);
+		float advance = rspan->items[i].adv;
 		fz_point vadv = { dir.x * advance, dir.y * advance };
 		rewrite_char(ctx, dev, ctm, &rspan->items[i], vadv);
 	}
@@ -849,11 +854,11 @@ rewrite_begin_mask(fz_context *ctx, fz_device *dev, fz_rect area, int luminosity
 }
 
 static void
-rewrite_end_mask(fz_context *ctx, fz_device *dev)
+rewrite_end_mask(fz_context *ctx, fz_device *dev, fz_function *tr)
 {
 	fz_rewrite_device *rewrite = (fz_rewrite_device *)dev;
 
-	fz_end_mask(ctx, rewrite->target);
+	fz_end_mask_tr(ctx, rewrite->target, tr);
 }
 
 static void
@@ -1051,7 +1056,7 @@ fz_ocr_close_device(fz_context *ctx, fz_device *dev)
 	fz_close_device(ctx, ocr->draw_dev);
 
 	/* Now run the OCR */
-	tessapi = ocr_init(ctx, ocr->language);
+	tessapi = ocr_init(ctx, ocr->language, ocr->datadir);
 
 	fz_try(ctx)
 	{
@@ -1062,8 +1067,6 @@ fz_ocr_close_device(fz_context *ctx, fz_device *dev)
 		ocr_fin(ctx, tessapi);
 	fz_catch(ctx)
 		fz_rethrow(ctx);
-
-	fz_save_pixmap_as_png(ctx, ocr->pixmap, "ass.png");
 
 	/* If we're not using a list, we're done! */
 	if (ocr->list_dev == ocr->target)
@@ -1101,16 +1104,17 @@ fz_new_ocr_device(fz_context *ctx,
 		fz_rect mediabox,
 		int with_list,
 		const char *language,
+		const char *datadir,
 		int (*progress)(fz_context *, void *, int),
 		void *progress_arg)
 {
 #ifdef OCR_DISABLED
-	fz_throw(ctx, FZ_ERROR_GENERIC, "OCR Disabled in this build");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "OCR Disabled in this build");
 #else
 	fz_ocr_device *dev;
 
 	if (target == NULL)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "OCR devices require a target");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "OCR devices require a target");
 
 	dev = fz_new_derived_device(ctx, fz_ocr_device);
 
@@ -1180,6 +1184,7 @@ fz_new_ocr_device(fz_context *ctx,
 		fz_set_pixmap_resolution(ctx, dev->pixmap, res.x, res.y);
 
 		dev->language = fz_strdup(ctx, language ? language : "eng");
+		dev->datadir = fz_strdup(ctx, datadir ? datadir : "");
 
 		dev->draw_dev = fz_new_draw_device(ctx, fz_identity, dev->pixmap);
 		if (with_list)

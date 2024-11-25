@@ -1,10 +1,71 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
+#include "utils/ScopedWin.h"
+
+#include "utils/Log.h"
+
+Kind kindNone = "none";
 
 // if > 1 we won't crash when memory allocation fails
-std::atomic<int> gAllowAllocFailure = 0;
+LONG gAllowAllocFailure = 0;
+
+// returns previous value
+int AtomicInt::Set(int n) {
+    auto res = InterlockedExchange((LONG*)&val, n);
+    return (int)res;
+}
+
+// returns value after increment
+int AtomicInt::Inc() {
+    return (int)InterlockedIncrement(&val);
+}
+
+// returns value after decrement
+int AtomicInt::Dec() {
+    return (int)InterlockedDecrement(&val);
+}
+
+// returns value after adding
+int AtomicInt::Add(int n) {
+    return (int)InterlockedAdd(&val, n);
+}
+
+// returns value after subtracting
+int AtomicInt::Sub(int n) {
+    return (int)InterlockedAdd(&val, -n);
+}
+
+int AtomicInt::Get() const {
+    return (int)InterlockedCompareExchange((LONG*)&val, 0, 0);
+}
+
+bool AtomicBool::Get() const {
+    return InterlockedCompareExchange((LONG*)&val, 0, 0) != 0;
+}
+
+// returns previous value
+bool AtomicBool::Set(bool newValue) {
+    auto res = InterlockedExchange((LONG*)&val, newValue ? 1 : 0);
+    return res != 0;
+}
+
+// returns count after adding
+int AtomicRefCount::Add() {
+    return (int)InterlockedIncrement(&val);
+}
+
+int AtomicRefCount::Dec() {
+    auto res = InterlockedDecrement(&val);
+    return res;
+}
+
+void BreakIfUnderDebugger() {
+    if (IsDebuggerPresent()) {
+        DebugBreak();
+    }
+}
 
 void* Allocator::Alloc(Allocator* a, size_t size) {
     if (!a) {
@@ -27,9 +88,9 @@ void Allocator::Free(Allocator* a, void* p) {
     }
     if (!a) {
         free(p);
-    } else {
-        a->Free(p);
+        return;
     }
+    a->Free(p);
 }
 
 void* Allocator::Realloc(Allocator* a, void* mem, size_t size) {
@@ -39,49 +100,36 @@ void* Allocator::Realloc(Allocator* a, void* mem, size_t size) {
     return a->Realloc(mem, size);
 }
 
-void* Allocator::MemDup(Allocator* a, const void* mem, size_t size, size_t padding) {
-    void* newMem = Alloc(a, size + padding);
+// extraBytes will be zero, useful e.g. for creating zero-terminated strings
+// by using extraBytes = sizeof(CHAR)
+void* Allocator::MemDup(Allocator* a, const void* mem, size_t size, size_t extraBytes) {
+    if (!mem) {
+        return nullptr;
+    }
+    void* newMem = AllocZero(a, size + extraBytes);
     if (newMem) {
         memcpy(newMem, mem, size);
     }
     return newMem;
 }
 
-char* Allocator::StrDup(Allocator* a, const char* s) {
-    if (!s) {
-        return nullptr;
-    }
-    size_t n = str::Len(s);
-    return (char*)Allocator::MemDup(a, s, n + 1);
-}
+// -------------------------------------
 
-// allocates a copy of the source string inside the allocator.
-// it's only safe in PoolAllocator because allocated data
-// never moves in memory
-std::string_view Allocator::AllocString(Allocator* a, std::string_view sv) {
-    size_t n = sv.size();
-    char* dst = (char*)Allocator::Alloc(a, n + 1);
-    const char* src = sv.data();
-    memcpy(dst, (const void*)src, n);
-    dst[n] = 0; // we don't assume sv.data() is 0-terminated
-    return std::string_view(dst, n);
-}
+// using the same alignment as windows, to be safe
+// TODO: could use the same alignment everywhere but would have to
+// align start of the Block, couldn't just start at malloc() address
+constexpr size_t kPoolAllocatorAlign = sizeof(char*) * 2;
 
-#if OS_WIN
-WCHAR* Allocator::StrDup(Allocator* a, const WCHAR* s) {
-    if (!s) {
-        return nullptr;
-    }
-    size_t n = (str::Len(s) + 1) * sizeof(WCHAR);
-    return (WCHAR*)Allocator::MemDup(a, s, n);
+PoolAllocator::PoolAllocator() {
+    InitializeCriticalSection(&cs);
 }
-#endif
 
 void PoolAllocator::Free(const void*) {
     // does nothing, we can't free individual pieces of memory
 }
 
 void PoolAllocator::FreeAll() {
+    ScopedCritSec scs(&cs);
     Block* curr = firstBlock;
     while (curr) {
         Block* next = curr->next;
@@ -93,33 +141,81 @@ void PoolAllocator::FreeAll() {
     nAllocs = 0;
 }
 
-// optimization: frees all but first block
-// allows for more efficient re-use of PoolAllocator
-// with more effort we could preserve all blocks (not sure if worth it)
-void PoolAllocator::Reset() {
-    FreeAll();
+static size_t BlockHeaderSize() {
+    return RoundUp(sizeof(PoolAllocator::Block), kPoolAllocatorAlign);
+}
 
-    // TODO: optimize by not freeing the first block, to speed up re-use
-#if 0
-    if (!firstBlock) {
+// for easier debugging, poison the freed data with 0xdd
+// that way if the code tries to used the freed memory,
+// it's more likely to crash
+static void PoisonData(PoolAllocator::Block* curr) {
+    char* d;
+    size_t hdrSize = BlockHeaderSize();
+    while (curr) {
+        // optimization: don't touch memory if there were not allocations
+        if (curr->nAllocs > 0) {
+            d = (char*)curr + hdrSize;
+            // the buffer is big so optimize to only poison the data
+            // allocated in this block
+            ReportIf(d > curr->freeSpace);
+            size_t n = (curr->freeSpace - d);
+            const char* dead = "dea_";
+            const char* dea0 = "dea\0";
+            u32 u32dead = *((u32*)dead);
+            u32 u32dea0 = *((u32*)dea0);
+            n = n / sizeof(u32);
+            u32* w = (u32*)d;
+            // fill with "dead", and every 4-th is 0-terminated
+            // so that if it's shown in the debugger as a string
+            // it shows as "dea_dea_dea_dea"
+            for (size_t i = 0; i < n; i++) {
+                if ((i & 0x3) == 0x3) {
+                    *w++ = u32dea0;
+                } else {
+                    *w++ = u32dead;
+                }
+            }
+        }
+        curr = curr->next;
+    }
+}
+
+static void ResetBlock(PoolAllocator::Block* block) {
+    size_t hdrSize = BlockHeaderSize();
+    char* start = (char*)block;
+    block->nAllocs = 0;
+    block->freeSpace = start + hdrSize;
+    block->end = start + block->dataSize;
+    block->next = nullptr;
+    ReportIf(RoundUp(block->freeSpace, kPoolAllocatorAlign) != block->freeSpace);
+}
+
+void PoolAllocator::Reset(bool poisonFreedMemory) {
+    ScopedCritSec scs(&cs);
+    // free all but first block to
+    // allows for more efficient re-use of PoolAllocator
+    // with more effort we could preserve all blocks (not sure if worth it)
+    Block* first = firstBlock;
+    if (!first) {
+        ReportIf(currBlock);
         return;
     }
-    Block* first = firstBlock;
-    firstBlock = first->next;
-    FreeAll();
-
-    firstBlock = first;
+    if (poisonFreedMemory) {
+        PoisonData(firstBlock);
+    }
+    firstBlock = firstBlock->next;
     first->next = nullptr;
-    first->nAllocs = 0;
-    // TODO: properly reset first
-#endif
+    FreeAll();
+    ResetBlock(first);
+    firstBlock = first;
+    currBlock = first;
 }
 
 PoolAllocator::~PoolAllocator() {
     FreeAll();
+    DeleteCriticalSection(&cs);
 }
 
-// Allocator methods
 void* PoolAllocator::Realloc(void*, size_t) {
     // TODO: we can't do that because we don't know the original
     // size of memory piece pointed by mem. We could remember it
@@ -128,50 +224,64 @@ void* PoolAllocator::Realloc(void*, size_t) {
     return nullptr;
 }
 
-static bool BlockHasSpaceFor(PoolAllocator::Block* block, int size, int allocAlign) {
-    if (!block) {
-        return false;
-    }
-    char* d = RoundUp(block->curr, allocAlign);
-    // data + i32 index of allocation
-    d += (size + sizeof(i32));
-    if (d > block->end) {
-        return false;
-    }
-    return true;
+static void printSize(const char* s, size_t size) {
+    char buf[512]{};
+    str::BufFmt(buf, dimof(buf), "%s%d\n", s, (int)size);
+    OutputDebugStringA(buf);
 }
 
+// we allocate the value at the beginning of current block
+// and we store a pointer to the value at the end of current block
+// that way we can find allocations
 void* PoolAllocator::Alloc(size_t size) {
-    if (!BlockHasSpaceFor(currBlock, (int)size, allocAlign)) {
-        int freeSpaceSize = (int)size + sizeof(i32); // + space for index
-        int hdrSize = RoundUp((int)sizeof(PoolAllocator::Block), allocAlign);
-        int blockSize = hdrSize + freeSpaceSize;
-        if (blockSize < minBlockSize) {
-            blockSize = minBlockSize;
-            freeSpaceSize = minBlockSize - hdrSize;
-        }
-        // TODO: zero with calloc()? slower but safer
-        auto block = (Block*)malloc(blockSize);
-        char* start = (char*)block;
+    ScopedCritSec scs(&cs);
+    // printSize("PoolAllocator: ", size);
 
-        block->nAllocs = 0;
-        block->curr = start + hdrSize;
-        block->dataSize = freeSpaceSize;
-        block->end = start + block->dataSize;
-        block->next = nullptr;
-        if (!firstBlock) {
-            firstBlock = block;
+    // need rounded size + space for index at the end
+    size_t hdrSize = BlockHeaderSize();
+    bool hasSpace = false;
+    size_t sizeRounded = RoundUp(size, kPoolAllocatorAlign);
+    size_t cbNeeded = sizeRounded + sizeof(i32);
+    if (currBlock) {
+        ReportIf(currBlock->freeSpace > currBlock->end);
+        size_t cbAvail = (currBlock->end - currBlock->freeSpace);
+        hasSpace = cbAvail >= cbNeeded;
+    }
+
+    if (!hasSpace) {
+        cbNeeded += hdrSize;
+        size_t dataSize = cbNeeded;
+        size_t allocSize = hdrSize + cbNeeded;
+        if (allocSize < minBlockSize) {
+            allocSize = minBlockSize;
+            dataSize = minBlockSize - hdrSize;
         }
-        if (currBlock) {
+        auto block = (Block*)AllocZero(nullptr, allocSize);
+        if (!block) {
+            return nullptr;
+        }
+        block->dataSize = dataSize;
+        ResetBlock(block);
+        if (!firstBlock) {
+            ReportIf(currBlock);
+            firstBlock = block;
+        } else {
             currBlock->next = block;
         }
         currBlock = block;
     }
-    char* res = RoundUp(currBlock->curr, allocAlign);
-    currBlock->curr = res + size;
+    char* res = currBlock->freeSpace;
+    currBlock->freeSpace = res + sizeRounded;
+    if (currBlock->freeSpace > currBlock->end) {
+        size_t cbOvershot = currBlock->freeSpace - currBlock->end;
+        printSize("PoolAllocator: ", size);
+        printSize("overshot: ", cbOvershot);
+        printSize("hdrSizet: ", hdrSize);
+        ReportIf(true);
+    }
+    ReportIf(RoundUp(currBlock->freeSpace, kPoolAllocatorAlign) != currBlock->freeSpace);
 
     char* blockStart = (char*)currBlock;
-
     i32 offset = (i32)(res - blockStart);
     i32* index = (i32*)currBlock->end;
     index -= 1;
@@ -183,33 +293,29 @@ void* PoolAllocator::Alloc(size_t size) {
 }
 
 void* PoolAllocator::At(int i) {
-    CrashIf(i < 0 || i >= nAllocs);
+    ScopedCritSec scs(&cs);
+
+    ReportIf(i < 0 || i >= nAllocs);
     if (i < 0 || i >= nAllocs) {
         return nullptr;
     }
     auto curr = firstBlock;
-    while (curr && i >= curr->nAllocs) {
-        i -= curr->nAllocs;
+    while (curr && (size_t)i >= curr->nAllocs) {
+        i -= (int)curr->nAllocs;
         curr = curr->next;
     }
-    CrashIf(!curr);
+    ReportIf(!curr);
     if (!curr) {
         return nullptr;
     }
-    CrashIf(i >= curr->nAllocs);
+    ReportIf((size_t)i >= curr->nAllocs);
     i32* index = (i32*)curr->end;
     // elements are in reverse
-    int idx = curr->nAllocs - i - 1;
+    size_t idx = curr->nAllocs - i - 1;
     i32 offset = index[idx];
     char* d = (char*)curr + offset;
     return (void*)d;
 }
-
-#if !OS_WIN
-void ZeroMemory(void* p, size_t len) {
-    memset(p, 0, len);
-}
-#endif
 
 // This exits so that I can add temporary instrumentation
 // to catch allocations of a given size and it won't cause
@@ -218,12 +324,16 @@ void* AllocZero(size_t count, size_t size) {
     return calloc(count, size);
 }
 
-void* memdup(const void* data, size_t len) {
-    void* dup = malloc(len);
-    if (!dup) {
+// extraBytes will be filled with 0. Useful for copying zero-terminated strings
+void* memdup(const void* data, size_t len, size_t extraBytes) {
+    // to simplify callers, if data is nullptr, ignore the sizes
+    if (!data) {
         return nullptr;
     }
-    memcpy(dup, data, len);
+    void* dup = AllocZero(len + extraBytes, 1);
+    if (dup) {
+        memcpy(dup, data, len);
+    }
     return dup;
 }
 
@@ -321,92 +431,104 @@ u32 MurmurHash2(const void* key, size_t len) {
     return h;
 }
 
-int VecStrIndex::ItemsLeft() {
-    return kVecStrIndexSize - nStrings;
-}
-
-int VecStr::Size() {
-    VecStrIndex* idx = firstIndex;
-    int n = 0;
-    while (idx) {
-        n += idx->nStrings;
-        idx = idx->next;
-    }
-    return n;
-}
-
-std::string_view VecStr::at(int i) {
-    CrashIf(i < 0);
-    VecStrIndex* idx = firstIndex;
-    while (idx) {
-        if (idx->nStrings > i) {
+// variation of MurmurHash2 which deals with strings that are
+// mostly ASCII and should be treated case independently
+u32 MurmurHashWStrI(const WCHAR* str) {
+    size_t len = str::Len(str);
+    auto a = GetTempAllocator();
+    u8* data = (u8*)a->Alloc(len);
+    WCHAR c;
+    u8* dst = data;
+    while (true) {
+        c = *str++;
+        if (!c) {
             break;
         }
-        i -= idx->nStrings;
-        idx = idx->next;
+        if (c & 0xFF80) {
+            *dst++ = 0x80;
+            continue;
+        }
+        if ('A' <= c && c <= 'Z') {
+            *dst++ = (u8)(c + 'a' - 'A');
+            continue;
+        }
+        *dst++ = (u8)c;
     }
-    if (idx == nullptr) {
-        CrashMe();
-        return {};
-    }
-    CrashIf(idx->nStrings <= i);
-    if (idx->nStrings <= i) {
-        return {};
-    }
-    const char* s = (const char*)idx->offsets[i];
-    i32 size = idx->sizes[i];
-    return {s, (size_t)size};
+    return MurmurHash2(data, len);
 }
 
-static bool allocateIndexIfNeeded(VecStr& v) {
-    if (v.currIndex && v.currIndex->ItemsLeft() > 0) {
-        return true;
+// variation of MurmurHash2 which deals with strings that are
+// mostly ASCII and should be treated case independently
+u32 MurmurHashStrI(const char* s) {
+    char* dst = str::DupTemp(s);
+    char c;
+    size_t len = 0;
+    while (*s) {
+        c = *s++;
+        len++;
+        if ('A' <= c && c <= 'Z') {
+            c = (c + 'a' - 'A');
+        }
+        *dst++ = c;
     }
-
-    // for structures we want aligned allocation. 8 should be good enough for everything
-    v.allocator.allocAlign = 8;
-    VecStrIndex* idx = v.allocator.AllocStruct<VecStrIndex>();
-
-    if (!idx && (gAllowAllocFailure.load() > 0)) {
-        return false;
-    }
-    idx->next = nullptr;
-    idx->nStrings = 0;
-
-    if (!v.firstIndex) {
-        v.firstIndex = idx;
-        v.currIndex = idx;
-    } else {
-        CrashIf(!v.firstIndex);
-        CrashIf(!v.currIndex);
-        v.currIndex->next = idx;
-        v.currIndex = idx;
-    }
-    return true;
+    return MurmurHash2(dst - len, len);
 }
 
-bool VecStr::Append(std::string_view sv) {
-    bool ok = allocateIndexIfNeeded(*this);
-    if (!ok) {
-        return false;
+int limitValue(int val, int min, int max) {
+    if (min > max) {
+        std::swap(min, max);
     }
-    constexpr size_t maxLen = (size_t)std::numeric_limits<i32>::max();
-    CrashIf(sv.size() > maxLen);
-    if (sv.size() > maxLen) {
-        return false;
+    ReportIf(min > max);
+    if (val < min) {
+        return min;
     }
-    allocator.allocAlign = 1; // no need to align allocations for string
-    std::string_view res = Allocator::AllocString(&allocator, sv);
-
-    int n = currIndex->nStrings;
-    currIndex->offsets[n] = (char*)res.data();
-    currIndex->sizes[n] = (i32)res.size();
-    currIndex->nStrings++;
-    return true;
+    if (val > max) {
+        return max;
+    }
+    return val;
 }
 
-void VecStr::Reset() {
-    allocator.Reset();
-    firstIndex = nullptr;
-    currIndex = nullptr;
+DWORD limitValue(DWORD val, DWORD min, DWORD max) {
+    if (min > max) {
+        std::swap(min, max);
+    }
+    ReportIf(min > max);
+    if (val < min) {
+        return min;
+    }
+    if (val > max) {
+        return max;
+    }
+    return val;
 }
+
+float limitValue(float val, float min, float max) {
+    if (min > max) {
+        std::swap(min, max);
+    }
+    ReportIf(min > max);
+    if (val < min) {
+        return min;
+    }
+    if (val > max) {
+        return max;
+    }
+    return val;
+}
+
+Func0 MkFunc0Void(funcVoidPtr fn) {
+    auto res = Func0{};
+    res.fn = (void*)fn;
+    res.userData = kFuncNoArg;
+    return res;
+}
+
+#if 0
+template <typename T>
+Func0 MkMethod0Void(funcVoidPtr fn, T* self) {
+    UINT_PTR fnTagged = (UINT_PTR)fn;
+    res.fn = (void*)fn;
+    res.userData = kFuncNoArg;
+    res.self = self;
+}
+#endif

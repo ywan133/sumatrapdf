@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "xps-imp.h"
 
@@ -37,7 +59,7 @@ xps_parse_document_outline(fz_context *ctx, xps_document *doc, fz_xml *root)
 			entry = fz_new_outline(ctx);
 			entry->title = Memento_label(fz_strdup(ctx, description), "outline_title");
 			entry->uri = Memento_label(fz_strdup(ctx, target), "outline_uri");
-			entry->page = xps_lookup_link_target(ctx, (fz_document*)doc, target, NULL, NULL).page;
+			entry->page = xps_lookup_link_target(ctx, (fz_document*)doc, target).loc;
 			entry->down = NULL;
 			entry->next = NULL;
 
@@ -125,6 +147,8 @@ xps_load_outline(fz_context *ctx, fz_document *doc_)
 			fz_catch(ctx)
 			{
 				fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+				fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+				fz_report_error(ctx);
 				outline = NULL;
 			}
 			if (!outline)

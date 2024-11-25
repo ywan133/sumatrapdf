@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <string.h>
@@ -389,13 +411,13 @@ dec1d(fz_context *ctx, fz_faxd *fax)
 		code = get_code(ctx, fax, cf_white_decode, cfd_white_initial_bits);
 
 	if (code == UNCOMPRESSED)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "uncompressed data in faxd");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "uncompressed data in faxd");
 
 	if (code < 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "negative code in 1d faxd");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "negative code in 1d faxd");
 
 	if (fax->a + code > fax->columns)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "overflow in 1d faxd");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "overflow in 1d faxd");
 
 	if (fax->c)
 		setbits(fax->dst, fax->a, fax->a + code);
@@ -428,13 +450,13 @@ dec2d(fz_context *ctx, fz_faxd *fax)
 			code = get_code(ctx, fax, cf_white_decode, cfd_white_initial_bits);
 
 		if (code == UNCOMPRESSED)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "uncompressed data in faxd");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "uncompressed data in faxd");
 
 		if (code < 0)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "negative code in 2d faxd");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "negative code in 2d faxd");
 
 		if (fax->a + code > fax->columns)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "overflow in 2d faxd");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "overflow in 2d faxd");
 
 		if (fax->c)
 			setbits(fax->dst, fax->a, fax->a + code);
@@ -527,13 +549,13 @@ dec2d(fz_context *ctx, fz_faxd *fax)
 		break;
 
 	case UNCOMPRESSED:
-		fz_throw(ctx, FZ_ERROR_GENERIC, "uncompressed data in faxd");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "uncompressed data in faxd");
 
 	case ERROR:
-		fz_throw(ctx, FZ_ERROR_GENERIC, "invalid code in 2d faxd");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "invalid code in 2d faxd");
 
 	default:
-		fz_throw(ctx, FZ_ERROR_GENERIC, "invalid code in 2d faxd (%d)", code);
+		fz_throw(ctx, FZ_ERROR_FORMAT, "invalid code in 2d faxd (%d)", code);
 	}
 }
 
@@ -558,7 +580,7 @@ next_faxd(fz_context *ctx, fz_stream *stm, size_t max)
 				eat_bits(fax, 1);
 		}
 		if ((fax->word >> (32 - 12)) != 1)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "initial EOL not found");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "initial EOL not found");
 	}
 
 	if (fax->stage == STATE_INIT)
@@ -622,6 +644,8 @@ loop:
 		}
 		fz_catch(ctx)
 		{
+			fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+			fz_report_error(ctx);
 			goto error;
 		}
 	}
@@ -634,6 +658,8 @@ loop:
 		}
 		fz_catch(ctx)
 		{
+			fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+			fz_report_error(ctx);
 			goto error;
 		}
 	}
@@ -702,6 +728,7 @@ eol:
 			fax->dim = 2;
 	}
 
+#if 0
 	/* if end_of_line & encoded_byte_align, EOLs are *not* optional */
 	if (fax->encoded_byte_align)
 	{
@@ -710,6 +737,40 @@ eol:
 		else
 			eat_bits(fax, (8 - fax->bidx) & 7);
 	}
+#else
+	/* SumatraPDF: from https://bugs.ghostscript.com/show_bug.cgi?id=702896 */
+	/*
+	 *  If we're not expecting an EOL, try and align. If the alignment is invalid
+	 *  (not all zeros), skip it and turn off the alignment flag.
+	 *
+	 *  A note about how this works: when we start reading a line (in `loop` above)
+	 *  there is already logic to skip any number of leading 0 bits followed by an
+	 *  EOL. So, if we're expecting an EOL (i.e. if fax->end_of_line is set), then
+	 *  we don't have to handle anything here; we can just let that logic take care
+	 *  of it. This also allows us to handle the case where the alignment is missing
+	 *  but end_of_line is set; from source code comments in other
+	 *  PDF packages apparently acrobat/other tools will sometimes do this, and
+	 *  we've seen examples in the wild.
+	 */
+	if (fax->encoded_byte_align && ! fax->end_of_line)
+	{
+			int to_eat = (8 - fax->bidx) & 7;
+				/* This explicit check prevents us from right-shifting by
+				 * 32 bits, which is not allowed and puts us in the realm of
+				 * undefined behavior
+				*/
+				if (to_eat != 0) 
+				{
+						if (fax->word >> (32 - to_eat) == 0) 
+						{
+								eat_bits(fax, to_eat);
+						} else {
+								/* The data actually wasn't aligned */
+								fax->encoded_byte_align = 0;
+						}
+				}
+		}
+#endif
 
 	/* no more space in output, don't decode the next row yet */
 	if (p == fax->buffer + max)
@@ -773,7 +834,7 @@ fz_open_faxd(fz_context *ctx, fz_stream *chain,
 	fz_faxd *fax;
 
 	if (columns < 0 || columns >= INT_MAX - 7)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "too many columns lead to an integer overflow (%d)", columns);
+		fz_throw(ctx, FZ_ERROR_LIMIT, "too many columns integer overflow (%d)", columns);
 
 	fax = fz_malloc_struct(ctx, fz_faxd);
 	fz_try(ctx)

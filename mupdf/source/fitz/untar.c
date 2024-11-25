@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <string.h>
@@ -84,7 +106,7 @@ static void ensure_tar_entries(fz_context *ctx, fz_tar_archive *tar)
 		if (n == 0)
 			break;
 		if (n < nelem(record))
-			fz_throw(ctx, FZ_ERROR_GENERIC, "premature end of data in tar record");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "premature end of data in tar record");
 
 		if (is_zeroed(ctx, record, nelem(record)))
 			continue;
@@ -97,22 +119,31 @@ static void ensure_tar_entries(fz_context *ctx, fz_tar_archive *tar)
 
 		size = otoi(octsize);
 		if (size > INT_MAX)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "tar archive entry too large");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "tar archive entry too large");
 
 		typeflag = (char) record[156];
 
 		if (typeflag == TYPE_LONG_NAME)
 		{
-			longname = fz_malloc(ctx, size);
-			n = fz_read(ctx, file, (unsigned char *) longname, size);
-			if (n < (size_t) size)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "premature end of data in tar long name entry name");
+			longname = fz_malloc(ctx, size + 1);
+			fz_try(ctx)
+			{
+				n = fz_read(ctx, file, (unsigned char *) longname, size);
+				if (n < (size_t) size)
+					fz_throw(ctx, FZ_ERROR_FORMAT, "premature end of data in tar long name entry name");
+				longname[size] = '\0';
+			}
+			fz_catch(ctx)
+			{
+				fz_free(ctx, longname);
+				fz_rethrow(ctx);
+			}
 
 			fz_seek(ctx, file, 512 - (size % 512), 1);
 		}
 
 		if (typeflag != TYPE_NORMAL_OLD && typeflag != TYPE_NORMAL &&
-			typeflag != TYPE_CONTIGUOUS)
+			typeflag != TYPE_CONTIGUOUS && typeflag != TYPE_LONG_NAME)
 			continue;
 
 		blocks = (size + 511) / 512;
@@ -151,7 +182,7 @@ static fz_stream *open_tar_entry(fz_context *ctx, fz_archive *arch, const char *
 
 	ent = lookup_tar_entry(ctx, tar, name);
 	if (!ent)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find named tar archive entry");
+		return NULL;
 
 	fz_seek(ctx, file, ent->offset + 512, 0);
 	return fz_open_null_filter(ctx, file, ent->size, fz_tell(ctx, file));
@@ -166,7 +197,7 @@ static fz_buffer *read_tar_entry(fz_context *ctx, fz_archive *arch, const char *
 
 	ent = lookup_tar_entry(ctx, tar, name);
 	if (!ent)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find named tar archive entry");
+		return NULL;
 
 	ubuf = fz_new_buffer(ctx, ent->size);
 
@@ -175,7 +206,7 @@ static fz_buffer *read_tar_entry(fz_context *ctx, fz_archive *arch, const char *
 		fz_seek(ctx, file, ent->offset + 512, 0);
 		ubuf->len = fz_read(ctx, file, ubuf->data, ent->size);
 		if (ubuf->len != (size_t)ent->size)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cannot read entire archive entry");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "cannot read entire archive entry");
 	}
 	fz_catch(ctx)
 	{
@@ -207,6 +238,50 @@ static int count_tar_entries(fz_context *ctx, fz_archive *arch)
 	return tar->count;
 }
 
+static int isoct(unsigned char *d, int n)
+{
+	while (--n > 0)
+	{
+		unsigned char c = *d++;
+		if (c < '0' || c > '7')
+			return 0;
+	}
+	return (*d == 0);
+}
+
+static int
+check_v7(fz_context *ctx, fz_stream *file)
+{
+	unsigned char data[512];
+	size_t n;
+	int i;
+
+	fz_seek(ctx, file, 0, SEEK_SET);
+	n = fz_read(ctx, file, data, nelem(data));
+	if (n != nelem(data))
+		return 0;
+
+	/* Skip over name. */
+	for (i = 0; i < 100 && data[i] != 0; i++);
+
+	/* We want at least 1 byte of name, and a zero terminator. */
+	if (i == 0 || i == 100)
+		return 0;
+
+	/* Skip over a run of zero terminators. */
+	for (; i < 100 && data[i] == 0; i++);
+
+	if (i != 100)
+		return 0;
+
+	return (isoct(data+100, 8) &&
+		isoct(data+108, 8) &&
+		isoct(data+116, 8) &&
+		isoct(data+124, 12) &&
+		isoct(data+136, 12) &&
+		isoct(data+148, 8));
+}
+
 int
 fz_is_tar_archive(fz_context *ctx, fz_stream *file)
 {
@@ -225,7 +300,7 @@ fz_is_tar_archive(fz_context *ctx, fz_stream *file)
 	if (!memcmp(data, paxsignature, nelem(paxsignature)))
 		return 1;
 	if (!memcmp(data, v7signature, nelem(v7signature)))
-		return 1;
+		return check_v7(ctx, file);
 
 	return 0;
 }
@@ -236,7 +311,7 @@ fz_open_tar_archive_with_stream(fz_context *ctx, fz_stream *file)
 	fz_tar_archive *tar;
 
 	if (!fz_is_tar_archive(ctx, file))
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot recognize tar archive");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cannot recognize tar archive");
 
 	tar = fz_new_derived_archive(ctx, file, fz_tar_archive);
 	tar->super.format = "tar";

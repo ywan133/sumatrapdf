@@ -10,12 +10,8 @@ extern void BaseUtils_UnitTests();
 // in src/UnitTests.cpp
 extern void SumatraPDF_UnitTests();
 
-// in src/mui/SvgPath_ut.cpp
-extern void SvgPath_UnitTests();
-
 extern void BaseUtilTest();
 extern void ByteOrderTests();
-extern void CmdLineParserTest();
 extern void CryptoUtilTest();
 extern void CssParser_UnitTests();
 extern void DictTest();
@@ -29,17 +25,17 @@ extern void SquareTreeTest();
 extern void StrFormatTest();
 extern void StrTest();
 extern void TrivialHtmlParser_UnitTests();
-// extern void VarintGobTest();
 extern void VecTest();
 extern void WinUtilTest();
 extern void StrFormatTest();
+extern void StrVecTest();
 
-int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
+int main(int, char**) {
     printf("Running unit tests\n");
+
     InitDynCalls();
     BaseUtilTest();
     ByteOrderTests();
-    CmdLineParserTest();
     CryptoUtilTest();
     CssParser_UnitTests();
     DictTest();
@@ -50,15 +46,15 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     SettingsUtilTest();
     SimpleLogTest();
     SquareTreeTest();
+    StrFormatTest();
     StrTest();
+    StrVecTest();
     TrivialHtmlParser_UnitTests();
-    // VarintGobTest();
     VecTest();
     WinUtilTest();
     SumatraPDF_UnitTests();
-    SvgPath_UnitTests();
-    StrFormatTest();
 
     int res = utassert_print_results();
+    DestroyTempAllocator();
     return res;
 }

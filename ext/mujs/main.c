@@ -1,7 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _MSC_VER
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 #include <errno.h>
 
 #include "mujs.h"
@@ -216,11 +220,18 @@ static const char *require_js =
 	"require.cache = Object.create(null);\n"
 ;
 
+
 static const char *stacktrace_js =
 	"Error.prototype.toString = function() {\n"
-	"if (this.stackTrace) return this.name + ': ' + this.message + this.stackTrace;\n"
-	"return this.name + ': ' + this.message;\n"
+	"var s = this.name;\n"
+	"if ('message' in this) s += ': ' + this.message;\n"
+	"if ('stackTrace' in this) s += this.stackTrace;\n"
+	"return s;\n"
 	"};\n"
+;
+
+static const char *console_js =
+	"var console = { log: print, debug: print, warn: print, error: print };"
 ;
 
 static int eval_print(js_State *J, const char *source)
@@ -300,6 +311,10 @@ main(int argc, char **argv)
 	}
 
 	J = js_newstate(NULL, NULL, strict ? JS_STRICT : 0);
+	if (!J) {
+		fprintf(stderr, "Could not initialize MuJS.\n");
+		exit(1);
+	}
 
 	js_newcfunction(J, jsB_gc, "gc", 0);
 	js_setglobal(J, "gc");
@@ -330,6 +345,7 @@ main(int argc, char **argv)
 
 	js_dostring(J, require_js);
 	js_dostring(J, stacktrace_js);
+	js_dostring(J, console_js);
 
 	if (xoptind == argc) {
 		interactive = 1;
@@ -349,6 +365,8 @@ main(int argc, char **argv)
 	}
 
 	if (interactive) {
+		printf("Welcome to MuJS %d.%d.%d.\n",
+			JS_VERSION_MAJOR, JS_VERSION_MINOR, JS_VERSION_PATCH);
 		if (isatty(0)) {
 			using_history();
 			rl_bind_key('\t', rl_insert);

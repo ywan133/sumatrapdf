@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2023 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <stdio.h>
@@ -15,6 +37,7 @@ typedef struct
 	fz_stream *curr_stm;
 	fz_context *ctx;
 	int color_transform;
+	int invert_cmyk; /* has inverted CMYK polarity */
 	int init;
 	int stride;
 	int l2factor;
@@ -68,7 +91,7 @@ fz_dct_mem_init(struct jpeg_decompress_struct *cinfo, fz_dctd *state)
 				fz_dct_mem_alloc, fz_dct_mem_free, NULL))
 	{
 		fz_free(state->ctx, custmptr);
-		fz_throw(state->ctx, FZ_ERROR_GENERIC, "cannot initialize custom JPEG memory handler");
+		fz_throw(state->ctx, FZ_ERROR_LIBRARY, "cannot initialize custom JPEG memory handler");
 	}
 	cinfo->client_data = custmptr;
 }
@@ -92,7 +115,12 @@ static void error_exit_dct(j_common_ptr cinfo)
 	fz_dctd *state = JZ_DCT_STATE_FROM_CINFO(cinfo);
 	fz_context *ctx = state->ctx;
 	cinfo->err->format_message(cinfo, msg);
-	fz_throw(ctx, FZ_ERROR_GENERIC, "jpeg error: %s", msg);
+	fz_throw(ctx, FZ_ERROR_LIBRARY, "jpeg error: %s", msg);
+}
+
+static void output_message_dct(j_common_ptr cinfo)
+{
+	/* swallow message */
 }
 
 static void init_source_dct(j_decompress_ptr cinfo)
@@ -107,6 +135,7 @@ static void term_source_dct(j_decompress_ptr cinfo)
 
 static boolean fill_input_buffer_dct(j_decompress_ptr cinfo)
 {
+	static unsigned char eoi[2] = { 0xFF, JPEG_EOI };
 	struct jpeg_source_mgr *src = cinfo->src;
 	fz_dctd *state = JZ_DCT_STATE_FROM_CINFO(cinfo);
 	fz_context *ctx = state->ctx;
@@ -119,13 +148,20 @@ static boolean fill_input_buffer_dct(j_decompress_ptr cinfo)
 	}
 	fz_catch(ctx)
 	{
-		return 0;
+		/* Since fz_available swallows all other errors, the only errors that can
+		 * bubble up to here are TRYLATER and exception stack overflow.
+		 * Ignore this catastrophic failure and treat it as end of file.
+		 * NOTE: We do NOT handle TRYLATER here.
+		 */
+		src->next_input_byte = eoi;
+		src->bytes_in_buffer = 2;
+		return 1;
 	}
+
 	src->next_input_byte = curr_stm->rp;
 
 	if (src->bytes_in_buffer == 0)
 	{
-		static unsigned char eoi[2] = { 0xFF, JPEG_EOI };
 		fz_warn(state->ctx, "premature end of file in jpeg");
 		src->next_input_byte = eoi;
 		src->bytes_in_buffer = 2;
@@ -147,6 +183,17 @@ static void skip_input_data_dct(j_decompress_ptr cinfo, long num_bytes)
 		src->next_input_byte += num_bytes;
 		src->bytes_in_buffer -= num_bytes;
 	}
+}
+
+/* Invert CMYK polarity if it is a standalone JPEG file.
+ * For JPEG images embedded in PDF files, the CMYK data is normal.
+ * For JPEG images created by Photoshop, the CMYK data is inverted.
+ */
+static void invert_cmyk(unsigned char *p, int n)
+{
+	int i;
+	for (i = 0; i < n; ++i)
+		p[i] = 255 - p[i];
 }
 
 static int
@@ -197,33 +244,21 @@ next_dctd(fz_context *ctx, fz_stream *stm, size_t max)
 
 			jpeg_read_header(cinfo, 1);
 
-			/* default value if ColorTransform is not set */
-			if (state->color_transform == -1)
-			{
-				if (state->cinfo.num_components == 3)
-					state->color_transform = 1;
-				else
-					state->color_transform = 0;
-			}
-
+			/* Adobe APP marker overrides ColorTransform from PDF */
 			if (cinfo->saw_Adobe_marker)
 				state->color_transform = cinfo->Adobe_transform;
 
-			/* Guess the input colorspace, and set output colorspace accordingly */
-			switch (cinfo->num_components)
+			/* Disable JPEG color transformations if ColorTransform is 0.
+			 * This is usually handled by libjpeg, but since PDF can override
+			 * the default behavior if the Adobe APP marker is missing
+			 * we must do it here as well.
+			 */
+			if (state->color_transform == 0)
 			{
-			case 3:
-				if (state->color_transform)
-					cinfo->jpeg_color_space = JCS_YCbCr;
-				else
+				if (cinfo->num_components == 3)
 					cinfo->jpeg_color_space = JCS_RGB;
-				break;
-			case 4:
-				if (state->color_transform)
-					cinfo->jpeg_color_space = JCS_YCCK;
-				else
+				if (cinfo->num_components == 4)
 					cinfo->jpeg_color_space = JCS_CMYK;
-				break;
 			}
 
 			cinfo->scale_num = 8/(1<<state->l2factor);
@@ -248,11 +283,15 @@ next_dctd(fz_context *ctx, fz_stream *stm, size_t max)
 			if (p + state->stride <= ep)
 			{
 				jpeg_read_scanlines(cinfo, &p, 1);
+				if (state->invert_cmyk && cinfo->num_components == 4)
+					invert_cmyk(p, state->stride);
 				p += state->stride;
 			}
 			else
 			{
 				jpeg_read_scanlines(cinfo, &state->scanline, 1);
+				if (state->invert_cmyk && cinfo->num_components == 4)
+					invert_cmyk(state->scanline, state->stride);
 				state->rp = state->scanline;
 				state->wp = state->scanline + state->stride;
 			}
@@ -311,7 +350,7 @@ close_dctd(fz_context *ctx, void *state_)
 }
 
 fz_stream *
-fz_open_dctd(fz_context *ctx, fz_stream *chain, int color_transform, int l2factor, fz_stream *jpegtables)
+fz_open_dctd(fz_context *ctx, fz_stream *chain, int color_transform, int invert_cmyk, int l2factor, fz_stream *jpegtables)
 {
 	fz_dctd *state = fz_malloc_struct(ctx, fz_dctd);
 	j_decompress_ptr cinfo = &state->cinfo;
@@ -327,6 +366,7 @@ fz_open_dctd(fz_context *ctx, fz_stream *chain, int color_transform, int l2facto
 	}
 
 	state->color_transform = color_transform;
+	state->invert_cmyk = invert_cmyk;
 	state->init = 0;
 	state->l2factor = l2factor;
 	state->chain = fz_keep_stream(ctx, chain);
@@ -336,6 +376,7 @@ fz_open_dctd(fz_context *ctx, fz_stream *chain, int color_transform, int l2facto
 	cinfo->src = NULL;
 	cinfo->err = &state->errmgr;
 	jpeg_std_error(cinfo->err);
+	cinfo->err->output_message = output_message_dct;
 	cinfo->err->error_exit = error_exit_dct;
 
 	return fz_new_stream(ctx, state, next_dctd, close_dctd);

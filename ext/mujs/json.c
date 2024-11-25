@@ -1,8 +1,4 @@
 #include "jsi.h"
-#include "jslex.h"
-#include "jsvalue.h"
-#include "jsbuiltin.h"
-
 #include "utf.h"
 
 int js_isnumberobject(js_State *J, int idx)
@@ -13,6 +9,16 @@ int js_isnumberobject(js_State *J, int idx)
 int js_isstringobject(js_State *J, int idx)
 {
 	return js_isobject(J, idx) && js_toobject(J, idx)->type == JS_CSTRING;
+}
+
+int js_isbooleanobject(js_State *J, int idx)
+{
+	return js_isobject(J, idx) && js_toobject(J, idx)->type == JS_CBOOLEAN;
+}
+
+int js_isdateobject(js_State *J, int idx)
+{
+	return js_isobject(J, idx) && js_toobject(J, idx)->type == JS_CDATE;
 }
 
 static void jsonnext(js_State *J)
@@ -179,7 +185,7 @@ static void fmtnum(js_State *J, js_Buffer **sb, double n)
 
 static void fmtstr(js_State *J, js_Buffer **sb, const char *s)
 {
-	static const char *HEX = "0123456789ABCDEF";
+	static const char *HEX = "0123456789abcdef";
 	int i, n;
 	Rune c;
 	js_putc(J, sb, '"');
@@ -194,7 +200,7 @@ static void fmtstr(js_State *J, js_Buffer **sb, const char *s)
 		case '\r': js_puts(J, sb, "\\r"); break;
 		case '\t': js_puts(J, sb, "\\t"); break;
 		default:
-			if (c < ' ') {
+			if (c < ' ' || (c >= 0xd800 && c <= 0xdfff)) {
 				js_putc(J, sb, '\\');
 				js_putc(J, sb, 'u');
 				js_putc(J, sb, HEX[(c>>12)&15]);
@@ -362,7 +368,9 @@ static void JSON_stringify(js_State *J)
 {
 	js_Buffer *sb = NULL;
 	char buf[12];
-	const char *s, *gap;
+	/* NOTE: volatile to silence GCC warning about longjmp clobbering a variable */
+	const char * volatile gap;
+	const char *s;
 	int n;
 
 	gap = NULL;

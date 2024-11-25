@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD */
 
 /* Wrappers around dbghelp.dll that load it on demand and provide
@@ -11,7 +11,10 @@
 #include "utils/WinDynCalls.h"
 #include "utils/DbgHelpDyn.h"
 #include "utils/FileUtil.h"
+#include "utils/ScopedWin.h"
 #include "utils/WinUtil.h"
+
+#include "utils/Log.h"
 
 /* Hard won wisdom: changing symbol path with SymSetSearchPath() after modules
    have been loaded (invideProcess=TRUE in SymInitialize() or SymRefreshModuleList())
@@ -23,43 +26,74 @@
 
 namespace dbghelp {
 
-static const char* ExceptionNameFromCode(DWORD excCode) {
-#define EXC(x)          \
-    case EXCEPTION_##x: \
+static char excNameBuf[512];
+
+const char* ExceptionNameFromCode(DWORD excCode) {
+#define EXC(x) \
+    case x:    \
         return #x;
 
     switch (excCode) {
-        EXC(ACCESS_VIOLATION)
-        EXC(DATATYPE_MISALIGNMENT)
-        EXC(BREAKPOINT)
-        EXC(SINGLE_STEP)
-        EXC(ARRAY_BOUNDS_EXCEEDED)
-        EXC(FLT_DENORMAL_OPERAND)
-        EXC(FLT_DIVIDE_BY_ZERO)
-        EXC(FLT_INEXACT_RESULT)
-        EXC(FLT_INVALID_OPERATION)
-        EXC(FLT_OVERFLOW)
-        EXC(FLT_STACK_CHECK)
-        EXC(FLT_UNDERFLOW)
-        EXC(INT_DIVIDE_BY_ZERO)
-        EXC(INT_OVERFLOW)
-        EXC(PRIV_INSTRUCTION)
-        EXC(IN_PAGE_ERROR)
-        EXC(ILLEGAL_INSTRUCTION)
-        EXC(NONCONTINUABLE_EXCEPTION)
-        EXC(STACK_OVERFLOW)
-        EXC(INVALID_DISPOSITION)
-        EXC(GUARD_PAGE)
-        EXC(INVALID_HANDLE)
+        EXC(EXCEPTION_ACCESS_VIOLATION)
+        EXC(EXCEPTION_DATATYPE_MISALIGNMENT)
+        EXC(EXCEPTION_BREAKPOINT)
+        EXC(EXCEPTION_SINGLE_STEP)
+        EXC(EXCEPTION_ARRAY_BOUNDS_EXCEEDED)
+        EXC(EXCEPTION_FLT_DENORMAL_OPERAND)
+        EXC(EXCEPTION_FLT_DIVIDE_BY_ZERO)
+        EXC(EXCEPTION_FLT_INEXACT_RESULT)
+        EXC(EXCEPTION_FLT_INVALID_OPERATION)
+        EXC(EXCEPTION_FLT_OVERFLOW)
+        EXC(EXCEPTION_FLT_STACK_CHECK)
+        EXC(EXCEPTION_FLT_UNDERFLOW)
+        EXC(EXCEPTION_INT_DIVIDE_BY_ZERO)
+        EXC(EXCEPTION_INT_OVERFLOW)
+        EXC(EXCEPTION_PRIV_INSTRUCTION)
+        EXC(EXCEPTION_IN_PAGE_ERROR)
+        EXC(EXCEPTION_ILLEGAL_INSTRUCTION)
+        EXC(EXCEPTION_NONCONTINUABLE_EXCEPTION)
+        EXC(EXCEPTION_STACK_OVERFLOW)
+        EXC(EXCEPTION_INVALID_DISPOSITION)
+        EXC(EXCEPTION_GUARD_PAGE)
+        EXC(EXCEPTION_INVALID_HANDLE)
+        EXC(STATUS_LONGJUMP)
+        EXC(STATUS_UNWIND_CONSOLIDATE)
+        EXC(DBG_EXCEPTION_NOT_HANDLED)
+        EXC(STATUS_INVALID_PARAMETER)
+        EXC(STATUS_NO_MEMORY)
+        EXC(STATUS_DLL_NOT_FOUND)
+        EXC(STATUS_ORDINAL_NOT_FOUND)
+        EXC(STATUS_ENTRYPOINT_NOT_FOUND)
+        EXC(STATUS_CONTROL_C_EXIT)
+        EXC(STATUS_DLL_INIT_FAILED)
+        EXC(STATUS_CONTROL_STACK_VIOLATION)
+        EXC(STATUS_FLOAT_MULTIPLE_FAULTS)
+        EXC(STATUS_FLOAT_MULTIPLE_TRAPS)
+        EXC(STATUS_REG_NAT_CONSUMPTION)
+        EXC(STATUS_HEAP_CORRUPTION)
+        EXC(STATUS_STACK_BUFFER_OVERRUN)
+        EXC(STATUS_INVALID_CRUNTIME_PARAMETER)
+        EXC(STATUS_ASSERTION_FAILURE)
+        EXC(STATUS_ENCLAVE_VIOLATION)
+        EXC(STATUS_INTERRUPTED)
+        EXC(STATUS_THREAD_NOT_RUNNING)
+        EXC(STATUS_ALREADY_REGISTERED)
+        EXC(STATUS_SXS_EARLY_DEACTIVATION)
+        EXC(STATUS_SXS_INVALID_DEACTIVATION)
     }
 #undef EXC
 
-    static char buf[512] = {0};
+    //    EXC(EXCEPTION_POSSIBLE_DEADLOCK)
 
-    FormatMessageA(FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_FROM_HMODULE, GetModuleHandleA("ntdll.dll"), excCode,
-                   0, buf, sizeof(buf), 0);
+    excNameBuf[0] = 0;
+    HMODULE h = GetModuleHandleA("ntdll.dll");
+    DWORD flags = FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_FROM_HMODULE;
+    DWORD ret = FormatMessageA(flags, h, excCode, 0, excNameBuf, sizeof(excNameBuf), nullptr);
+    if (ret == 0) {
+        excNameBuf[0] = 0;
+    }
 
-    return buf;
+    return excNameBuf;
 }
 
 #if 0
@@ -70,20 +104,20 @@ static bool SetupSymbolPath()
         return false;
     }
 
-    AutoFreeWstr path(GetSymbolPath());
+    AutoFreeWStr path(GetSymbolPath());
     if (!path) {
         plog("SetupSymbolPath(): GetSymbolPath() returned nullptr");
         return false;
     }
 
     BOOL ok = FALSE;
-    AutoFreeWstr tpath(strconv::FromWStr(path));
+    AutoFreeWStr tpath(strconv::FromWStr(path));
     if (DynSymSetSearchPathW) {
         ok = DynSymSetSearchPathW(GetCurrentProcess(), path);
         if (!ok)
             plog("DynSymSetSearchPathW() failed");
     } else {
-        AutoFree tmp(strconv::ToAnsi(tpath));
+        AutoFreeStr tmp = strconv::ToAnsi(tpath);
         ok = DynSymSetSearchPath(GetCurrentProcess(), tmp);
         if (!ok)
             plog("DynSymSetSearchPath() failed");
@@ -104,20 +138,28 @@ static bool CanStackWalk() {
     return ok;
 }
 
-// check if has access to valid .pdb symbols file by trying to resolve a symbol
-__declspec(noinline) bool CanSymbolizeAddress(DWORD64 addr) {
-    static const int MAX_SYM_LEN = 512;
+constexpr int kMaxSymLen = 512;
 
-    char buf[sizeof(SYMBOL_INFO) + MAX_SYM_LEN * sizeof(char)];
+// check if has access to valid .pdb symbols file by trying to resolve a symbol
+NO_INLINE bool CanSymbolizeAddress(DWORD64 addr) {
+    char buf[sizeof(SYMBOL_INFO) + kMaxSymLen * sizeof(char)];
     SYMBOL_INFO* symInfo = (SYMBOL_INFO*)buf;
 
     memset(buf, 0, sizeof(buf));
     symInfo->SizeOfStruct = sizeof(SYMBOL_INFO);
-    symInfo->MaxNameLen = MAX_SYM_LEN;
+    symInfo->MaxNameLen = kMaxSymLen;
 
     DWORD64 symDisp = 0;
     BOOL ok = DynSymFromAddr(GetCurrentProcess(), addr, &symDisp, symInfo);
-    return ok && symInfo->Name[0];
+    if (!ok) {
+        return false;
+    }
+    int symLen = symInfo->NameLen;
+    if (symLen < 4) {
+        return false;
+    }
+    char* name = symInfo->Name;
+    return *name != 0;
 }
 
 // a heuristic to test if we have symbols for our own binaries by testing if
@@ -139,8 +181,8 @@ bool Initialize(const WCHAR* symPathW, bool force) {
 
     bool needsCleanup = gSymInitializeOk;
 
-    if (!DynSymInitializeW && !DynSymInitialize) {
-        // plog("dbghelp::Initialize(): SymInitializeW() and SymInitialize() not present in dbghelp.dll");
+    if (!DynSymInitializeW) {
+        log("dbghelp::Initialize(): SymInitializeW() and SymInitialize() not present in dbghelp.dll");
         return false;
     }
 
@@ -148,18 +190,10 @@ bool Initialize(const WCHAR* symPathW, bool force) {
         DynSymCleanup(GetCurrentProcess());
     }
 
-    if (DynSymInitializeW) {
-        gSymInitializeOk = DynSymInitializeW(GetCurrentProcess(), symPathW, TRUE);
-    } else {
-        // SymInitializeW() is not present on some XP systems
-        char symPathA[MAX_PATH];
-        if (0 != strconv::ToCodePageBuf(symPathA, dimof(symPathA), symPathW, CP_ACP)) {
-            gSymInitializeOk = DynSymInitialize(GetCurrentProcess(), symPathA, TRUE);
-        }
-    }
+    gSymInitializeOk = DynSymInitializeW(GetCurrentProcess(), symPathW, TRUE);
 
     if (!gSymInitializeOk) {
-        // plog("dbghelp::Initialize(): _SymInitialize() failed");
+        log("dbghelp::Initialize(): DynSymInitializeW() failed");
         return false;
     }
 
@@ -172,8 +206,7 @@ bool Initialize(const WCHAR* symPathW, bool force) {
     return true;
 }
 
-static BOOL CALLBACK OpenMiniDumpCallback([[maybe_unused]] void* param, PMINIDUMP_CALLBACK_INPUT input,
-                                          PMINIDUMP_CALLBACK_OUTPUT output) {
+static BOOL CALLBACK OpenMiniDumpCallback(void*, PMINIDUMP_CALLBACK_INPUT input, PMINIDUMP_CALLBACK_OUTPUT output) {
     if (!input || !output) {
         return FALSE;
     }
@@ -217,14 +250,17 @@ void WriteMiniDump(const WCHAR* crashDumpFilePath, MINIDUMP_EXCEPTION_INFORMATIO
     CloseHandle(hFile);
 }
 
-static bool GetAddrInfo(void* addr, char* moduleName, DWORD moduleLen, DWORD& sectionOut, DWORD_PTR& offsetOut) {
+// note: without NO_INLINE it would be mis-compiled to return false in release builds
+// making GetAddressInfo() not provide info about address
+NO_INLINE static bool GetAddrInfo(void* addr, char* moduleName, DWORD moduleLen, DWORD& sectionOut,
+                                  DWORD_PTR& offsetOut) {
     MEMORY_BASIC_INFORMATION mbi;
     if (0 == VirtualQuery(addr, &mbi, sizeof(mbi))) {
         return false;
     }
 
     HMODULE hMod = (HMODULE)mbi.AllocationBase;
-    if (0 == hMod) {
+    if (nullptr == hMod) {
         return false;
     }
 
@@ -244,7 +280,7 @@ static bool GetAddrInfo(void* addr, char* moduleName, DWORD moduleLen, DWORD& se
         if (section->SizeOfRawData > section->Misc.VirtualSize) {
             endAddr += section->SizeOfRawData;
         } else {
-            section->Misc.VirtualSize;
+            endAddr += section->Misc.VirtualSize;
         }
 
         if (lAddr >= startAddr && lAddr <= endAddr) {
@@ -279,12 +315,13 @@ void GetAddressInfo(str::Str& s, DWORD64 addr, bool compact) {
         symName = &(symInfo->Name[0]);
     }
 
-    char moduleName[MAX_PATH] = {0};
+    char moduleName[MAX_PATH]{};
     DWORD section;
     DWORD_PTR offset;
-    if (GetAddrInfo((void*)addr, moduleName, sizeof(moduleName), section, offset)) {
+    ok = GetAddrInfo((void*)addr, moduleName, sizeof(moduleName), section, offset);
+    if (ok) {
         str::ToLowerInPlace(moduleName);
-        const char* moduleShort = path::GetBaseNameNoFree(moduleName);
+        const char* moduleShort = path::GetBaseNameTemp(moduleName);
         if (compact) {
             s.Append(moduleShort);
         } else {
@@ -308,7 +345,7 @@ void GetAddressInfo(str::Str& s, DWORD64 addr, bool compact) {
     } else {
         AppendAddress(s, addr);
     }
-    s.Append("\r\n");
+    s.Append("\n");
 }
 
 static bool GetStackFrameInfo(str::Str& s, STACKFRAME64* stackFrame, CONTEXT* ctx, HANDLE hThread) {
@@ -338,20 +375,26 @@ static bool GetStackFrameInfo(str::Str& s, STACKFRAME64* stackFrame, CONTEXT* ct
 
 static bool GetCallstack(str::Str& s, CONTEXT& ctx, HANDLE hThread) {
     if (!CanStackWalk()) {
-        s.Append("GetCallstack(): CanStackWalk() returned false");
+        s.Append("GetCallstack(): CanStackWalk() returned false\n");
         return false;
     }
 
     STACKFRAME64 stackFrame;
     memset(&stackFrame, 0, sizeof(stackFrame));
-#ifdef _WIN64
+#if IS_INTEL_64 == 1
     stackFrame.AddrPC.Offset = ctx.Rip;
     stackFrame.AddrFrame.Offset = ctx.Rbp;
     stackFrame.AddrStack.Offset = ctx.Rsp;
-#else
+#elif IS_INTEL_32 == 1
     stackFrame.AddrPC.Offset = ctx.Eip;
     stackFrame.AddrFrame.Offset = ctx.Ebp;
     stackFrame.AddrStack.Offset = ctx.Esp;
+#elif IS_ARM_64 == 1
+    stackFrame.AddrPC.Offset = ctx.Pc;
+    stackFrame.AddrFrame.Offset = ctx.Fp;
+    stackFrame.AddrStack.Offset = ctx.Sp;
+#else
+#error "Unsupported CPU architecture"
 #endif
     stackFrame.AddrPC.Mode = AddrModeFlat;
     stackFrame.AddrFrame.Mode = AddrModeFlat;
@@ -366,7 +409,7 @@ static bool GetCallstack(str::Str& s, CONTEXT& ctx, HANDLE hThread) {
         framesCount++;
     }
     if (0 == framesCount) {
-        s.Append("StackWalk64() couldn't get even the first stack frame info");
+        s.Append("StackWalk64() couldn't get even the first stack frame info\n");
         return false;
     }
     return true;
@@ -377,26 +420,26 @@ void GetThreadCallstack(str::Str& s, DWORD threadId) {
         return;
     }
 
-    s.AppendFmt("\r\nThread: %x\r\n", threadId);
+    s.AppendFmt("\nThread: %x\n", threadId);
 
     DWORD access = THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME;
     HANDLE hThread = OpenThread(access, false, threadId);
     if (!hThread) {
-        s.Append("Failed to OpenThread()\r\n");
+        s.Append("Failed to OpenThread()\n");
         return;
     }
 
     DWORD res = SuspendThread(hThread);
-    if (-1 == res) {
-        s.Append("Failed to SuspendThread()\r\n");
+    if ((DWORD)(-1) == res) {
+        s.Append("Failed to SuspendThread()\n");
     } else {
-        CONTEXT ctx = {0};
+        CONTEXT ctx{};
         ctx.ContextFlags = CONTEXT_FULL;
         BOOL ok = GetThreadContext(hThread, &ctx);
         if (ok) {
             GetCallstack(s, ctx, hThread);
         } else {
-            s.Append("Failed to GetThreadContext()\r\n");
+            s.Append("Failed to GetThreadContext()\n");
         }
 
         ResumeThread(hThread);
@@ -413,7 +456,7 @@ void GetThreadCallstack(str::Str& s, DWORD threadId) {
 // from local buffer overrun because optimizations are disabled in function)"
 #pragma warning(push)
 #pragma warning(disable : 4748)
-__declspec(noinline) bool GetCurrentThreadCallstack(str::Str& s) {
+NO_INLINE bool GetCurrentThreadCallstack(str::Str& s) {
     // not available under Win2000
     if (!DynRtlCaptureContext) {
         return false;
@@ -433,7 +476,7 @@ str::Str* gCallstackLogs = nullptr;
 
 // start remembering callstack logs done with LogCallstack()
 void RememberCallstackLogs() {
-    CrashIf(gCallstackLogs);
+    ReportIf(gCallstackLogs);
     gCallstackLogs = new str::Str();
 }
 
@@ -442,12 +485,12 @@ void FreeCallstackLogs() {
     gCallstackLogs = nullptr;
 }
 
-std::span<u8> GetCallstacks() {
+ByteSlice GetCallstacks() {
     if (!gCallstackLogs) {
         return {};
     }
     char* s = str::Dup(gCallstackLogs->Get());
-    return str::ToSpan(s);
+    return ToByteSlice(s);
 }
 
 void LogCallstack() {
@@ -488,9 +531,10 @@ void GetExceptionInfo(str::Str& s, EXCEPTION_POINTERS* excPointers) {
     if (!excPointers) {
         return;
     }
+
     EXCEPTION_RECORD* excRecord = excPointers->ExceptionRecord;
     DWORD excCode = excRecord->ExceptionCode;
-    s.AppendFmt("Exception: %08X %s\r\n", (int)excCode, ExceptionNameFromCode(excCode));
+    s.AppendFmt("Exception: %08X %s\n", (int)excCode, ExceptionNameFromCode(excCode));
 
     s.AppendFmt("Faulting IP: ");
     GetAddressInfo(s, (DWORD64)excRecord->ExceptionAddress, false);
@@ -509,33 +553,36 @@ void GetExceptionInfo(str::Str& s, EXCEPTION_POINTERS* excPointers) {
         } else {
             s.Append("unknown readWriteFlag: %d", readWriteFlag);
         }
-        s.Append("\r\n");
+        s.Append("\n");
     }
 
     PCONTEXT ctx = excPointers->ContextRecord;
-    s.AppendFmt("\r\nRegisters:\r\n");
-
-#ifdef _WIN64
+    s.AppendFmt("\nRegisters:\n");
+#if IS_INTEL_64 == 1
     s.AppendFmt(
-        "RAX:%016I64X  RBX:%016I64X  RCX:%016I64X\r\nRDX:%016I64X  RSI:%016I64X  RDI:%016I64X\r\n"
-        "R8: %016I64X\r\nR9: "
-        "%016I64X\r\nR10:%016I64X\r\nR11:%016I64X\r\nR12:%016I64X\r\nR13:%016I64X\r\nR14:%016I64X\r\nR15:%016I64X\r\n",
-        ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13,
-        ctx->R14, ctx->R15);
-    s.AppendFmt("CS:RIP:%04X:%016I64X\r\n", ctx->SegCs, ctx->Rip);
-    s.AppendFmt("SS:RSP:%04X:%016X  RBP:%08X\r\n", ctx->SegSs, ctx->Rsp, ctx->Rbp);
-    s.AppendFmt("DS:%04X  ES:%04X  FS:%04X  GS:%04X\r\n", ctx->SegDs, ctx->SegEs, ctx->SegFs, ctx->SegGs);
-    s.AppendFmt("Flags:%08X\r\n", ctx->EFlags);
+        "RAX:%016I64X  RBX:%016I64X  RCX:%016I64X\nRDX:%016I64X  RSI:%016I64X  RDI:%016I64X\n"
+        "R8: %016I64X\nR9: "
+        "%016I64X\nR10:%016I64X\nR11:%016I64X\nR12:%016I64X\nR13:%016I64X\nR14:%016I64X\nR15:%016I64X\n",
+        ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12,
+        ctx->R13, ctx->R14, ctx->R15);
+    s.AppendFmt("CS:RIP:%04X:%016I64X\n", ctx->SegCs, ctx->Rip);
+    s.AppendFmt("SS:RSP:%04X:%016X  RBP:%08X\n", ctx->SegSs, (unsigned int)ctx->Rsp, (unsigned int)ctx->Rbp);
+    s.AppendFmt("DS:%04X  ES:%04X  FS:%04X  GS:%04X\n", ctx->SegDs, ctx->SegEs, ctx->SegFs, ctx->SegGs);
+    s.AppendFmt("Flags:%08X\n", ctx->EFlags);
+#elif IS_INTEL_32 == 1
+    s.AppendFmt("EAX:%08X  EBX:%08X  ECX:%08X\nEDX:%08X  ESI:%08X  EDI:%08X\n", ctx->Eax, ctx->Ebx, ctx->Ecx, ctx->Edx,
+                ctx->Esi, ctx->Edi);
+    s.AppendFmt("CS:EIP:%04X:%08X\n", ctx->SegCs, ctx->Eip);
+    s.AppendFmt("SS:ESP:%04X:%08X  EBP:%08X\n", ctx->SegSs, ctx->Esp, ctx->Ebp);
+    s.AppendFmt("DS:%04X  ES:%04X  FS:%04X  GS:%04X\n", ctx->SegDs, ctx->SegEs, ctx->SegFs, ctx->SegGs);
+    s.AppendFmt("Flags:%08X\n", ctx->EFlags);
+#elif IS_ARM_64 == 1
+    s.AppendFmt("Fp:%016I64X\nLr:%016I64X\nSp:%016I64X\nPc:%016I64X\n", ctx->Fp, ctx->Lr, ctx->Sp, ctx->Pc);
 #else
-    s.AppendFmt("EAX:%08X  EBX:%08X  ECX:%08X\r\nEDX:%08X  ESI:%08X  EDI:%08X\r\n", ctx->Eax, ctx->Ebx, ctx->Ecx,
-                ctx->Edx, ctx->Esi, ctx->Edi);
-    s.AppendFmt("CS:EIP:%04X:%08X\r\n", ctx->SegCs, ctx->Eip);
-    s.AppendFmt("SS:ESP:%04X:%08X  EBP:%08X\r\n", ctx->SegSs, ctx->Esp, ctx->Ebp);
-    s.AppendFmt("DS:%04X  ES:%04X  FS:%04X  GS:%04X\r\n", ctx->SegDs, ctx->SegEs, ctx->SegFs, ctx->SegGs);
-    s.AppendFmt("Flags:%08X\r\n", ctx->EFlags);
+#error "Unsupported CPU architecture"
 #endif
 
-    s.Append("\r\nCrashed thread:\r\n");
+    s.Append("\nCrashed thread:\n");
     // it's not really for current thread, but it seems to work
     GetCallstack(s, *ctx, GetCurrentThread());
 }

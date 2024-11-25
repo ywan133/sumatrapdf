@@ -1,9 +1,34 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef SOURCE_HTML_IMP_H
 #define SOURCE_HTML_IMP_H
 
+#include "mupdf/fitz.h"
+#include "mupdf/html.h"
+
+#include "../fitz/xml-imp.h"
+
 typedef struct fz_html_font_face_s fz_html_font_face;
-typedef struct fz_html_font_set_s fz_html_font_set;
-typedef struct fz_html_s fz_html;
 typedef struct fz_html_box_s fz_html_box;
 typedef struct fz_html_flow_s fz_html_flow;
 typedef struct fz_css_style_splay_s fz_css_style_splay;
@@ -37,9 +62,11 @@ struct fz_html_font_set_s
 	fz_html_font_face *custom;
 };
 
+#define UCS_MAX 0x10ffff
+
 enum
 {
-	CSS_KEYWORD = 256,
+	CSS_KEYWORD = UCS_MAX+1,
 	CSS_HASH,
 	CSS_STRING,
 	CSS_NUMBER,
@@ -112,15 +139,18 @@ enum
 	PRO_BORDER_TOP_COLOR,
 	PRO_BORDER_TOP_STYLE,
 	PRO_BORDER_TOP_WIDTH,
+	PRO_BORDER_SPACING,
 	PRO_COLOR,
 	PRO_DIRECTION,
 	PRO_DISPLAY,
+	PRO_FONT,
 	PRO_FONT_FAMILY,
 	PRO_FONT_SIZE,
 	PRO_FONT_STYLE,
 	PRO_FONT_VARIANT,
 	PRO_FONT_WEIGHT,
 	PRO_HEIGHT,
+	PRO_LEADING,
 	PRO_LETTER_SPACING,
 	PRO_LINE_HEIGHT,
 	PRO_LIST_STYLE_IMAGE,
@@ -131,6 +161,7 @@ enum
 	PRO_MARGIN_RIGHT,
 	PRO_MARGIN_TOP,
 	PRO_ORPHANS,
+	PRO_OVERFLOW_WRAP,
 	PRO_PADDING_BOTTOM,
 	PRO_PADDING_LEFT,
 	PRO_PADDING_RIGHT,
@@ -140,6 +171,7 @@ enum
 	PRO_QUOTES,
 	PRO_SRC,
 	PRO_TEXT_ALIGN,
+	PRO_TEXT_DECORATION,
 	PRO_TEXT_INDENT,
 	PRO_TEXT_TRANSFORM,
 	PRO_VERTICAL_ALIGN,
@@ -173,13 +205,14 @@ struct fz_css_match_s
 	fz_css_value *value[NUM_PROPERTIES];
 };
 
-enum { DIS_NONE, DIS_BLOCK, DIS_INLINE, DIS_LIST_ITEM, DIS_INLINE_BLOCK, DIS_TABLE, DIS_TABLE_ROW, DIS_TABLE_CELL };
+enum { DIS_NONE, DIS_BLOCK, DIS_INLINE, DIS_LIST_ITEM, DIS_INLINE_BLOCK, DIS_TABLE, DIS_TABLE_GROUP, DIS_TABLE_ROW, DIS_TABLE_CELL };
 enum { POS_STATIC, POS_RELATIVE, POS_ABSOLUTE, POS_FIXED };
 enum { TA_LEFT, TA_RIGHT, TA_CENTER, TA_JUSTIFY };
 enum { VA_BASELINE, VA_SUB, VA_SUPER, VA_TOP, VA_BOTTOM, VA_TEXT_TOP, VA_TEXT_BOTTOM };
 enum { BS_NONE, BS_SOLID };
 enum { V_VISIBLE, V_HIDDEN, V_COLLAPSE };
 enum { PB_AUTO, PB_ALWAYS, PB_AVOID, PB_LEFT, PB_RIGHT };
+enum { TD_NONE, TD_UNDERLINE, TD_LINE_THROUGH };
 
 enum {
 	WS_COLLAPSE = 1,
@@ -203,7 +236,13 @@ enum {
 	LST_ARMENIAN, LST_GEORGIAN,
 };
 
-enum { N_NUMBER='u', N_LENGTH='p', N_SCALE='m', N_PERCENT='%', N_AUTO='a' };
+enum {
+	OVERFLOW_WRAP_NORMAL = 0,
+	OVERFLOW_WRAP_BREAK_WORD = 1
+	/* We do not support 'anywhere'. */
+};
+
+enum { N_NUMBER='u', N_LENGTH='p', N_SCALE='m', N_PERCENT='%', N_AUTO='a', N_UNDEFINED='x' };
 
 struct fz_css_number_s
 {
@@ -223,6 +262,7 @@ struct fz_css_style_s
 	fz_css_number margin[4];
 	fz_css_number padding[4];
 	fz_css_number border_width[4];
+	fz_css_number border_spacing;
 	fz_css_number text_indent;
 	unsigned int visibility : 2;
 	unsigned int white_space : 3;
@@ -236,10 +276,13 @@ struct fz_css_style_s
 	unsigned int border_style_2 : 1;
 	unsigned int border_style_3 : 1;
 	unsigned int small_caps : 1;
+	unsigned int text_decoration: 2;
+	unsigned int overflow_wrap : 1;
 	/* Ensure the extra bits in the bitfield are copied
 	 * on structure copies. */
-	unsigned int blank : 6;
+	unsigned int blank : 3;
 	fz_css_number line_height;
+	fz_css_number leading;
 	fz_css_color background_color;
 	fz_css_color border_color[4];
 	fz_css_color color;
@@ -255,23 +298,121 @@ struct fz_css_style_splay_s {
 
 enum
 {
-	BOX_BLOCK,	/* block-level: contains block, break, flow, and table boxes */
-	BOX_FLOW,	/* block-level: contains only inline boxes */
-	BOX_INLINE,	/* inline-level: contains only inline boxes */
-	BOX_TABLE,	/* table: contains table-row */
-	BOX_TABLE_ROW,	/* table-row: contains table-cell */
-	BOX_TABLE_CELL,	/* table-cell: contains block */
+	BOX_BLOCK,		/* block-level: contains block, break, flow, and table boxes */
+	BOX_FLOW,		/* block-level: contains only inline boxes */
+	BOX_INLINE,		/* inline-level: contains only inline boxes */
+	BOX_TABLE,		/* table: contains table-row */
+	BOX_TABLE_ROW,		/* table-row: contains table-cell */
+	BOX_TABLE_CELL,		/* table-cell: contains block */
 };
 
-struct fz_html_s
+typedef struct
 {
 	fz_storable storable;
 	fz_pool *pool; /* pool allocator for this html tree */
+	fz_html_box *root;
+} fz_html_tree;
+
+struct fz_html_s
+{
+	/* fz_html is derived from fz_html_tree, so must start with that. */
+	/* Arguably 'tree' should be called 'super'. */
+	fz_html_tree tree;
+
 	float page_w, page_h;
 	float layout_w, layout_h, layout_em;
 	float page_margin[4];
-	fz_html_box *root;
 	char *title;
+};
+
+typedef enum
+{
+	FZ_HTML_RESTART_REASON_NONE = 0,
+	FZ_HTML_RESTART_REASON_LINE_HEIGHT = 1,
+	FZ_HTML_RESTART_REASON_LINE_WIDTH = 2
+} fz_html_restart_reason;
+
+enum
+{
+	FZ_HTML_RESTARTER_FLAGS_NO_OVERFLOW = 1
+};
+
+typedef struct {
+	/* start will be filled in on entry with the first node to start
+	 * operation on. NULL means start 'immediately'. As we traverse
+	 * the tree, once we reach the node to start on, we set this to
+	 * NULL, hence if 'start != NULL' then we are still skipping to
+	 * find the starting node. */
+	fz_html_box *start;
+
+	/* If start is a BOX_FLOW, then start_flow will be the flow entry
+	 * at which we should start. */
+	fz_html_flow *start_flow;
+
+
+	/* end should be NULL on entry. On exit, if it's NULL, then we
+	 * finished. Otherwise, this is where we should restart the
+	 * process the next time. */
+	fz_html_box *end;
+
+	/* If end is a BOX_FLOW, then end_flow will be the flow entry at which
+	 * we should restart next time. */
+	fz_html_flow *end_flow;
+
+
+	/* Workspace used on the traversal of the tree to store a good place
+	 * to restart. Typically this will be set to an enclosing box with
+	 * a border, so that if we then fail to put any content into the box
+	 * we'll elide the entire box/border, not output an empty one. */
+	fz_html_box *potential;
+
+	fz_html_restart_reason reason;
+
+	int flags;
+} fz_html_restarter;
+
+struct fz_story
+{
+	/* fz_story is derived from fz_html_tree, so must start with */
+	/* that. Argubly 'tree' should be called 'super'. */
+	fz_html_tree tree;
+
+	/* The user_css (or NULL) */
+	char *user_css;
+
+	/* The HTML story as XML nodes with a DOM */
+	fz_xml *dom;
+
+	/* The fontset for the content. */
+	fz_html_font_set *font_set;
+
+	/* restart_place holds the start position for the next place.
+	 * This is updated by draw. */
+	fz_html_restarter restart_place;
+
+	/* restart_draw holds the start position for the next draw.
+	 * This is updated by place. */
+	fz_html_restarter restart_draw;
+
+	/* complete is set true when all the story has been placed and
+	 * drawn. */
+	int complete;
+
+	/* The last bbox we laid out for. Used for making a clipping
+	 * rectangle. */
+	fz_rect bbox;
+
+	/* The default 'em' size. */
+	float em;
+
+	/* Collected parsing warnings. */
+	fz_buffer *warnings;
+
+	/* Rectangle layout count. */
+	int rect_count;
+
+	/* Archive from which to load any resources. */
+	fz_archive *zip;
 };
 
 struct fz_html_box_s
@@ -279,22 +420,41 @@ struct fz_html_box_s
 	unsigned int type : 3;
 	unsigned int is_first_flow : 1; /* for text-indent */
 	unsigned int markup_dir : 2;
-	unsigned int heading : 3; /* h1..h6 */
-	unsigned int list_item : 23;
-	float x, y, w, b; /* content */
-	float em;
-	/* During construction, 'next' plays double duty; as well
-	 * as its normal meaning of 'next sibling', the last sibling
-	 * has next meaning "the last of my children". We correct
-	 * this as a post-processing pass after construction. */
+	unsigned int heading : 3;
+	unsigned int list_item : 21;
+
 	fz_html_box *up, *down, *next;
-	fz_html_flow *flow_head, **flow_tail;
-	char *id, *href;
+
+	const char *tag, *id, *href;
 	const fz_css_style *style;
-	/* Only BOX_{BLOCK,TABLE,TABLE_ROW,TABLE_CELL} actually use the following */
-	float padding[4];
-	float margin[4];
-	float border[4];
+
+	union {
+		/* Only needed during build stage */
+		struct {
+			fz_html_box *last_child;
+			fz_html_flow **flow_tail;
+		} build;
+
+		/* Only needed during layout */
+		struct {
+			float x, y, w, b; /* content */
+			float em, baseline;
+		} layout;
+	} s;
+
+	union {
+		/* Only BOX_FLOW use the following */
+		struct {
+			fz_html_flow *head;
+		} flow;
+
+		/* Only BOX_{BLOCK,TABLE,TABLE_ROW,TABLE_CELL} use the following */
+		struct {
+			float margin[4]; // TODO: is margin needed post layout?
+			float border[4];
+			float padding[4];
+		} block;
+	} u;
 };
 
 static inline int
@@ -325,6 +485,12 @@ struct fz_html_flow_s
 	/* Whether this node is currently taken as a line break */
 	unsigned int breaks_line : 1;
 
+	/* Whether this word node can be split or consists of a single glyph cluster */
+	unsigned int atomic : 1;
+
+	/* Whether lines may be broken before this word for overflow-wrap: word-break */
+	unsigned int overflow_wrap : 1;
+
 	/* Direction setting for text - UAX#9 says 125 is the max */
 	unsigned int bidi_level : 7;
 
@@ -332,7 +498,7 @@ struct fz_html_flow_s
 	unsigned int script : 8;
 
 	/* Whether the markup specifies a given language. */
-	unsigned int markup_lang : 15;
+	unsigned short markup_lang;
 
 	float x, y, w, h;
 	fz_html_box *box; /* for style and em */
@@ -367,6 +533,7 @@ const fz_css_style *fz_css_enlist(fz_context *ctx, const fz_css_style *style, fz
 
 float fz_from_css_number(fz_css_number number, float em, float percent_value, float auto_value);
 float fz_from_css_number_scale(fz_css_number number, float scale);
+int fz_css_number_defined(fz_css_number number);
 
 fz_html_font_set *fz_new_html_font_set(fz_context *ctx);
 void fz_add_html_font_face(fz_context *ctx, fz_html_font_set *set,
@@ -374,11 +541,7 @@ void fz_add_html_font_face(fz_context *ctx, fz_html_font_set *set,
 fz_font *fz_load_html_font(fz_context *ctx, fz_html_font_set *set, const char *family, int is_bold, int is_italic, int is_small_caps);
 void fz_drop_html_font_set(fz_context *ctx, fz_html_font_set *htx);
 
-void fz_add_css_font_faces(fz_context *ctx, fz_html_font_set *set, fz_archive *zip, const char *base_uri, fz_css *css);
-
-fz_html *fz_parse_fb2(fz_context *ctx, fz_html_font_set *htx, fz_archive *zip, const char *base_uri, fz_buffer *buf, const char *user_css);
-fz_html *fz_parse_html5(fz_context *ctx, fz_html_font_set *htx, fz_archive *zip, const char *base_uri, fz_buffer *buf, const char *user_css);
-fz_html *fz_parse_xhtml(fz_context *ctx, fz_html_font_set *htx, fz_archive *zip, const char *base_uri, fz_buffer *buf, const char *user_css);
+void fz_add_css_font_faces(fz_context *ctx, fz_html_font_set *set, fz_archive *dir, const char *base_uri, fz_css *css);
 
 void fz_layout_html(fz_context *ctx, fz_html *html, float w, float h, float em);
 void fz_draw_html(fz_context *ctx, fz_device *dev, fz_matrix ctm, fz_html *html, int page);
@@ -395,5 +558,20 @@ void fz_debug_html(fz_context *ctx, fz_html_box *box);
 fz_html *fz_store_html(fz_context *ctx, fz_html *html, void *doc, int chapter);
 fz_html *fz_find_html(fz_context *ctx, void *doc, int chapter);
 void fz_purge_stored_html(fz_context *ctx, void *doc);
+
+void fz_restartable_layout_html(fz_context *ctx, fz_html_tree *tree, float start_x, float start_y, float page_w, float page_h, float em, fz_html_restarter *restart);
+
+fz_html_flow *fz_html_split_flow(fz_context *ctx, fz_pool *pool, fz_html_flow *flow, size_t offset);
+
+fz_archive *fz_extract_html_from_mobi(fz_context *ctx, fz_buffer *mobi);
+
+fz_structure fz_html_tag_to_structure(const char *tag);
+
+fz_html *fz_parse_html(fz_context *ctx,
+	fz_html_font_set *set, fz_archive *dir, const char *base_uri, fz_buffer *buf, const char *user_css,
+	int try_xml, int try_html5, int patch_mobi);
+
+fz_buffer *fz_txt_buffer_to_html(fz_context *ctx, fz_buffer *in);
+
 
 #endif

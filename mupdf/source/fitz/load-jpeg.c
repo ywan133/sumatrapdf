@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2023 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <math.h>
@@ -49,7 +71,7 @@ fz_jpg_mem_init(j_common_ptr cinfo, fz_context *ctx)
 				fz_jpg_mem_alloc, fz_jpg_mem_free, NULL))
 	{
 		fz_free(ctx, custmptr);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot initialize custom JPEG memory handler");
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot initialize custom JPEG memory handler");
 	}
 	cinfo->client_data = custmptr;
 }
@@ -67,13 +89,18 @@ fz_jpg_mem_term(j_common_ptr cinfo)
 
 #endif /* SHARE_JPEG */
 
+static void output_message(j_common_ptr cinfo)
+{
+	/* swallow message */
+}
+
 static void error_exit(j_common_ptr cinfo)
 {
 	char msg[JMSG_LENGTH_MAX];
 	fz_context *ctx = JZ_CTX_FROM_CINFO(cinfo);
 
 	cinfo->err->format_message(cinfo, msg);
-	fz_throw(ctx, FZ_ERROR_GENERIC, "jpeg error: %s", msg);
+	fz_throw(ctx, FZ_ERROR_LIBRARY, "jpeg error: %s", msg);
 }
 
 static void init_source(j_decompress_ptr cinfo)
@@ -187,7 +214,11 @@ static fz_colorspace *extract_icc_profile(fz_context *ctx, jpeg_saved_marker_ptr
 	fz_always(ctx)
 		fz_drop_buffer(ctx, buf);
 	fz_catch(ctx)
+	{
+		fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+		fz_report_error(ctx);
 		fz_warn(ctx, "ignoring embedded ICC profile in JPEG");
+	}
 
 	return colorspace;
 #else
@@ -323,6 +354,13 @@ static int extract_app13_resolution(jpeg_saved_marker_ptr marker, int *xres, int
 	return 0;
 }
 
+static void invert_cmyk(unsigned char *p, int n)
+{
+	int i;
+	for (i = 0; i < n; ++i)
+		p[i] = 255 - p[i];
+}
+
 fz_pixmap *
 fz_load_jpeg(fz_context *ctx, const unsigned char *rbuf, size_t rlen)
 {
@@ -345,6 +383,7 @@ fz_load_jpeg(fz_context *ctx, const unsigned char *rbuf, size_t rlen)
 	cinfo.mem = NULL;
 	cinfo.global_state = 0;
 	cinfo.err = jpeg_std_error(&err);
+	err.output_message = output_message;
 	err.error_exit = error_exit;
 
 	cinfo.client_data = NULL;
@@ -365,6 +404,7 @@ fz_load_jpeg(fz_context *ctx, const unsigned char *rbuf, size_t rlen)
 
 		jpeg_save_markers(&cinfo, JPEG_APP0+1, 0xffff);
 		jpeg_save_markers(&cinfo, JPEG_APP0+13, 0xffff);
+		jpeg_save_markers(&cinfo, JPEG_APP0+2, 0xffff);
 
 		jpeg_read_header(&cinfo, 1);
 
@@ -378,7 +418,7 @@ fz_load_jpeg(fz_context *ctx, const unsigned char *rbuf, size_t rlen)
 			colorspace = fz_keep_colorspace(ctx, fz_device_cmyk(ctx));
 		colorspace = extract_icc_profile(ctx, cinfo.marker_list, cinfo.output_components, colorspace);
 		if (!colorspace)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cannot determine colorspace");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "cannot determine colorspace");
 
 		image = fz_new_pixmap(ctx, colorspace, cinfo.output_width, cinfo.output_height, NULL, 0);
 
@@ -408,6 +448,11 @@ fz_load_jpeg(fz_context *ctx, const unsigned char *rbuf, size_t rlen)
 		while (cinfo.output_scanline < cinfo.output_height)
 		{
 			jpeg_read_scanlines(&cinfo, row, 1);
+
+			// Invert CMYK polarity for some CMYK images (see comment in filter-dct for details).
+			if (cinfo.out_color_space == JCS_CMYK && cinfo.Adobe_transform == 2)
+				invert_cmyk(row[0], image->stride);
+
 			sp = row[0];
 			for (x = 0; x < cinfo.output_width; x++)
 			{
@@ -497,7 +542,7 @@ fz_load_jpeg_info(fz_context *ctx, const unsigned char *rbuf, size_t rlen, int *
 			*cspacep = fz_keep_colorspace(ctx, fz_device_cmyk(ctx));
 		*cspacep = extract_icc_profile(ctx, cinfo.marker_list, cinfo.num_components, *cspacep);
 		if (!*cspacep)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cannot determine colorspace");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "cannot determine colorspace");
 
 		if (extract_exif_resolution(cinfo.marker_list, xresp, yresp, orientation))
 			/* XPS prefers EXIF resolution to JFIF density */;

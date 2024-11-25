@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 #include "utils/BaseUtil.h"
@@ -8,38 +8,41 @@
 #include "utils/FileUtil.h"
 #include "utils/GuessFileType.h"
 #include "utils/WinUtil.h"
-#include "utils/Log.h"
 
-#include "wingui/TreeModel.h"
+#include "wingui/UIModels.h"
 
-#include "Annotation.h"
+#include "DocProperties.h"
+#include "DocController.h"
 #include "EngineBase.h"
-#include "EnginePdf.h"
-#include "EnginePs.h"
+#include "EngineAll.h"
+
+#include "utils/Log.h"
 
 Kind kindEnginePostScript = "enginePostScript";
 
-static WCHAR* GetGhostscriptPath() {
-    const WCHAR* gsProducts[] = {
-        L"AFPL Ghostscript",
-        L"Aladdin Ghostscript",
-        L"GPL Ghostscript",
-        L"GNU Ghostscript",
+static TempStr GetGhostscriptPathTemp() {
+    const char* gsProducts[] = {
+        "AFPL Ghostscript",
+        "Aladdin Ghostscript",
+        "GPL Ghostscript",
+        "GNU Ghostscript",
     };
 
     // find all installed Ghostscript versions
-    WStrVec versions;
+    StrVec versions;
     REGSAM access = KEY_READ | KEY_WOW64_32KEY;
 TryAgain64Bit:
-    for (int i = 0; i < dimof(gsProducts); i++) {
+    for (const char* gsProd : gsProducts) {
         HKEY hkey;
-        AutoFreeWstr keyName(str::Join(L"Software\\", gsProducts[i]));
-        if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, keyName, 0, access, &hkey) != ERROR_SUCCESS) {
+        TempStr keyName = str::JoinTemp("Software\\", gsProd);
+        TempWStr keyNameW = ToWStrTemp(keyName);
+        if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, keyNameW, 0, access, &hkey) != ERROR_SUCCESS) {
             continue;
         }
         WCHAR subkey[32];
         for (DWORD ix = 0; RegEnumKey(hkey, ix, subkey, dimof(subkey)) == ERROR_SUCCESS; ix++) {
-            versions.Append(str::Dup(subkey));
+            TempStr ver = ToUtf8Temp(subkey);
+            versions.Append(ver);
         }
         RegCloseKey(hkey);
     }
@@ -52,65 +55,72 @@ TryAgain64Bit:
 #endif
             goto TryAgain64Bit;
     }
-    versions.SortNatural();
+    SortNatural(&versions);
 
     // return the path to the newest installation
-    for (size_t ix = versions.size(); ix > 0; ix--) {
-        for (int i = 0; i < dimof(gsProducts); i++) {
-            AutoFreeWstr keyName(str::Format(L"Software\\%s\\%s", gsProducts[i], versions.at(ix - 1)));
-            AutoFreeWstr GS_DLL(ReadRegStr(HKEY_LOCAL_MACHINE, keyName, L"GS_DLL"));
-            if (!GS_DLL) {
+    int nVers = versions.Size();
+    for (int i = nVers; i > 0; i--) {
+        for (const char* gsProd : gsProducts) {
+            char* ver = versions.At(i - 1);
+            TempStr keyName = str::FormatTemp("Software\\%s\\%s", gsProd, ver);
+            TempStr gsDLL = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, "GS_DLL");
+            if (!gsDLL) {
                 continue;
             }
-            AutoFreeWstr dir(path::GetDir(GS_DLL));
-            AutoFreeWstr exe(path::Join(dir, L"gswin32c.exe"));
+            TempStr dir = path::GetDirTemp(gsDLL);
+            TempStr exe = path::JoinTemp(dir, "gswin32c.exe");
             if (file::Exists(exe)) {
-                return exe.StealData();
+                return exe;
             }
-            exe.Set(path::Join(dir, L"gswin64c.exe"));
+            exe = path::JoinTemp(dir, "gswin64c.exe");
             if (file::Exists(exe)) {
-                return exe.StealData();
+                return exe;
             }
         }
     }
 
     // if Ghostscript isn't found in the Registry, try finding it in the %PATH%
-    DWORD size = GetEnvironmentVariable(L"PATH", nullptr, 0);
-    AutoFreeWstr envpath(AllocArray<WCHAR>(size));
+    DWORD size = GetEnvironmentVariableW(L"PATH", nullptr, 0);
+    TempWStr envpathW = AllocArrayTemp<WCHAR>(size + 1);
     if (size == 0) {
         return nullptr;
     }
-    GetEnvironmentVariable(L"PATH", envpath, size);
-    WStrVec paths;
-    paths.Split(envpath, L";", true);
-    for (size_t ix = 0; ix < paths.size(); ix++) {
-        AutoFreeWstr exe(path::Join(paths.at(ix), L"gswin32c.exe"));
-        if (file::Exists(exe)) {
-            return exe.StealData();
+    GetEnvironmentVariableW(L"PATH", envpathW, size);
+    TempStr envPath = ToUtf8Temp(envpathW);
+    StrVec paths;
+    Split(&paths, envPath, ";", true);
+    for (char* path : paths) {
+        TempStr exe = path::JoinTemp(path, "gswin32c.exe");
+        if (!file::Exists(exe)) {
+            exe = path::JoinTemp(path, "gswin64c.exe");
         }
-        exe.Set(path::Join(paths.at(ix), L"gswin64c.exe"));
-        if (file::Exists(exe)) {
-            return exe.StealData();
+        if (!file::Exists(exe)) {
+            continue;
         }
+        return exe;
     }
     return nullptr;
 }
 
-class ScopedFile {
-    AutoFreeWstr path;
+struct AutoDeleteFile {
+    AutoFreeStr filePath;
 
-  public:
-    explicit ScopedFile(const WCHAR* path) : path(str::Dup(path)) {
+    explicit AutoDeleteFile(const WCHAR* path) {
+        filePath.Set(ToUtf8(path));
     }
-    ~ScopedFile() {
-        if (path) {
-            file::Delete(path);
+    explicit AutoDeleteFile(const char* path) {
+        filePath.SetCopy(path);
+    }
+    ~AutoDeleteFile() {
+        if (filePath) {
+            file::Delete(filePath);
         }
     }
 };
 
+#if 0
 static Rect ExtractDSCPageSize(const WCHAR* path) {
-    char header[1024] = {0};
+    char header[1024]{};
     file::ReadN(path, header, sizeof(header) - 1);
     if (!str::StartsWith((char*)header, "%!PS-Adobe-")) {
         return {};
@@ -131,39 +141,40 @@ static Rect ExtractDSCPageSize(const WCHAR* path) {
 
     return {};
 }
+#endif
 
-static EngineBase* ps2pdf(const WCHAR* path) {
+static EngineBase* ps2pdf(const char* path) {
     // TODO: read from gswin32c's stdout instead of using a TEMP file
-    AutoFreeWstr shortPath(path::ShortPath(path));
-    AutoFreeWstr tmpFile(path::GetTempPath(L"PsE"));
-    ScopedFile tmpFileScope(tmpFile);
-    AutoFreeWstr gswin32c(GetGhostscriptPath());
+    TempStr shortPath = path::ShortPathTemp(path);
+    TempStr tmpFile = GetTempFilePathTemp("PsE");
+    AutoDeleteFile tmpFileScope(tmpFile);
+    TempStr gswin32c = GetGhostscriptPathTemp();
     if (!shortPath || !tmpFile || !gswin32c) {
         return nullptr;
     }
 
-    // try to help Ghostscript determine the intended page size
-    AutoFreeWstr psSetup;
-    Rect page = ExtractDSCPageSize(path);
-    if (!page.IsEmpty()) {
-        psSetup = str::Format(L" << /PageSize [%i %i] >> setpagedevice", page.dx, page.dy);
-    }
-
-    const WCHAR* psSetupStr = psSetup ? psSetup.Get() : L"";
-    AutoFreeWstr cmdLine = str::Format(
-        L"\"%s\" -q -dSAFER -dNOPAUSE -dBATCH -dEPSCrop -sOutputFile=\"%s\" -sDEVICE=pdfwrite -c "
-        L"\".setpdfwrite%s\" -f \"%s\"",
-        gswin32c.Get(), tmpFile.Get(), psSetupStr, shortPath.Get());
+    // TODO: before gs 9.54 we would call:
+    // Rect page = ExtractDSCPageSize(path);
+    // and use that to add "-c ".setpdfwrite << /PageSize [$dx $dy] >> setpagedevice"
+    // to cmd-line. In 9.54 .setpdfwrite was removed and using it causes
+    // conversion to fail
+    // So we removed use of -c .setpdfwrite completely. Not sure if there's an alternative
+    // way to do it
+    // https://github.com/GravityMedia/Ghostscript/issues/6
+    // https://github.com/sumatrapdfreader/sumatrapdf/issues/1923
+    TempStr cmdLine = str::FormatTemp(
+        "\"%s\" -q -dSAFER -dNOPAUSE -dBATCH -dEPSCrop -sOutputFile=\"%s\" -sDEVICE=pdfwrite "
+        "-f \"%s\"",
+        gswin32c, tmpFile, shortPath);
 
     {
-        const char* fileName = path::GetBaseNameNoFree(__FILE__);
-        AutoFree gswin = strconv::WstrToUtf8(gswin32c.Get());
-        AutoFree tmpFileName = strconv::WstrToUtf8(path::GetBaseNameNoFree(tmpFile));
-        logf("- %s:%d: using '%s' for creating '%%TEMP%%\\%s'\n", fileName, __LINE__, gswin.Get(), tmpFileName.Get());
+        TempStr fileName = path::GetBaseNameTemp(__FILE__);
+        TempStr tmpFileName = path::GetBaseNameTemp(tmpFile);
+        logf("- %s:%d: using '%s' for creating '%%TEMP%%\\%s'\n", fileName, __LINE__, gswin32c, tmpFileName);
     }
 
     // TODO: the PS-to-PDF conversion can hang the UI for several seconds
-    HANDLE process = LaunchProcess(cmdLine, nullptr, CREATE_NO_WINDOW);
+    HANDLE process = LaunchProcessInDir(cmdLine, nullptr, CREATE_NO_WINDOW);
     if (!process) {
         return nullptr;
     }
@@ -183,33 +194,37 @@ static EngineBase* ps2pdf(const WCHAR* path) {
         return nullptr;
     }
 
-    AutoFree pdfData = file::ReadFile(tmpFile);
+    ByteSlice pdfData = file::ReadFile(tmpFile);
     if (pdfData.empty()) {
         return nullptr;
     }
 
-    auto strm = CreateStreamFromData(pdfData.AsSpan());
+    IStream* strm = CreateStreamFromData(pdfData);
+    pdfData.Free();
     ScopedComPtr<IStream> stream(strm);
     if (!stream) {
         return nullptr;
     }
 
-    return CreateEnginePdfFromStream(stream);
+    TempStr nameHint = str::Join(path, ".pdf");
+    return CreateEngineMupdfFromStream(stream, nameHint);
 }
 
-static EngineBase* psgz2pdf(const WCHAR* fileName) {
-    AutoFreeWstr tmpFile(path::GetTempPath(L"PsE"));
-    ScopedFile tmpFileScope(tmpFile);
+static EngineBase* psgz2pdf(const char* fileName) {
+    TempStr tmpFile = GetTempFilePathTemp("PsE");
+    AutoDeleteFile tmpFileScope(tmpFile);
     if (!tmpFile) {
         return nullptr;
     }
 
-    gzFile inFile = gzopen_w(fileName, "rb");
+    WCHAR* path = ToWStrTemp(fileName);
+    gzFile inFile = gzopen_w(path, "rb");
     if (!inFile) {
         return nullptr;
     }
     FILE* outFile = nullptr;
-    errno_t err = _wfopen_s(&outFile, tmpFile, L"wb");
+    WCHAR* tmpFileW = ToWStrTemp(tmpFile);
+    errno_t err = _wfopen_s(&outFile, tmpFileW, L"wb");
     if (err != 0 || !outFile) {
         gzclose(inFile);
         return nullptr;
@@ -235,11 +250,13 @@ class EnginePs : public EngineBase {
   public:
     EnginePs() {
         kind = kindEnginePostScript;
-        defaultFileExt = L".ps";
+        defaultExt = str::Dup(".ps");
     }
 
-    virtual ~EnginePs() {
-        delete pdfEngine;
+    ~EnginePs() override {
+        if (pdfEngine) {
+            pdfEngine->Release();
+        }
     }
 
     EngineBase* Clone() override {
@@ -248,8 +265,8 @@ class EnginePs : public EngineBase {
             return nullptr;
         }
         EnginePs* clone = new EnginePs();
-        if (FileName()) {
-            clone->SetFileName(FileName());
+        if (FilePath()) {
+            clone->SetFilePath(FilePath());
         }
         clone->pdfEngine = newEngine;
         return clone;
@@ -271,21 +288,17 @@ class EnginePs : public EngineBase {
         return pdfEngine->Transform(rect, pageNo, zoom, rotation, inverse);
     }
 
-    std::span<u8> GetFileData() override {
-        const WCHAR* fileName = FileName();
-        return file::ReadFile(fileName);
+    ByteSlice GetFileData() override {
+        const char* path = FilePath();
+        return file::ReadFile(path);
     }
 
-    bool SaveFileAs(const char* copyFileName, [[maybe_unused]] bool includeUserAnnots = false) override {
-        if (!FileName()) {
+    bool SaveFileAs(const char* dstPath) override {
+        const char* srcPath = FilePath();
+        if (!srcPath) {
             return false;
         }
-        AutoFreeWstr dstPath = strconv::Utf8ToWstr(copyFileName);
-        return CopyFileW(FileName(), dstPath, FALSE);
-    }
-
-    bool SaveFileAsPDF(const char* pdfFileName, bool includeUserAnnots = false) override {
-        return pdfEngine->SaveFileAs(pdfFileName, includeUserAnnots);
+        return file::Copy(dstPath, srcPath, false);
     }
 
     PageText ExtractPageText(int pageNo) override {
@@ -296,29 +309,41 @@ class EnginePs : public EngineBase {
         return pdfEngine->HasClipOptimizations(pageNo);
     }
 
-    WCHAR* GetProperty(DocumentProperty prop) override {
+    TempStr GetPropertyTemp(const char* name) override {
         // omit properties created by Ghostscript
-        if (!pdfEngine || DocumentProperty::CreationDate == prop || DocumentProperty::ModificationDate == prop ||
-            DocumentProperty::PdfVersion == prop || DocumentProperty::PdfProducer == prop ||
-            DocumentProperty::PdfFileStructure == prop) {
+        if (!pdfEngine) {
             return nullptr;
         }
-        return pdfEngine->GetProperty(prop);
+        static const char* toOmit[] = {kPropCreationDate, kPropModificationDate, kPropPdfVersion,
+                                       kPropPdfProducer,  kPropPdfFileStructure, nullptr};
+
+        for (const char** ptr = toOmit; *ptr; ptr++) {
+            const char* s = *ptr;
+            if (str::Eq(s, name)) {
+                return nullptr;
+            }
+        }
+        return pdfEngine->GetPropertyTemp(name);
     }
 
     bool BenchLoadPage(int pageNo) override {
         return pdfEngine->BenchLoadPage(pageNo);
     }
 
-    Vec<IPageElement*>* GetElements(int pageNo) override {
+    Vec<IPageElement*> GetElements(int pageNo) override {
         return pdfEngine->GetElements(pageNo);
     }
 
+    // don't delete the result
     IPageElement* GetElementAtPos(int pageNo, PointF pt) override {
         return pdfEngine->GetElementAtPos(pageNo, pt);
     }
 
-    PageDestination* GetNamedDest(const WCHAR* name) override {
+    bool HandleLink(IPageDestination* dest, ILinkHandler* lh) override {
+        return pdfEngine->HandleLink(dest, lh);
+    }
+
+    IPageDestination* GetNamedDest(const char* name) override {
         return pdfEngine->GetNamedDest(name);
     }
 
@@ -326,30 +351,28 @@ class EnginePs : public EngineBase {
         return pdfEngine->GetToc();
     }
 
-    static EngineBase* CreateFromFile(const WCHAR* fileName);
-
-  protected:
     EngineBase* pdfEngine = nullptr;
 
-    bool Load(const WCHAR* fileName) {
+    bool Load(const char* fileName) {
         pageCount = 0;
-        CrashIf(FileName() || pdfEngine);
+        ReportIf(FilePath() || pdfEngine);
         if (!fileName) {
             return false;
         }
-        SetFileName(fileName);
+
+        SetFilePath(fileName);
         if (file::StartsWith(fileName, "\x1F\x8B")) {
             pdfEngine = psgz2pdf(fileName);
         } else {
             pdfEngine = ps2pdf(fileName);
         }
 
-        if (str::EndsWithI(FileName(), L".eps")) {
-            defaultFileExt = L".eps";
-        }
-
         if (!pdfEngine) {
             return false;
+        }
+
+        if (str::EndsWithI(FilePath(), ".eps")) {
+            defaultExt = str::Dup(".eps");
         }
 
         preferredLayout = pdfEngine->preferredLayout;
@@ -363,27 +386,23 @@ class EnginePs : public EngineBase {
     }
 };
 
-EngineBase* EnginePs::CreateFromFile(const WCHAR* fileName) {
+EngineBase* CreateEnginePsFromFile(const char* fileName) {
     EnginePs* engine = new EnginePs();
     if (!engine->Load(fileName)) {
-        delete engine;
+        SafeEngineRelease(&engine);
         return nullptr;
     }
     return engine;
 }
 
-bool IsPsEngineAvailable() {
-    AutoFreeWstr gswin32c(GetGhostscriptPath());
-    return gswin32c.Get() != nullptr;
+bool IsEnginePsAvailable() {
+    TempStr gswin32c = GetGhostscriptPathTemp();
+    return gswin32c != nullptr;
 }
 
-bool IsPsEngineSupportedFileType(Kind kind) {
-    if (!IsPsEngineAvailable()) {
+bool IsEnginePsSupportedFileType(Kind kind) {
+    if (!IsEnginePsAvailable()) {
         return false;
     }
     return kind == kindFilePS;
-}
-
-EngineBase* CreatePsEngineFromFile(const WCHAR* fileName) {
-    return EnginePs::CreateFromFile(fileName);
 }

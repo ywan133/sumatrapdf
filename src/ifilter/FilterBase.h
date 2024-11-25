@@ -14,16 +14,16 @@
 #include <filter.h>
 #include <filterr.h>
 
-class CChunkValue
+class ChunkValue
 {
 public:
-    CChunkValue() : m_fIsValid(false), m_pszValue(nullptr)
+    ChunkValue() : m_fIsValid(false), m_pszValue(nullptr)
     {
         PropVariantInit(&m_propVariant);
         Clear();
     }
 
-    ~CChunkValue() { Clear(); };
+    ~ChunkValue() { Clear(); };
 
     void Clear()
     {
@@ -126,7 +126,7 @@ private:
 
 };
 
-inline HRESULT CChunkValue::SetChunk(REFPROPERTYKEY pkey,
+inline HRESULT ChunkValue::SetChunk(REFPROPERTYKEY pkey,
                                      CHUNKSTATE chunkType/*=CHUNK_VALUE*/,
                                      LCID locale /*=0*/,
                                      DWORD cwcLenSource /*=0*/,
@@ -147,7 +147,7 @@ inline HRESULT CChunkValue::SetChunk(REFPROPERTYKEY pkey,
     return S_OK;
 }
 
-class CFilterBase : public IFilter, public IInitializeWithStream, public IPersistStream, public IPersistFile
+class FilterBase : public IFilter, public IInitializeWithStream, public IPersistStream, public IPersistFile
 {
 public:
     // OnInit() is called when the IFilter is initialized (at the end of IFilter::Init)
@@ -156,18 +156,18 @@ public:
     // When GetNextChunkValue() is called you should fill in the ChunkValue by calling SetXXXValue() with the property.
     // example:  chunkValue.SetTextValue(PKYE_ItemName, L"foo bar");
     // return FILTER_E_END_OF_CHUNKS when there are no more chunks
-    virtual HRESULT GetNextChunkValue(CChunkValue &chunkValue) = 0;
+    virtual HRESULT GetNextChunkValue(ChunkValue &chunkValue) = 0;
 
 protected:
     inline DWORD GetChunkId() const { return m_dwChunkId; }
 
 public:
-    CFilterBase(long *plRefCount) : m_lRef(1), m_plModuleRef(plRefCount),
+    FilterBase(long *plRefCount) : m_lRef(1), m_plModuleRef(plRefCount),
         m_dwChunkId(0), m_iText(0), m_pStream(nullptr) {
         InterlockedIncrement(m_plModuleRef);
     }
 
-    virtual ~CFilterBase() {
+    virtual ~FilterBase() {
         if (m_pStream)
             m_pStream->Release();
         InterlockedDecrement(m_plModuleRef);
@@ -176,11 +176,11 @@ public:
     // IUnknown
     IFACEMETHODIMP QueryInterface(REFIID riid, void **ppv) {
         static const QITAB qit[] = {
-            QITABENT(CFilterBase, IPersistStream),
-            QITABENT(CFilterBase, IPersistFile),
-            QITABENTMULTI(CFilterBase, IPersist, IPersistStream),
-            QITABENT(CFilterBase, IInitializeWithStream),
-            QITABENT(CFilterBase, IFilter),
+            QITABENT(FilterBase, IPersistStream),
+            QITABENT(FilterBase, IPersistFile),
+            QITABENTMULTI(FilterBase, IPersist, IPersistStream),
+            QITABENT(FilterBase, IInitializeWithStream),
+            QITABENT(FilterBase, IFilter),
             { 0 }
         };
         return QISearch(this, qit, riid, ppv);
@@ -196,7 +196,7 @@ public:
     }
 
     // IFilter
-    IFACEMETHODIMP Init([[maybe_unused]] ULONG grfFlags, ULONG cAttributes, const FULLPROPSPEC *aAttributes, ULONG *pFlags) {
+    IFACEMETHODIMP Init(__unused ULONG grfFlags, ULONG cAttributes, const FULLPROPSPEC *aAttributes, ULONG *pFlags) {
         if (cAttributes > 0 && !aAttributes)
             return E_INVALIDARG;
 
@@ -271,7 +271,7 @@ public:
     IFACEMETHODIMP BindRegion(FILTERREGION, REFIID, void **) { return E_NOTIMPL; }
 
     // IInitializeWithStream
-    IFACEMETHODIMP Initialize(IStream *pStm, [[maybe_unused]] DWORD grfMode) {
+    IFACEMETHODIMP Initialize(IStream *pStm, __unused DWORD grfMode) {
         if (m_pStream)
             m_pStream->Release();
         m_pStream = pStm;
@@ -284,11 +284,11 @@ public:
     // IPersistStream
     IFACEMETHODIMP IsDirty() { return E_NOTIMPL; }
     IFACEMETHODIMP Load(IStream *pStm) { return Initialize(pStm, 0); }
-    IFACEMETHODIMP Save([[maybe_unused]] IStream *pStm, [[maybe_unused]] BOOL fClearDirty) { return E_NOTIMPL; }
-    IFACEMETHODIMP GetSizeMax([[maybe_unused]] ULARGE_INTEGER *pcbSize) { return E_NOTIMPL; }
+    IFACEMETHODIMP Save(__unused IStream *pStm, __unused BOOL fClearDirty) { return E_NOTIMPL; }
+    IFACEMETHODIMP GetSizeMax(__unused ULARGE_INTEGER *pcbSize) { return E_NOTIMPL; }
 
     // IPersistFile (for compatibility with older Windows Desktop Search versions and ifilttst.exe)
-    IFACEMETHODIMP Load(LPCOLESTR pszFileName, [[maybe_unused]] DWORD dwMode) {
+    IFACEMETHODIMP Load(LPCOLESTR pszFileName, __unused DWORD dwMode) {
         HANDLE hFile = CreateFileW(pszFileName, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hFile == INVALID_HANDLE_VALUE)
             return E_INVALIDARG;
@@ -311,9 +311,9 @@ public:
         pStm->Release();
         return res;
     }
-    IFACEMETHODIMP Save([[maybe_unused]] LPCOLESTR pszFileName, [[maybe_unused]] BOOL bRemember) { return E_NOTIMPL; }
-    IFACEMETHODIMP SaveCompleted([[maybe_unused]] LPCOLESTR pszFileName) { return E_NOTIMPL; }
-    IFACEMETHODIMP GetCurFile([[maybe_unused]] LPOLESTR *ppszFileName) { return E_NOTIMPL; }
+    IFACEMETHODIMP Save(__unused LPCOLESTR pszFileName, __unused BOOL bRemember) { return E_NOTIMPL; }
+    IFACEMETHODIMP SaveCompleted(__unused LPCOLESTR pszFileName) { return E_NOTIMPL; }
+    IFACEMETHODIMP GetCurFile(__unused LPOLESTR *ppszFileName) { return E_NOTIMPL; }
 
 protected:
     IStream*                    m_pStream;
@@ -324,7 +324,7 @@ private:
     DWORD                       m_dwChunkId;
     DWORD                       m_iText;
 
-    CChunkValue                 m_currentChunk;
+    ChunkValue                 m_currentChunk;
 };
 
 #endif

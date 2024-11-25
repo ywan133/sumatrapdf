@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 
@@ -115,11 +137,7 @@ fz_xmltext_text(fz_context *ctx, fz_device *dev_, const fz_text *text, fz_matrix
 		for (i=0; i<span->len; ++i)
 		{
 			fz_text_item *item = &span->items[i];
-			float adv = 0;
-			if (span->items[i].gid >= 0)
-			{
-				adv = fz_advance_glyph(ctx, span->font, span->items[i].gid, span->wmode);
-			}
+
 			s_xml_starttag_begin(ctx, dev->out, "char");
 			s_write_attribute_float(ctx, dev->out, "x", item->x);
 			s_write_attribute_float(ctx, dev->out, "y", item->y);
@@ -134,7 +152,7 @@ fz_xmltext_text(fz_context *ctx, fz_device *dev_, const fz_text *text, fz_matrix
 				(item->ucs >= 32 && item->ucs < 128 && item->ucs != '"')
 					? item->ucs : ' '
 				);
-			s_write_attribute_float(ctx, dev->out, "adv", adv);
+			s_write_attribute_float(ctx, dev->out, "adv", span->items[i].adv);
 			s_xml_starttag_empty_end(ctx, dev->out);
 		}
 
@@ -255,6 +273,8 @@ static void fz_xmltext_fill_image(fz_context *ctx, fz_device *dev_, fz_image *im
 				type = "jpeg";
 				s_write_attribute_string(ctx, dev->out, "type", type);
 				s_write_attribute_int(ctx, dev->out, "color_transform", compressed->params.u.jpeg.color_transform);
+				if (compressed->params.u.jpeg.invert_cmyk)
+					s_write_attribute_int(ctx, dev->out, "invert_cmyk", 1);
 			}
 			else if (compressed->params.type == FZ_IMAGE_JPX)
 			{
@@ -357,7 +377,6 @@ static void fz_xmltext_fill_image(fz_context *ctx, fz_device *dev_, fz_image *im
 
 fz_device *fz_new_xmltext_device(fz_context *ctx, fz_output *out)
 {
-	static int page_number = 0;
 	fz_xmltext_device *dev = fz_new_derived_device(ctx, fz_xmltext_device);
 
 	dev->super.close_device = fz_stext_close_device;
@@ -370,7 +389,6 @@ fz_device *fz_new_xmltext_device(fz_context *ctx, fz_output *out)
 	dev->super.fill_image = fz_xmltext_fill_image;
 
 	dev->out = out;
-	page_number += 1;
 
 	return (fz_device*)dev;
 }

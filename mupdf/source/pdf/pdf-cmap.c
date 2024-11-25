@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
@@ -485,9 +507,6 @@ add_range(fz_context *ctx, pdf_cmap *cmap, unsigned int low, unsigned int high, 
 {
 	int current;
 	cmap_splay *tree;
-	int i;
-	int inrange = 0;
-	unsigned int k, count;
 
 	if (low > high)
 	{
@@ -495,20 +514,10 @@ add_range(fz_context *ctx, pdf_cmap *cmap, unsigned int low, unsigned int high, 
 		return;
 	}
 
-	count = high - low + 1;
-	for (k = 0; k < count; k++) {
-		unsigned int c = low + k;
-
-		inrange = 0;
-		for (i = 0; i < cmap->codespace_len; i++) {
-			if (cmap->codespace[i].low <= c && c <= cmap->codespace[i].high)
-				inrange = 1;
-		}
-		if (!inrange)
-		{
-			fz_warn(ctx, "ignoring CMap range (%u-%u) that is outside of the codespace", low, high);
-			return;
-		}
+	if (cmap->codespace_len == 0)
+	{
+		fz_warn(ctx, "CMap is missing codespace range");
+		pdf_add_codespace(ctx, cmap, 0, 65535, 2);
 	}
 
 	tree = cmap->tree;
@@ -690,20 +699,46 @@ pdf_map_range_to_range(fz_context *ctx, pdf_cmap *cmap, unsigned int low, unsign
 void
 pdf_map_one_to_many(fz_context *ctx, pdf_cmap *cmap, unsigned int low, int *values, size_t len)
 {
-	if (len == 1)
-	{
-		add_range(ctx, cmap, low, low, values[0], 1, 0);
-		return;
-	}
+	int *ovalues = values;
+	/* len is always restricted to <= 256 by the callers. */
+	int local[256];
+
+	assert(len <= 256);
 
 	/* Decode unicode surrogate pairs. */
 	/* Only the *-UCS2 CMaps use one-to-many mappings, so assuming unicode should be safe. */
-	if (len == 2 &&
-		values[0] >= 0xD800 && values[0] <= 0xDBFF &&
-		values[1] >= 0xDC00 && values[1] <= 0xDFFF)
+	if (len >= 2)
 	{
-		int rune = ((values[0] - 0xD800) << 10) + (values[1] - 0xDC00) + 0x10000;
-		add_range(ctx, cmap, low, low, rune, 1, 0);
+		size_t i, j;
+		/* Look for mranges with either multiple surrogate pairs in, or surrogate pairs
+		 * with other chars. See bug 706131. */
+		for (i = 0, j = 0; i < len; i++, j++)
+		{
+			int hi = ovalues[i];
+			if (hi >= 0xd800 && hi < 0xdc00 && i < len-1)
+			{
+				int lo = ovalues[i+1];
+				if (lo >= 0xdc00 && lo < 0xe000)
+				{
+					hi = ((hi - 0xD800) << 10) + (lo - 0xDC00) + 0x10000;
+					i++;
+				}
+			}
+			if (values != local)
+			{
+				/* We can't change the callers data, so copy stuff in. */
+				if (j)
+					memcpy(local, values, sizeof(local[0]) * (j-1));
+				values = local;
+			}
+			values[j] = hi;
+		}
+		len = j;
+	}
+
+	if (len == 1)
+	{
+		add_range(ctx, cmap, low, low, values[0], 1, 0);
 		return;
 	}
 

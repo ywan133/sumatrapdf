@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include "context-imp.h"
@@ -126,8 +148,19 @@ fz_drop_context(fz_context *ctx)
 	if (!ctx)
 		return;
 
+	if (ctx->error.errcode)
+	{
+		fz_flush_warnings(ctx);
+		fz_warn(ctx, "UNHANDLED EXCEPTION!");
+		fz_report_error(ctx);
+#ifdef CLUSTER
+		abort();
+#endif
+	}
+
 	/* Other finalisation calls go here (in reverse order) */
 	fz_drop_document_handler_context(ctx);
+	fz_drop_archive_handler_context(ctx);
 	fz_drop_glyph_cache_context(ctx);
 	fz_drop_store_context(ctx);
 	fz_drop_style_context(ctx);
@@ -137,7 +170,7 @@ fz_drop_context(fz_context *ctx)
 
 	fz_flush_warnings(ctx);
 
-	assert(ctx->error.top == ctx->error.stack);
+	assert(ctx->error.top == ctx->error.stack_base);
 
 	/* Free the context itself */
 	ctx->alloc.free(ctx->alloc.user, ctx);
@@ -146,7 +179,9 @@ fz_drop_context(fz_context *ctx)
 static void
 fz_init_error_context(fz_context *ctx)
 {
-	ctx->error.top = ctx->error.stack;
+#define ALIGN(addr, align)  ((((intptr_t)(addr)) + (align-1)) & ~(align-1))
+	ctx->error.stack_base = (fz_error_stack_slot *)ALIGN(ctx->error.stack, FZ_JMPBUF_ALIGN);
+	ctx->error.top = ctx->error.stack_base;
 	ctx->error.errcode = FZ_ERROR_NONE;
 	ctx->error.message[0] = 0;
 
@@ -198,11 +233,13 @@ fz_new_context_imp(const fz_alloc_context *alloc, const fz_locks_context *locks,
 		fz_new_colorspace_context(ctx);
 		fz_new_font_context(ctx);
 		fz_new_document_handler_context(ctx);
+		fz_new_archive_handler_context(ctx);
 		fz_new_style_context(ctx);
 		fz_new_tuning_context(ctx);
 	}
 	fz_catch(ctx)
 	{
+		fz_report_error(ctx);
 		fprintf(stderr, "cannot create context (phase 2)\n");
 		fz_drop_context(ctx);
 		return NULL;
@@ -232,6 +269,7 @@ fz_clone_context(fz_context *ctx)
 
 	/* Then keep lock checking happy by keeping shared contexts with new context */
 	fz_keep_document_handler_context(new_ctx);
+	fz_keep_archive_handler_context(new_ctx);
 	fz_keep_style_context(new_ctx);
 	fz_keep_tuning_context(new_ctx);
 	fz_keep_font_context(new_ctx);

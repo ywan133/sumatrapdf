@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "gl-app.h"
 
 #include <string.h>
@@ -11,10 +33,6 @@
 #define ICON_DOCUMENT 0x1f4c4
 #define ICON_DISK 0x1f4be
 #define ICON_PIN 0x1f4cc
-
-#ifndef PATH_MAX
-#define PATH_MAX 4096
-#endif
 
 struct entry
 {
@@ -302,7 +320,7 @@ void ui_init_open_file(const char *dir, int (*filter)(const char *fn))
 	load_dir(dir);
 }
 
-int ui_open_file(char filename[PATH_MAX], const char *label)
+int ui_open_file(char *filename, const char *label)
 {
 	static int last_click_time = 0;
 	static int last_click_sel = -1;
@@ -456,7 +474,7 @@ static int ui_save_file_confirm(char *filename)
 	return rv;
 }
 
-int ui_save_file(char filename[PATH_MAX], void (*extra_panel)(void), const char *label)
+int ui_save_file(char *filename, void (*extra_panel)(void), const char *label)
 {
 	int i, rv = 0;
 

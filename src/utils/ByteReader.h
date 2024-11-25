@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 struct ByteReader {
@@ -9,8 +9,7 @@ struct ByteReader {
     // e.g. the format "32b2w6d" unpacks 32 Bytes, 2 16-bit Words and 6 32-bit Dwords
     bool Unpack(void* strct, size_t size, const char* format, size_t off, bool isBE) const;
 
-    ByteReader(std::string_view data);
-    ByteReader(std::span<u8> data);
+    explicit ByteReader(const ByteSlice&);
     ByteReader(const char* data, size_t len);
     ByteReader(const u8* data, size_t len);
 

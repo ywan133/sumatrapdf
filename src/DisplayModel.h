@@ -1,8 +1,13 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 // define the following if you want shadows drawn around the pages
 // #define DRAW_PAGE_SHADOWS
+
+constexpr int kInvalidPageNo = -1;
+
+struct Annotation;
+enum class AnnotationType;
 
 /* Describes many attributes of one page in one, convenient place */
 struct PageInfo {
@@ -11,10 +16,6 @@ struct PageInfo {
 
     /* data that is calculated when needed. actual content size within a page (View target) */
     RectF contentBox{};
-
-    /* data that needs to be set before DisplayModel::Relayout().
-       Determines whether a given page should be shown on the screen. */
-    bool shown = false;
 
     /* data that changes when zoom and rotation changes */
     /* position and size within total area after applying zoom and rotation.
@@ -27,26 +28,31 @@ struct PageInfo {
     /* position of page relative to visible view port: pos.Offset(-viewPort.x, -viewPort.y) */
     Rect pageOnScreen{};
 
-    // when zoomVirtual in DisplayMode is ZOOM_FIT_PAGE, ZOOM_FIT_WIDTH
-    // or ZOOM_FIT_CONTENT, this is per-page zoom level
+    // when zoomVirtual in DisplayMode is kZoomFitPage, kZoomFitWidth
+    // or kZoomFitContent, this is per-page zoom level
     float zoomReal;
+
+    /* data that needs to be set before DisplayModel::Relayout().
+       Determines whether a given page should be shown on the screen. */
+    bool shown = false;
 };
 
 /* The current scroll state (needed for saving/restoring the scroll position) */
 /* coordinates are in user space units (per page) */
 struct ScrollState {
     ScrollState() = default;
-    explicit ScrollState(int page, double x, double y);
+    ~ScrollState() = default;
+    ScrollState(int page, double x, double y);
     bool operator==(const ScrollState& other) const;
 
-    int page = 0;
     double x = 0;
     double y = 0;
+    int page = 0;
 };
 
 struct DocumentTextCache;
 struct TextSelection;
-class TextSearch;
+struct TextSearch;
 struct TextSel;
 class Synchronizer;
 
@@ -58,18 +64,18 @@ class Synchronizer;
    You can think of it as a model in the MVC pardigm.
    All the display changes should be done through changing this model via
    API and re-displaying things based on new display information */
-struct DisplayModel : public Controller {
-    DisplayModel(EngineBase* engine, ControllerCallback* cb);
+struct DisplayModel : DocController {
+    DisplayModel(EngineBase* engine, DocControllerCallback* cb);
     DisplayModel(DisplayModel const&) = delete;
     DisplayModel& operator=(DisplayModel const&) = delete;
 
-    ~DisplayModel();
+    ~DisplayModel() override;
 
     // meta data
-    const WCHAR* FilePath() const override;
-    const WCHAR* DefaultFileExt() const override;
+    const char* GetFilePath() const override;
+    const char* GetDefaultFileExt() const override;
     int PageCount() const override;
-    WCHAR* GetProperty(DocumentProperty prop) override;
+    TempStr GetPropertyTemp(const char* name) override;
 
     // page navigation (stateful)
     int CurrentPageNo() const override;
@@ -80,7 +86,7 @@ struct DisplayModel : public Controller {
     // view settings
     void SetDisplayMode(DisplayMode mode, bool keepContinuous = false) override;
     DisplayMode GetDisplayMode() const override;
-    void SetPresentationMode(bool enable) override;
+    void SetInPresentation(bool enable) override;
     void SetZoomVirtual(float zoom, Point* fixPt) override;
     float GetZoomVirtual(bool absolute = false) const override;
     float GetNextZoomStep(float towards) const override;
@@ -88,17 +94,18 @@ struct DisplayModel : public Controller {
 
     // table of contents
     TocTree* GetToc() override;
-    void ScrollToLink(PageDestination* dest) override;
-    PageDestination* GetNamedDest(const WCHAR* name) override;
+    void ScrollTo(int pageNo, RectF rect, float zoom) override;
+    bool HandleLink(IPageDestination*, ILinkHandler*) override;
+    IPageDestination* GetNamedDest(const char* name) override;
 
-    void GetDisplayState(DisplayState* ds) override;
+    void GetDisplayState(FileState* ds) override;
     // asynchronously calls saveThumbnail (fails silently)
-    void CreateThumbnail(Size size, const onBitmapRenderedCb& saveThumbnail) override;
+    void CreateThumbnail(Size size, const OnBitmapRendered* saveThumbnail) override;
 
     // page labels (optional)
     bool HasPageLabels() const override;
-    WCHAR* GetPageLabel(int pageNo) const override;
-    int GetPageByLabel(const WCHAR* label) const override;
+    TempStr GetPageLabeTemp(int pageNo) const override;
+    int GetPageByLabel(const char* label) const override;
 
     // common shortcuts
     bool ValidPageNo(int pageNo) const override;
@@ -115,15 +122,15 @@ struct DisplayModel : public Controller {
     EngineBase* GetEngine() const;
     Kind GetEngineType() const;
 
-    // controller-specific data (easier to save here than on WindowInfo)
-    Kind engineType{nullptr};
+    // controller-specific data (easier to save here than on MainWindow)
+    Kind engineType = nullptr;
 
-    Synchronizer* pdfSync{nullptr};
+    Synchronizer* pdfSync = nullptr;
 
-    DocumentTextCache* textCache{nullptr};
-    TextSelection* textSelection{nullptr};
+    DocumentTextCache* textCache = nullptr;
+    TextSelection* textSelection = nullptr;
     // access only from Search thread
-    TextSearch* textSearch{nullptr};
+    TextSearch* textSearch = nullptr;
 
     PageInfo* GetPageInfo(int pageNo) const;
 
@@ -137,6 +144,10 @@ struct DisplayModel : public Controller {
     bool IsVScrollbarVisible() const;
     bool NeedHScroll() const;
     bool NeedVScroll() const;
+    bool CanScrollRight() const;
+    ;
+    bool CanScrollLeft() const;
+    ;
     Size GetCanvasSize() const;
 
     bool PageShown(int pageNo) const;
@@ -150,26 +161,30 @@ struct DisplayModel : public Controller {
     void ScrollXBy(int dx);
     void ScrollYTo(int yOff);
     void ScrollYBy(int dy, bool changePage);
+
+    int yOffset();
+
     /* a "virtual" zoom level. Can be either a real zoom level in percent
-       (i.e. 100.0 is original size) or one of virtual values ZOOM_FIT_PAGE,
-       ZOOM_FIT_WIDTH or ZOOM_FIT_CONTENT, whose real value depends on draw area size */
+       (i.e. 100.0 is original size) or one of virtual values kZoomFitPage,
+       kZoomFitWidth or kZoomFitContent, whose real value depends on draw area size */
     void RotateBy(int rotation);
 
-    WCHAR* GetTextInRegion(int pageNo, RectF region);
+    char* GetTextInRegion(int pageNo, RectF region) const;
     bool IsOverText(Point pt);
-    IPageElement* GetElementAtPos(Point pt);
-    Annotation* GetAnnotationAtPos(Point pt, AnnotationType* allowedAnnots);
+    IPageElement* GetElementAtPos(Point pt, int* pageNoOut);
+    Annotation* GetAnnotationAtPos(Point pt, Annotation*);
 
-    int GetPageNoByPoint(Point pt);
+    int GetPageNoByPoint(Point pt) const;
     Point CvtToScreen(int pageNo, PointF pt);
     Rect CvtToScreen(int pageNo, RectF r);
-    PointF CvtFromScreen(Point pt, int pageNo = INVALID_PAGE_NO);
-    RectF CvtFromScreen(Rect r, int pageNo = INVALID_PAGE_NO);
+    PointF CvtFromScreen(Point pt, int pageNo = kInvalidPageNo);
+    RectF CvtFromScreen(Rect r, int pageNo = kInvalidPageNo);
 
     bool ShowResultRectToScreen(TextSel* res);
+    bool ScrollScreenToRect(int pageNo, Rect rec);
 
     ScrollState GetScrollState();
-    void SetScrollState(ScrollState state);
+    void SetScrollState(const ScrollState& state);
 
     void CopyNavHistory(DisplayModel& orig);
 
@@ -177,39 +192,36 @@ struct DisplayModel : public Controller {
     void SetDisplayR2L(bool r2l);
     bool GetDisplayR2L() const;
 
-    bool ShouldCacheRendering(int pageNo);
+    bool ShouldCacheRendering(int pageNo) const;
     // called when we decide that the display needs to be redrawn
     void RepaintDisplay();
 
-    /* allow resizing a window without triggering a new rendering (needed for window destruction) */
-    bool dontRenderFlag = false;
-
-    bool GetPresentationMode() const;
+    bool InPresentation() const;
 
     void BuildPagesInfo();
     float ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) const;
     SizeF PageSizeAfterRotation(int pageNo, bool fitToContent = false) const;
     void ChangeStartPage(int startPage);
-    Point GetContentStart(int pageNo);
-    void RecalcVisibleParts();
+    Point GetContentStart(int pageNo) const;
+    void RecalcVisibleParts() const;
     void RenderVisibleParts();
     void AddNavPoint();
-    RectF GetContentBox(int pageNo);
+    RectF GetContentBox(int pageNo) const;
     void CalcZoomReal(float zoomVirtual);
     void GoToPage(int pageNo, int scrollY, bool addNavPt = false, int scrollX = -1);
     bool GoToPrevPage(int scrollY);
-    int GetPageNextToPoint(Point pt);
+    int GetPageNextToPoint(Point pt) const;
 
-    EngineBase* engine{nullptr};
+    EngineBase* engine = nullptr;
 
     /* an array of PageInfo, len of array is pageCount */
-    PageInfo* pagesInfo{nullptr};
+    PageInfo* pagesInfo = nullptr;
 
     DisplayMode displayMode{DisplayMode::Automatic};
     /* In non-continuous mode is the first page from a file that we're
        displaying.
        No meaning in continuous mode. */
-    int startPage{1};
+    int startPage = 1;
 
     /* size of virtual canvas containing all rendered pages. */
     Size canvasSize;
@@ -225,26 +237,30 @@ struct DisplayModel : public Controller {
 
     /* real zoom value calculated from zoomVirtual. Same as
        zoomVirtual * 0.01 * dpiFactor
-       except for ZOOM_FIT_PAGE, ZOOM_FIT_WIDTH and ZOOM_FIT_CONTENT */
-    float zoomReal{INVALID_ZOOM};
-    float zoomVirtual{INVALID_ZOOM};
-    int rotation{0};
+       except for kZoomFitPage, kZoomFitWidth and kZoomFitContent */
+    float zoomReal{kInvalidZoom};
+    float zoomVirtual{kInvalidZoom};
+    int rotation = {0};
     /* dpi correction factor by which _zoomVirtual has to be multiplied in
        order to get _zoomReal */
     float dpiFactor{1.0f};
-    /* whether to display pages Left-to-Right or Right-to-Left.
-       this value is extracted from the PDF document */
-    bool displayR2L{false};
-
-    /* when we're in presentation mode, _pres* contains the pre-presentation values */
-    bool presentationMode{false};
-    float presZoomVirtual{INVALID_ZOOM};
+    float presZoomVirtual{kInvalidZoom};
     DisplayMode presDisplayMode{DisplayMode::Automatic};
 
     Vec<ScrollState> navHistory;
     /* index of the "current" history entry (to be updated on navigation),
        resp. number of Back history entries */
-    size_t navHistoryIdx{0};
+    size_t navHistoryIdx = {0};
+
+    /* whether to display pages Left-to-Right or Right-to-Left.
+       this value is extracted from the PDF document */
+    bool displayR2L = false;
+
+    /* when we're in presentation mode, _pres* contains the pre-presentation values */
+    bool inPresentation = false;
+
+    /* allow resizing a window without triggering a new rendering (needed for window destruction) */
+    bool dontRenderFlag = false;
 };
 
-int NormalizeRotation(int rotation);
+extern bool gPredictiveRender;

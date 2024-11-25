@@ -1,7 +1,7 @@
 //---------------------------------------------------------------------------------
 //
 //  Little Color Management System
-//  Copyright (c) 1998-2020 Marti Maria Saguer
+//  Copyright (c) 1998-2022 Marti Maria Saguer
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files (the "Software"),
@@ -475,7 +475,7 @@ void Emit1Gamma(cmsContext ContextID, cmsIOHANDLER* m, cmsToneCurve* Table, cons
     _cmsIOPrintf(ContextID, m, "/lcms2gammatable [");
 
     for (i=0; i < Table->nEntries; i++) {
-	if (i % 10 == 0)
+    if (i % 10 == 0)
             _cmsIOPrintf(ContextID, m, "\n  ");
         _cmsIOPrintf(ContextID, m, "%d ", Table->Table16[i]);
     }
@@ -487,7 +487,7 @@ void Emit1Gamma(cmsContext ContextID, cmsIOHANDLER* m, cmsToneCurve* Table, cons
 
     // PostScript code                            Stack
     // ===============                            ========================
-                                            	  // v
+                                                  // v
     _cmsIOPrintf(ContextID, m, "/%s {\n  ", name);
 
     // Bounds check
@@ -529,9 +529,10 @@ void Emit1Gamma(cmsContext ContextID, cmsIOHANDLER* m, cmsToneCurve* Table, cons
 // Compare gamma table
 
 static
-cmsBool GammaTableEquals(cmsUInt16Number* g1, cmsUInt16Number* g2, cmsUInt32Number nEntries)
+cmsBool GammaTableEquals(cmsUInt16Number* g1, cmsUInt16Number* g2, cmsUInt32Number nG1, cmsUInt32Number nG2)
 {
-    return memcmp(g1, g2, nEntries* sizeof(cmsUInt16Number)) == 0;
+    if (nG1 != nG2) return FALSE;
+    return memcmp(g1, g2, nG1 * sizeof(cmsUInt16Number)) == 0;
 }
 
 
@@ -547,13 +548,13 @@ void EmitNGamma(cmsContext ContextID, cmsIOHANDLER* m, cmsUInt32Number n, cmsTon
     {
         if (g[i] == NULL) return; // Error
 
-        if (i > 0 && GammaTableEquals(g[i-1]->Table16, g[i]->Table16, g[i]->nEntries)) {
+        if (i > 0 && GammaTableEquals(g[i-1]->Table16, g[i]->Table16, g[i-1]->nEntries, g[i]->nEntries)) {
 
             _cmsIOPrintf(ContextID, m, "/%s%d /%s%d load def\n", nameprefix, i, nameprefix, i-1);
         }
         else {
-            snprintf(buffer, sizeof(buffer), "%s%d", nameprefix, i);
-	    buffer[sizeof(buffer)-1] = '\0';
+            snprintf(buffer, sizeof(buffer), "%s%d", nameprefix, (int) i);
+            buffer[sizeof(buffer)-1] = '\0';
             Emit1Gamma(ContextID, m, g[i], buffer);
         }
     }
@@ -807,7 +808,7 @@ int EmitCIEBasedDEF(cmsContext ContextID, cmsIOHANDLER* m, cmsPipeline* Pipeline
 
     if (cmsStageType(ContextID, mpe) == cmsSigCurveSetElemType) {
 
-        numchans = cmsStageOutputChannels(ContextID, mpe);
+        numchans = (int) cmsStageOutputChannels(ContextID, mpe);
         for (i = 0; i < numchans; ++i) {
             snprintf(buffer, sizeof(buffer), "lcms2gammaproc%d", i);
             buffer[sizeof(buffer) - 1] = '\0';

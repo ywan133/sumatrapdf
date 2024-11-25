@@ -1,9 +1,32 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "draw-imp.h"
 
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #undef DEBUG_SCAN_CONVERTER
 
@@ -401,13 +424,26 @@ static void mark_line(fz_context *ctx, fz_edgebuffer *eb, fixed sx, fixed sy, fi
 	}
 }
 
+/* Allow for floats that are too large to safely convert to fixeds (ints),
+ * by just clipping them at the end. */
+static fixed
+safe_float2fixed(float f)
+{
+	if (f < (float)-0x00800000)
+		return INT_MIN;
+	else if (f >= (float)0x00800000)
+		return INT_MAX;
+	else
+		return float2fixed(f);
+}
+
 static void fz_insert_edgebuffer(fz_context *ctx, fz_rasterizer *ras, float fsx, float fsy, float fex, float fey, int rev)
 {
 	fz_edgebuffer *eb = (fz_edgebuffer *)ras;
-	fixed sx = float2fixed(fsx);
-	fixed sy = float2fixed(fsy);
-	fixed ex = float2fixed(fex);
-	fixed ey = float2fixed(fey);
+	fixed sx = safe_float2fixed(fsx);
+	fixed sy = safe_float2fixed(fsy);
+	fixed ex = safe_float2fixed(fex);
+	fixed ey = safe_float2fixed(fey);
 
 	mark_line(ctx, eb, sx, sy, ex, ey);
 }
@@ -1440,10 +1476,10 @@ static void mark_line_app(fz_context *ctx, fz_edgebuffer *eb, fixed sx, fixed sy
 static void fz_insert_edgebuffer_app(fz_context *ctx, fz_rasterizer *ras, float fsx, float fsy, float fex, float fey, int rev)
 {
 	fz_edgebuffer *eb = (fz_edgebuffer *)ras;
-	fixed sx = float2fixed(fsx);
-	fixed sy = float2fixed(fsy);
-	fixed ex = float2fixed(fex);
-	fixed ey = float2fixed(fey);
+	fixed sx = safe_float2fixed(fsx);
+	fixed sy = safe_float2fixed(fsy);
+	fixed ex = safe_float2fixed(fex);
+	fixed ey = safe_float2fixed(fey);
 
 	if (fsx < fex)
 	{
@@ -1730,7 +1766,7 @@ static void fz_convert_edgebuffer_app(fz_context *ctx, fz_rasterizer *ras, int e
 						rl = *row++;
 						rr = *row++;
 						w = -(rl&1) | 1;
-						rl &= ~1;
+						/* rl &= ~1; */
 						rowlen--;
 						if (rr > lr)
 							lr = rr;

@@ -18,6 +18,7 @@
 #define _POSIX_C_SOURCE 200112L  // for setenv
 #endif
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -292,6 +293,19 @@ static void PrintString(const char* const text) {
   }
 }
 
+static void PrintStringW(const char* const text) {
+#if defined(_WIN32) && defined(_UNICODE)
+  void* const font = GLUT_BITMAP_9_BY_15;
+  const W_CHAR* const wtext = (const W_CHAR*)text;
+  int i;
+  for (i = 0; wtext[i]; ++i) {
+    glutBitmapCharacter(font, wtext[i]);
+  }
+#else
+  PrintString(text);
+#endif
+}
+
 static float GetColorf(uint32_t color, int shift) {
   return ((color >> shift) & 0xff) / 255.f;
 }
@@ -396,7 +410,7 @@ static void HandleDisplay(void) {
 
     glColor4f(0.90f, 0.0f, 0.90f, 1.0f);
     glRasterPos2f(-0.95f, 0.90f);
-    PrintString(kParams.file_name);
+    PrintStringW(kParams.file_name);
 
     snprintf(tmp, sizeof(tmp), "Dimension:%d x %d", pic->width, pic->height);
     glColor4f(0.90f, 0.0f, 0.90f, 1.0f);
@@ -417,10 +431,13 @@ static void HandleDisplay(void) {
 #endif
 }
 
-static void StartDisplay(void) {
+static void StartDisplay(const char* filename) {
   int width = kParams.canvas_width;
   int height = kParams.canvas_height;
   int screen_width, screen_height;
+  const char viewername[] = " - WebP viewer";
+  // max linux file len + viewername string
+  char title[4096 + sizeof(viewername)] = "";
   // TODO(webp:365) GLUT_DOUBLE results in flickering / old frames to be
   // partially displayed with animated webp + alpha.
 #if defined(__APPLE__) || defined(_WIN32)
@@ -440,8 +457,9 @@ static void StartDisplay(void) {
       height = screen_height;
     }
   }
+  snprintf(title, sizeof(title), "%s%s", filename, viewername);
   glutInitWindowSize(width, height);
-  glutCreateWindow("WebP viewer");
+  glutCreateWindow(title);
   glutDisplayFunc(HandleDisplay);
   glutReshapeFunc(HandleReshape);
   glutIdleFunc(NULL);
@@ -480,7 +498,7 @@ static void Help(void) {
 }
 
 int main(int argc, char* argv[]) {
-  int c;
+  int c, file_name_argv_index = 1;
   WebPDecoderConfig* const config = &kParams.config;
   WebPIterator* const curr = &kParams.curr_frame;
 
@@ -527,7 +545,10 @@ int main(int argc, char* argv[]) {
     } else if (!strcmp(argv[c], "-mt")) {
       config->options.use_threads = 1;
     } else if (!strcmp(argv[c], "--")) {
-      if (c < argc - 1) kParams.file_name = (const char*)GET_WARGV(argv, ++c);
+      if (c < argc - 1) {
+        kParams.file_name = (const char*)GET_WARGV(argv, ++c);
+        file_name_argv_index = c;
+      }
       break;
     } else if (argv[c][0] == '-') {
       printf("Unknown option '%s'\n", argv[c]);
@@ -535,6 +556,7 @@ int main(int argc, char* argv[]) {
       FREE_WARGV_AND_RETURN(-1);
     } else {
       kParams.file_name = (const char*)GET_WARGV(argv, c);
+      file_name_argv_index = c;
     }
 
     if (parse_error) {
@@ -600,7 +622,7 @@ int main(int argc, char* argv[]) {
 
   // Position iterator to last frame. Next call to HandleDisplay will wrap over.
   // We take this into account by bumping up loop_count.
-  WebPDemuxGetFrame(kParams.dmux, 0, curr);
+  if (!WebPDemuxGetFrame(kParams.dmux, 0, curr)) goto Error;
   if (kParams.loop_count) ++kParams.loop_count;
 
 #if defined(__unix__) || defined(__CYGWIN__)
@@ -614,7 +636,7 @@ int main(int argc, char* argv[]) {
 #ifdef FREEGLUT
   glutSetOption(GLUT_ACTION_ON_WINDOW_CLOSE, GLUT_ACTION_CONTINUE_EXECUTION);
 #endif
-  StartDisplay();
+  StartDisplay(argv[file_name_argv_index]);
 
   if (kParams.has_animation) glutTimerFunc(0, decode_callback, 0);
   glutMainLoop();

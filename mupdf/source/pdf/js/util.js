@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2022 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 Error.prototype.toString = function() {
 	if (this.stackTrace) return this.name + ': ' + this.message + this.stackTrace;
 	return this.name + ': ' + this.message;
@@ -278,6 +300,29 @@ util.printx = function (fmt, val) {
 	return res;
 }
 
+// To the best of my understanding, events are called with:
+// if (willCommit == false) {
+//   event.value = <current value of field>
+//   event.change = <text selection to drop into the selected area>
+//   event.selStart = <index of start of selected area, <= 0 means start of string>
+//   event.selEnd = <index of end of selected area, <= 0 means end of string>
+//   If the routine can't rationalise the proposed input to something sane it should
+//   return false, and the caller won't change anything. Otherwise, the routine
+//   can update value/change/selStart/selEnd as required, and should return true.
+//   The routine should accept 'partial' values (i.e. values that do not entirely
+//   fulfill the requirements as they are being typed).
+// } else {
+//   event.value = <proposed value>
+//   event.change = ''
+//   event.selStart = -1
+//   event.selEnd = -1
+//   The routine can rewrite the proposed value if required (by changing value, not
+//   change or the selection). It should accept (return 1) or reject (return 0) the
+//   value it returns.
+// }
+//
+// The following is a helper function to form the proposed 'changed' string that
+// various handlers use.
 function AFMergeChange(event) {
 	var prefix, postfix;
 	var value = event.value;
@@ -431,9 +476,11 @@ function AFParseDateEx(string, fmt) {
 			if (order.indexOf('y') < order.indexOf('m')) {
 				year = nums[0];
 				month = nums[1];
+				date = 1;
 			} else {
 				year = nums[1];
 				month = nums[0];
+				date = 1;
 			}
 		}
 
@@ -498,8 +545,9 @@ var AFDate_oldFormats = [
 ];
 
 function AFDate_KeystrokeEx(fmt) {
-	if (event.willCommit && !AFParseDateEx(event.value, fmt)) {
-		app.alert('The date/time entered ('+event.value+') does not match the format ('+fmt+') of the field [ '+event.target.name+' ]');
+	var value = AFMergeChange(event);
+	if (event.willCommit && !AFParseDateEx(value, fmt)) {
+		app.alert('The date/time entered ('+value+') does not match the format ('+fmt+') of the field [ '+event.target.name+' ]');
 		event.rc = false;
 	}
 }
@@ -539,12 +587,22 @@ function AFSpecial_KeystrokeEx(fmt) {
 	function toLower(str) { return str.toLowerCase(); }
 	function toSame(str) { return str; }
 	var convertCase = toSame;
-	var val = event.value;
+	var val = AFMergeChange(event);
 	var res = '';
 	var i = 0;
 	var m;
 	var length = fmt ? fmt.length : 0;
+
+	// We always accept reverting to an empty string.
+	if (!val || val == "") {
+		event.rc = true;
+		return;
+	}
+
 	while (i < length) {
+		// In the !willCommit case, we'll exit nicely if we run out of value.
+		if (!event.willCommit && (!val || val.length == 0))
+				break;
 		switch (fmt.charAt(i)) {
 		case '\\':
 			i++;
@@ -591,10 +649,6 @@ function AFSpecial_KeystrokeEx(fmt) {
 			break;
 
 		case '?':
-			if (val === '') {
-				event.rc = false;
-				break;
-			}
 			res += convertCase(val.charAt(0));
 			val = val.substring(1);
 			break;
@@ -619,13 +673,24 @@ function AFSpecial_KeystrokeEx(fmt) {
 		i++;
 	}
 
+	// If we didn't make it through the fmt string then this is a failure
+	// in the willCommit case.
+	if (i < length && event.willCommit)
+		event.rc = false;
+
 	//  If there are characters left over in the value, it's not a match.
 	if (val.length > 0)
 		event.rc = false;
 
-	if (event.rc)
-		event.value = res;
-	else if (event.willCommit)
+	if (event.rc) {
+		if (event.willCommit)
+			event.value = res;
+		else {
+			event.change = res;
+			event.selStart = 0;
+			event.selEnd = event.value.length;
+		}
+	} else
 		app.alert('The value entered ('+event.value+') does not match the format of the field [ '+event.target.name+' ] should be '+fmt);
 }
 
@@ -656,6 +721,8 @@ function AFSpecial_Keystroke(index) {
 
 function AFSpecial_Format(index) {
 	var res;
+	if (!event.value)
+		return;
 	switch (index) {
 	case 0:
 		res = util.printx('99999', event.value);
@@ -675,18 +742,19 @@ function AFSpecial_Format(index) {
 }
 
 function AFNumber_Keystroke(nDec, sepStyle, negStyle, currStyle, strCurrency, bCurrencyPrepend) {
+	var value = AFMergeChange(event);
 	if (sepStyle & 2) {
-		if (!event.value.match(/^[+-]?\d*[,.]?\d*$/))
+		if (!value.match(/^[+-]?\d*[,.]?\d*$/))
 			event.rc = false;
 	} else {
-		if (!event.value.match(/^[+-]?\d*\.?\d*$/))
+		if (!value.match(/^[+-]?\d*\.?\d*$/))
 			event.rc = false;
 	}
 	if (event.willCommit) {
-		if (!event.value.match(/\d/))
+		if (!value.match(/\d/))
 			event.rc = false;
 		if (!event.rc)
-			app.alert('The value entered ('+event.value+') does not match the format of the field [ '+event.target.name+' ]');
+			app.alert('The value entered ('+value+') does not match the format of the field [ '+event.target.name+' ]');
 	}
 }
 
@@ -777,6 +845,29 @@ function AFRange_Validate(lowerCheck, lowerLimit, upperCheck, upperLimit) {
 	}
 }
 
+// Create Doc.info proxy object.
+function mupdf_createInfoProxy(doc) {
+        doc.info = {
+                get Title() { return doc.title; },
+                set Title(value) { doc.title = value; },
+                get Author() { return doc.author; },
+                set Author(value) { doc.author = value; },
+                get Subject() { return doc.subject; },
+                set Subject(value) { doc.subject = value; },
+                get Keywords() { return doc.keywords; },
+                set Keywords(value) { doc.keywords = value; },
+                get Creator() { return doc.creator; },
+                set Creator(value) { doc.creator = value; },
+                get Producer() { return doc.producer; },
+                set Producer(value) { doc.producer = value; },
+                get CreationDate() { return doc.creationDate; },
+                set CreationDate(value) { doc.creationDate = value; },
+                get ModDate() { return doc.modDate; },
+                set ModDate(value) { doc.modDate = value; },
+        };
+}
+mupdf_createInfoProxy(global);
+
 /* Compatibility ECMAScript functions */
 String.prototype.substr = function (start, length) {
 	if (start < 0)
@@ -788,10 +879,6 @@ String.prototype.substr = function (start, length) {
 Date.prototype.getYear = Date.prototype.getFullYear;
 Date.prototype.setYear = Date.prototype.setFullYear;
 Date.prototype.toGMTString = Date.prototype.toUTCString;
-
-console.clear = function() { console.println('--- clear console ---\n'); };
-console.show = function(){};
-console.hide = function(){};
 
 app.plugIns = [];
 app.viewerType = 'Reader';

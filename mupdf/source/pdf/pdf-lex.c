@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
@@ -137,10 +159,10 @@ static float acrobat_compatible_atof(char *s)
 }
 
 /* Fast but inaccurate atoi. */
-static int fast_atoi(char *s)
+static int64_t fast_atoi(char *s)
 {
 	int neg = 0;
-	int i = 0;
+	int64_t i = 0;
 
 	while (*s == '-')
 	{
@@ -297,8 +319,9 @@ lex_name(fz_context *ctx, fz_stream *f, pdf_lexbuf *lb)
 					hex[i] = lex_byte(ctx, f) - 'A' + 10;
 					break;
 				default:
-				case EOF:
 					goto illegal;
+				case EOF:
+					goto illegal_eof;
 				}
 			}
 			if (s) *s++ = (hex[0] << 4) + hex[1];
@@ -306,6 +329,7 @@ lex_name(fz_context *ctx, fz_stream *f, pdf_lexbuf *lb)
 illegal:
 			if (i == 1)
 				fz_unread_byte(ctx, f);
+illegal_eof:
 			if (s) *s++ = '#';
 			continue;
 		}
@@ -487,6 +511,7 @@ pdf_token_from_keyword(char *key)
 		break;
 	case 'n':
 		if (!strcmp(key, "null")) return PDF_TOK_NULL;
+		if (!strcmp(key, "newobj")) return PDF_TOK_NEWOBJ;
 		break;
 	case 'o':
 		if (!strcmp(key, "obj")) return PDF_TOK_OBJ;

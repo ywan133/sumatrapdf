@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2023 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <string.h>
@@ -270,7 +292,7 @@ fz_new_bitmap(fz_context *ctx, int w, int h, int n, int xres, int yres)
 	/* Stride is 32 bit aligned. We may want to make this 64 bit if we use SSE2 etc. */
 	int stride = ((n * w + 31) & ~31) >> 3;
 	if (h < 0 || ((size_t)h > (size_t)(SIZE_MAX / stride)))
-		fz_throw(ctx, FZ_ERROR_MEMORY, "bitmap too large");
+		fz_throw(ctx, FZ_ERROR_LIMIT, "bitmap too large");
 
 	bit = fz_malloc_struct(ctx, fz_bitmap);
 	fz_try(ctx)
@@ -323,7 +345,9 @@ pbm_write_header(fz_context *ctx, fz_band_writer *writer, fz_colorspace *cs)
 	int h = writer->h;
 
 	if (writer->s != 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "pbms cannot contain spot colors");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "pbms cannot contain spot colors");
+	if (writer->n != 1)
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "too many color components in bitmap");
 
 	fz_write_printf(ctx, out, "P4\n%d %d\n", w, h);
 }
@@ -336,7 +360,9 @@ pkm_write_header(fz_context *ctx, fz_band_writer *writer, fz_colorspace *cs)
 	int h = writer->h;
 
 	if (writer->s != 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "pkms cannot contain spot colors");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "pkms cannot contain spot colors");
+	if (writer->n != 4)
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "wrong number of color components in bitmap");
 
 	fz_write_printf(ctx, out, "P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\nTUPLTYPE CMYK\nENDHDR\n", w, h);
 }
@@ -347,13 +373,14 @@ fz_write_bitmap_as_pbm(fz_context *ctx, fz_output *out, fz_bitmap *bitmap)
 	fz_band_writer *writer;
 
 	if (bitmap->n != 1)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "bitmap must be monochrome to save as PBM");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "bitmap must be monochrome to save as PBM");
 
 	writer = fz_new_pbm_band_writer(ctx, out);
 	fz_try(ctx)
 	{
 		fz_write_header(ctx, writer, bitmap->w, bitmap->h, 1, 0, 0, 0, 0, NULL, NULL);
 		fz_write_band(ctx, writer, bitmap->stride, bitmap->h, bitmap->samples);
+		fz_close_band_writer(ctx, writer);
 	}
 	fz_always(ctx)
 		fz_drop_band_writer(ctx, writer);
@@ -367,13 +394,14 @@ fz_write_bitmap_as_pkm(fz_context *ctx, fz_output *out, fz_bitmap *bitmap)
 	fz_band_writer *writer;
 
 	if (bitmap->n != 4)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "bitmap must be CMYK to save as PKM");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "bitmap must be CMYK to save as PKM");
 
 	writer = fz_new_pkm_band_writer(ctx, out);
 	fz_try(ctx)
 	{
 		fz_write_header(ctx, writer, bitmap->w, bitmap->h, 4, 0, 0, 0, 0, NULL, NULL);
 		fz_write_band(ctx, writer, bitmap->stride, bitmap->h, bitmap->samples);
+		fz_close_band_writer(ctx, writer);
 	}
 	fz_always(ctx)
 		fz_drop_band_writer(ctx, writer);
@@ -387,12 +415,8 @@ pbm_write_band(fz_context *ctx, fz_band_writer *writer, int stride, int band_sta
 	fz_output *out = writer->out;
 	int w = writer->w;
 	int h = writer->h;
-	int n = writer->n;
 	int bytestride;
 	int end = band_start + band_height;
-
-	if (n != 1)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "too many color components in bitmap");
 
 	if (end > h)
 		end = h;
@@ -412,12 +436,9 @@ pkm_write_band(fz_context *ctx, fz_band_writer *writer, int stride, int band_sta
 	fz_output *out = writer->out;
 	int w = writer->w;
 	int h = writer->h;
-	int n = writer->n;
 	int bytestride;
 	int end = band_start + band_height;
 
-	if (n != 4)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "wrong number of color components in bitmap");
 
 	if (end > h)
 		end = h;

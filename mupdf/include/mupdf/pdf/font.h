@@ -1,7 +1,31 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_PDF_FONT_H
 #define MUPDF_PDF_FONT_H
 
 #include "mupdf/pdf/cmap.h"
+#include "mupdf/fitz/device.h"
+#include "mupdf/fitz/font.h"
 
 enum
 {
@@ -73,6 +97,7 @@ typedef struct
 	pdf_vmtx *vmtx;
 
 	int is_embedded;
+	int t3loading;
 } pdf_font_desc;
 
 void pdf_set_font_wmode(fz_context *ctx, pdf_font_desc *font, int wmode);
@@ -123,6 +148,21 @@ pdf_obj *pdf_add_cid_font(fz_context *ctx, pdf_document *doc, fz_font *font);
 */
 pdf_obj *pdf_add_cjk_font(fz_context *ctx, pdf_document *doc, fz_font *font, int script, int wmode, int serif);
 
-int pdf_font_writing_supported(fz_font *font);
+/*
+	Add a substitute font for any script.
+*/
+pdf_obj *pdf_add_substitute_font(fz_context *ctx, pdf_document *doc, fz_font *font);
+
+int pdf_font_writing_supported(fz_context *ctx, fz_font *font);
+
+/*
+	Subset fonts by scanning the document to establish usage, and then
+	rewriting the font files.
+
+	Calling with pages_len == 0 means do the whole document.
+
+	EXPERIMENTAL AND SUBJECT TO CHANGE.
+*/
+void pdf_subset_fonts(fz_context *ctx, pdf_document *doc, int pages_len, const int *pages);
 
 #endif

@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
@@ -16,6 +38,9 @@ pdf_graft_map *
 pdf_new_graft_map(fz_context *ctx, pdf_document *dst)
 {
 	pdf_graft_map *map = NULL;
+
+	if (dst == NULL)
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot create graft make without a destination document");
 
 	map = fz_malloc_struct(ctx, pdf_graft_map);
 
@@ -83,7 +108,7 @@ pdf_graft_mapped_object(fz_context *ctx, pdf_graft_map *map, pdf_obj *obj)
 		return pdf_keep_obj(ctx, obj);
 
 	if (map->src && src != map->src)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "grafted objects must all belong to the same source document");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "grafted objects must all belong to the same source document");
 
 	if (pdf_is_indirect(ctx, obj))
 	{
@@ -106,7 +131,7 @@ pdf_graft_mapped_object(fz_context *ctx, pdf_graft_map *map, pdf_obj *obj)
 		}
 
 		if (src_num < 1 || src_num >= map->len)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "source object number out of range");
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "source object number out of range");
 
 		/* Check if we have done this one.  If yes, then just
 		 * return our indirect ref */

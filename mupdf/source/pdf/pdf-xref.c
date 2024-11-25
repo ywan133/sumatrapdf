@@ -1,5 +1,27 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
-#include "mupdf/pdf.h"
+#include "pdf-annot-imp.h"
 
 #include <assert.h>
 #include <limits.h>
@@ -39,11 +61,8 @@ pdf_drop_xref_subsec(fz_context *ctx, pdf_xref *xref)
 		for (e = 0; e < sub->len; e++)
 		{
 			pdf_xref_entry *entry = &sub->table[e];
-			if (entry->obj)
-			{
-				pdf_drop_obj(ctx, entry->obj);
-				fz_drop_buffer(ctx, entry->stm_buf);
-			}
+			pdf_drop_obj(ctx, entry->obj);
+			fz_drop_buffer(ctx, entry->stm_buf);
 		}
 		fz_free(ctx, sub->table);
 		fz_free(ctx, sub);
@@ -109,7 +128,7 @@ resize_xref_sub(fz_context *ctx, pdf_xref *xref, int base, int newlen)
 	assert(newlen+base > xref->num_objects);
 
 	sub->table = fz_realloc_array(ctx, sub->table, newlen, pdf_xref_entry);
-	for (i = xref->num_objects-base; i < newlen; i++)
+	for (i = sub->len; i < newlen; i++)
 	{
 		sub->table[i].type = 0;
 		sub->table[i].ofs = 0;
@@ -120,7 +139,8 @@ resize_xref_sub(fz_context *ctx, pdf_xref *xref, int base, int newlen)
 		sub->table[i].obj = NULL;
 	}
 	sub->len = newlen;
-	xref->num_objects = newlen+base;
+	if (newlen+base > xref->num_objects)
+		xref->num_objects = newlen+base;
 }
 
 /* This is only ever called when we already have an incremental
@@ -242,7 +262,7 @@ pdf_get_local_xref_entry(fz_context *ctx, pdf_document *doc, int num)
 	pdf_xref_subsec *sub;
 
 	if (xref == NULL || doc->local_xref_nesting == 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Local xref not present!");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Local xref not present!");
 
 	/* Local xrefs only ever have 1 section, and it should be solid. */
 	sub = xref->subsec;
@@ -273,7 +293,7 @@ pdf_xref_entry *pdf_get_populating_xref_entry(fz_context *ctx, pdf_document *doc
 
 	/* Prevent accidental heap underflow */
 	if (num < 0 || num > PDF_MAX_OBJECT_NUMBER)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "object number out of range (%d)", num);
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "object number out of range (%d)", num);
 
 	/* Return the pointer to the entry in the last section. */
 	xref = &doc->xref_sections[doc->num_xref_sections-1];
@@ -292,14 +312,17 @@ pdf_xref_entry *pdf_get_populating_xref_entry(fz_context *ctx, pdf_document *doc
 	return &sub->table[num-sub->start];
 }
 
-pdf_xref_entry *pdf_get_xref_entry(fz_context *ctx, pdf_document *doc, int i)
+/* It is vital that pdf_get_xref_entry_aux called with !solidify_if_needed
+ * and a value object number, does NOT try/catch or throw. */
+static
+pdf_xref_entry *pdf_get_xref_entry_aux(fz_context *ctx, pdf_document *doc, int i, int solidify_if_needed)
 {
 	pdf_xref *xref = NULL;
 	pdf_xref_subsec *sub;
 	int j;
 
 	if (i < 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Negative object number requested");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Negative object number requested");
 
 	if (i < doc->max_xref_len)
 		j = doc->xref_index[i];
@@ -392,6 +415,27 @@ pdf_xref_entry *pdf_get_xref_entry(fz_context *ctx, pdf_document *doc, int i)
 		}
 	}
 
+	/* Some really hairy code here. When we are reading the file in
+	 * initially, we read from 'newest' to 'oldest' (i.e. from 0 to
+	 * doc->num_xref_sections-1). Each section is created initially
+	 * with num_objects == 0 in it, and remains like that while we
+	 * are parsing the stream from the file. This is the only time
+	 * we'll ever have xref_sections with 0 objects in them. */
+	if (doc->xref_sections[doc->num_xref_sections-1].num_objects == 0)
+	{
+		/* The oldest xref section has 0 objects in it. So we are
+		 * parsing an xref stream while loading. We don't want to
+		 * solidify the xref we are currently parsing for (as it'll
+		 * get very confused, and end up a different 'shape' in
+		 * memory to that which is in the file, and would hence
+		 * render 'fingerprinting' for snapshotting invalid) so
+		 * just give up at this point. */
+		return NULL;
+	}
+
+	if (!solidify_if_needed)
+		return NULL;
+
 	/* At this point, we solidify the xref. This ensures that we
 	 * can return a pointer. This is the only case where this function
 	 * might throw an exception, and it will never happen when we are
@@ -400,6 +444,72 @@ pdf_xref_entry *pdf_get_xref_entry(fz_context *ctx, pdf_document *doc, int i)
 	xref = &doc->xref_sections[0];
 	sub = xref->subsec;
 	return &sub->table[i - sub->start];
+}
+
+pdf_xref_entry *pdf_get_xref_entry(fz_context *ctx, pdf_document *doc, int i)
+{
+	return pdf_get_xref_entry_aux(ctx, doc, i, 1);
+}
+
+pdf_xref_entry *pdf_get_xref_entry_no_change(fz_context *ctx, pdf_document *doc, int i)
+{
+	return pdf_get_xref_entry_aux(ctx, doc, i, 0);
+}
+
+pdf_xref_entry *pdf_get_xref_entry_no_null(fz_context *ctx, pdf_document *doc, int i)
+{
+	pdf_xref_entry *entry = pdf_get_xref_entry(ctx, doc, i);
+	if (entry != NULL)
+		return entry;
+	fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot find object in xref (%d 0 R), but not allowed to return NULL", i);
+}
+
+void pdf_xref_entry_map(fz_context *ctx, pdf_document *doc, void (*fn)(fz_context *, pdf_xref_entry *, int, pdf_document *, void *), void *arg)
+{
+	int i, j;
+	pdf_xref_subsec *sub;
+	int xref_base = doc->xref_base;
+
+	fz_try(ctx)
+	{
+		/* Map over any active local xref first. */
+		if (doc->local_xref && doc->local_xref_nesting > 0)
+		{
+			pdf_xref *xref = doc->local_xref;
+
+			for (sub = xref->subsec; sub != NULL; sub = sub->next)
+			{
+				for (i = sub->start; i < sub->start + sub->len; i++)
+				{
+					pdf_xref_entry *entry = &sub->table[i - sub->start];
+					if (entry->type)
+						fn(ctx, entry, i, doc, arg);
+				}
+			}
+		}
+
+		for (j = 0; j < doc->num_xref_sections; j++)
+		{
+			pdf_xref *xref = &doc->xref_sections[j];
+			doc->xref_base = j;
+
+			for (sub = xref->subsec; sub != NULL; sub = sub->next)
+			{
+				for (i = sub->start; i < sub->start + sub->len; i++)
+				{
+					pdf_xref_entry *entry = &sub->table[i - sub->start];
+					if (entry->type)
+						fn(ctx, entry, i, doc, arg);
+				}
+			}
+		}
+	}
+	fz_always(ctx)
+	{
+		doc->xref_base = xref_base;
+	}
+	fz_catch(ctx)
+		fz_rethrow(ctx);
 }
 
 /*
@@ -463,7 +573,7 @@ static void ensure_incremental_xref(fz_context *ctx, pdf_document *doc)
 }
 
 /* Used when altering a document */
-static pdf_xref_entry *pdf_get_incremental_xref_entry(fz_context *ctx, pdf_document *doc, int i)
+pdf_xref_entry *pdf_get_incremental_xref_entry(fz_context *ctx, pdf_document *doc, int i)
 {
 	pdf_xref *xref;
 	pdf_xref_subsec *sub;
@@ -574,14 +684,15 @@ void pdf_ensure_solid_xref(fz_context *ctx, pdf_document *doc, int num)
 	if (doc->num_xref_sections == 0)
 		pdf_populate_next_xref_level(ctx, doc);
 
-	ensure_solid_xref(ctx, doc, num, doc->num_xref_sections-1);
+	ensure_solid_xref(ctx, doc, num, 0);
 }
 
-void pdf_xref_ensure_incremental_object(fz_context *ctx, pdf_document *doc, int num)
+int pdf_xref_ensure_incremental_object(fz_context *ctx, pdf_document *doc, int num)
 {
 	pdf_xref_entry *new_entry, *old_entry;
 	pdf_xref_subsec *sub = NULL;
 	int i;
+	pdf_obj *copy;
 
 	/* Make sure we have created an xref section for incremental updates */
 	ensure_incremental_xref(ctx, doc);
@@ -605,26 +716,35 @@ void pdf_xref_ensure_incremental_object(fz_context *ctx, pdf_document *doc, int 
 
 	/* If we don't find it, or it's already in the incremental section, return */
 	if (i == 0 || sub == NULL)
-		return;
+		return 0;
+
+	copy = pdf_deep_copy_obj(ctx, sub->table[num - sub->start].obj);
 
 	/* Move the object to the incremental section */
+	i = doc->xref_index[num];
 	doc->xref_index[num] = 0;
 	old_entry = &sub->table[num - sub->start];
-	new_entry = pdf_get_incremental_xref_entry(ctx, doc, num);
+	fz_try(ctx)
+		new_entry = pdf_get_incremental_xref_entry(ctx, doc, num);
+	fz_catch(ctx)
+	{
+		pdf_drop_obj(ctx, copy);
+		doc->xref_index[num] = i;
+		fz_rethrow(ctx);
+	}
 	*new_entry = *old_entry;
-	if (i < doc->num_incremental_sections)
+	if (new_entry->type == 'o')
 	{
-		/* old entry is incremental and may have changes.
-		 * Better keep a copy. We must override the old entry with
-		 * the copy because the caller may be holding a reference to
-		 * the original and expect it to end up in the new entry */
-		old_entry->obj = pdf_deep_copy_obj(ctx, old_entry->obj);
+		new_entry->type = 'n';
+		new_entry->gen = 0;
 	}
-	else
-	{
-		old_entry->obj = NULL;
-	}
+	/* Better keep a copy. We must override the old entry with
+	 * the copy because the caller may be holding a reference to
+	 * the original and expect it to end up in the new entry */
+	old_entry->obj = copy;
 	old_entry->stm_buf = NULL;
+
+	return 1;
 }
 
 void pdf_xref_ensure_local_object(fz_context *ctx, pdf_document *doc, int num)
@@ -665,18 +785,32 @@ void pdf_xref_ensure_local_object(fz_context *ctx, pdf_document *doc, int num)
 	if (sub == NULL)
 		return; /* No object to find */
 
+	copy = pdf_deep_copy_obj(ctx, sub->table[num - sub->start].obj);
+
 	/* Copy the object to the local section */
+	i = doc->xref_index[num];
 	doc->xref_index[num] = 0;
 	old_entry = &sub->table[num - sub->start];
-	new_entry = pdf_get_local_xref_entry(ctx, doc, num);
+	fz_try(ctx)
+		new_entry = pdf_get_local_xref_entry(ctx, doc, num);
+	fz_catch(ctx)
+	{
+		pdf_drop_obj(ctx, copy);
+		doc->xref_index[num] = i;
+		fz_rethrow(ctx);
+	}
 	*new_entry = *old_entry;
+	if (new_entry->type == 'o')
+	{
+		new_entry->type = 'n';
+		new_entry->gen = 0;
+	}
 	new_entry->stm_buf = NULL;
 	new_entry->obj = NULL;
 	/* old entry is incremental and may have changes.
 	 * Better keep a copy. We must override the old entry with
 	 * the copy because the caller may be holding a reference to
 	 * the original and expect it to end up in the new entry */
-	copy = pdf_deep_copy_obj(ctx, old_entry->obj);
 	new_entry->obj = old_entry->obj;
 	old_entry->obj = copy;
 	new_entry->stm_buf = NULL; /* FIXME */
@@ -730,6 +864,8 @@ void pdf_forget_xref(fz_context *ctx, pdf_document *doc)
 {
 	pdf_obj *trailer = pdf_keep_obj(ctx, pdf_trailer(ctx, doc));
 
+	pdf_drop_local_xref_and_resources(ctx, doc);
+
 	if (doc->saved_xref_sections)
 		pdf_drop_xref_sections_imp(ctx, doc, doc->saved_xref_sections, doc->saved_num_xref_sections);
 
@@ -775,6 +911,8 @@ pdf_version(fz_context *ctx, pdf_document *doc)
 	fz_catch(ctx)
 	{
 		fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+		fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+		fz_report_error(ctx);
 		fz_warn(ctx, "Ignoring broken Root/Version number.");
 	}
 	return version;
@@ -787,8 +925,11 @@ pdf_load_version(fz_context *ctx, pdf_document *doc)
 
 	fz_seek(ctx, doc->file, 0, SEEK_SET);
 	fz_read_line(ctx, doc->file, buf, sizeof buf);
-	if (strlen(buf) < 5 || memcmp(buf, "%PDF-", 5) != 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot recognize version marker");
+	if (strlen(buf) < 5 || (memcmp(buf, "%PDF-", 5) != 0 && memcmp(buf, "%FDF-", 5) != 0))
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cannot recognize version marker");
+
+	if (buf[1] == 'F')
+		doc->is_fdf = 1;
 
 	doc->version = 10 * (fz_atof(buf+5) + 0.05f);
 	if (doc->version < 10 || doc->version > 17)
@@ -812,7 +953,7 @@ pdf_read_start_xref(fz_context *ctx, pdf_document *doc)
 
 	n = fz_read(ctx, doc->file, buf, sizeof buf);
 	if (n < 9)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find startxref");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cannot find startxref");
 
 	i = n - 9;
 	do
@@ -826,7 +967,7 @@ pdf_read_start_xref(fz_context *ctx, pdf_document *doc)
 			while (i < n && isdigit(buf[i]))
 			{
 				if (doc->startxref >= INT64_MAX/10)
-					fz_throw(ctx, FZ_ERROR_GENERIC, "startxref too large");
+					fz_throw(ctx, FZ_ERROR_LIMIT, "startxref too large");
 				doc->startxref = doc->startxref * 10 + (buf[i++] - '0');
 			}
 			if (doc->startxref != 0)
@@ -835,11 +976,10 @@ pdf_read_start_xref(fz_context *ctx, pdf_document *doc)
 		}
 	} while (i-- > 0);
 
-	fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find startxref");
+	fz_throw(ctx, FZ_ERROR_FORMAT, "cannot find startxref");
 }
 
-static void
-fz_skip_space(fz_context *ctx, fz_stream *stm)
+void fz_skip_space(fz_context *ctx, fz_stream *stm)
 {
 	do
 	{
@@ -851,7 +991,7 @@ fz_skip_space(fz_context *ctx, fz_stream *stm)
 	while (1);
 }
 
-static int fz_skip_string(fz_context *ctx, fz_stream *stm, const char *str)
+int fz_skip_string(fz_context *ctx, fz_stream *stm, const char *str)
 {
 	while (*str)
 	{
@@ -868,7 +1008,7 @@ static int fz_skip_string(fz_context *ctx, fz_stream *stm, const char *str)
  */
 
 static int
-pdf_xref_size_from_old_trailer(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
+pdf_xref_size_from_old_trailer(fz_context *ctx, pdf_document *doc)
 {
 	int len;
 	char *s;
@@ -879,6 +1019,8 @@ pdf_xref_size_from_old_trailer(fz_context *ctx, pdf_document *doc, pdf_lexbuf *b
 	int64_t ofs;
 	pdf_obj *trailer = NULL;
 	size_t n;
+	pdf_lexbuf *buf = &doc->lexbuf.base;
+	pdf_obj *obj = NULL;
 
 	fz_var(trailer);
 
@@ -887,7 +1029,7 @@ pdf_xref_size_from_old_trailer(fz_context *ctx, pdf_document *doc, pdf_lexbuf *b
 
 	fz_skip_space(ctx, doc->file);
 	if (fz_skip_string(ctx, doc->file, "xref"))
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find xref marker");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cannot find xref marker");
 	fz_skip_space(ctx, doc->file);
 
 	while (1)
@@ -900,10 +1042,10 @@ pdf_xref_size_from_old_trailer(fz_context *ctx, pdf_document *doc, pdf_lexbuf *b
 		s = buf->scratch;
 		fz_strsep(&s, " "); /* ignore start */
 		if (!s)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "xref subsection length missing");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "xref subsection length missing");
 		len = fz_atoi(fz_strsep(&s, " "));
 		if (len < 0)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "xref subsection length must be positive");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "xref subsection length must be positive");
 
 		/* broken pdfs where the section is not on a separate line */
 		if (s && *s != '\0')
@@ -911,7 +1053,7 @@ pdf_xref_size_from_old_trailer(fz_context *ctx, pdf_document *doc, pdf_lexbuf *b
 
 		t = fz_tell(ctx, doc->file);
 		if (t < 0)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cannot tell in file");
+			fz_throw(ctx, FZ_ERROR_SYSTEM, "cannot tell in file");
 
 		/* Spec says xref entries should be 20 bytes, but it's not infrequent
 		 * to see 19, in particular for some PCLm drivers. Cope. */
@@ -919,7 +1061,7 @@ pdf_xref_size_from_old_trailer(fz_context *ctx, pdf_document *doc, pdf_lexbuf *b
 		{
 			n = fz_read(ctx, doc->file, (unsigned char *)buf->scratch, 20);
 			if (n < 19)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "malformed xref table");
+				fz_throw(ctx, FZ_ERROR_FORMAT, "malformed xref table");
 			if (n == 20 && buf->scratch[19] > 32)
 				n = 19;
 		}
@@ -927,7 +1069,7 @@ pdf_xref_size_from_old_trailer(fz_context *ctx, pdf_document *doc, pdf_lexbuf *b
 			n = 20;
 
 		if (len > (int64_t)((INT64_MAX - t) / n))
-			fz_throw(ctx, FZ_ERROR_GENERIC, "xref has too many entries");
+			fz_throw(ctx, FZ_ERROR_LIMIT, "xref has too many entries");
 
 		fz_seek(ctx, doc->file, t + n * (int64_t)len, SEEK_SET);
 	}
@@ -936,17 +1078,21 @@ pdf_xref_size_from_old_trailer(fz_context *ctx, pdf_document *doc, pdf_lexbuf *b
 	{
 		tok = pdf_lex(ctx, doc->file, buf);
 		if (tok != PDF_TOK_TRAILER)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "expected trailer marker");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "expected trailer marker");
 
 		tok = pdf_lex(ctx, doc->file, buf);
 		if (tok != PDF_TOK_OPEN_DICT)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "expected trailer dictionary");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "expected trailer dictionary");
 
 		trailer = pdf_parse_dict(ctx, doc, doc->file, buf);
 
+		obj = pdf_dict_get(ctx, trailer, PDF_NAME(Size));
+		if (pdf_is_indirect(ctx, obj))
+			fz_throw(ctx, FZ_ERROR_FORMAT, "trailer Size entry is indirect");
+
 		size = pdf_dict_get_int(ctx, trailer, PDF_NAME(Size));
 		if (size < 0 || size > PDF_MAX_OBJECT_NUMBER + 1)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "trailer Size entry out of range");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "trailer Size entry out of range");
 	}
 	fz_always(ctx)
 	{
@@ -966,32 +1112,93 @@ static pdf_xref_entry *
 pdf_xref_find_subsection(fz_context *ctx, pdf_document *doc, int start, int len)
 {
 	pdf_xref *xref = &doc->xref_sections[doc->num_xref_sections-1];
-	pdf_xref_subsec *sub;
+	pdf_xref_subsec *sub, *extend = NULL;
 	int num_objects;
+	int solidify = 0;
 
-	/* Different cases here. Case 1) We might be asking for a
-	 * subsection (or a subset of a subsection) that we already
-	 * have - Just return it. Case 2) We might be asking for a
-	 * completely new subsection - Create it and return it.
-	 * Case 3) We might have an overlapping one - Create a 'solid'
-	 * subsection and return that. */
+	if (len == 0)
+		return NULL;
+
+	/* Different cases here.
+	 * Case 1) We might be asking for a subsection (or a subset of a
+	 *         subsection) that we already have - Just return it.
+	 * Case 2) We might be asking for a subsection that overlaps (or
+	 *         extends) a subsection we already have - extend the existing one.
+	 * Case 3) We might be asking for a subsection that overlaps multiple
+	 *         existing subsections - solidify the whole set.
+	 * Case 4) We might be asking for a completely new subsection - just
+	 *         allocate it.
+	 */
 
 	/* Sanity check */
 	for (sub = xref->subsec; sub != NULL; sub = sub->next)
 	{
-		if (start >= sub->start && start + len <= sub->start + sub->len)
-			return &sub->table[start-sub->start]; /* Case 1 */
-		if (start + len > sub->start && start <= sub->start + sub->len)
-			break; /* Case 3 */
+		if (start >= sub->start && start <= sub->start + sub->len)
+		{
+			/* 'start' is in (or immediately after) 'sub' */
+			if (start + len <= sub->start + sub->len)
+			{
+				/* And so is start+len-1 - just return this! Case 1. */
+				return &sub->table[start-sub->start];
+			}
+			/* So we overlap with sub. */
+			if (extend == NULL)
+			{
+				/* Maybe we can extend sub? */
+				extend = sub;
+			}
+			else
+			{
+				/* OK, so we've already found an overlapping one. We'll need to solidify. Case 3. */
+				solidify = 1;
+				break;
+			}
+		}
+		else if (start + len > sub->start && start + len < sub->start + sub->len)
+		{
+			/* The end of the start+len range is in 'sub'. */
+			/* For now, we won't support extending sub backwards. Just take this as
+			 * needing to solidify. Case 3. */
+			solidify = 1;
+			break;
+		}
+		else if (start < sub->start && start + len >= sub->start + sub->len)
+		{
+			/* The end of the start+len range is beyond 'sub'. */
+			/* For now, we won't support extending sub backwards. Just take this as
+			 * needing to solidify. Another variant of case 3. */
+			solidify = 1;
+			break;
+		}
 	}
 
 	num_objects = xref->num_objects;
 	if (num_objects < start + len)
 		num_objects = start + len;
 
-	if (sub == NULL)
+	if (solidify)
 	{
-		/* Case 2 */
+		/* Case 3: Solidify the xref */
+		ensure_solid_xref(ctx, doc, num_objects, doc->num_xref_sections-1);
+		xref = &doc->xref_sections[doc->num_xref_sections-1];
+		sub = xref->subsec;
+	}
+	else if (extend)
+	{
+		/* Case 2: Extend the subsection */
+		int newlen = start + len - extend->start;
+		sub = extend;
+		sub->table = fz_realloc_array(ctx, sub->table, newlen, pdf_xref_entry);
+		memset(&sub->table[sub->len], 0, sizeof(pdf_xref_entry) * (newlen - sub->len));
+		sub->len = newlen;
+		if (xref->num_objects < sub->start + sub->len)
+			xref->num_objects = sub->start + sub->len;
+		if (doc->max_xref_len < sub->start + sub->len)
+			extend_xref_index(ctx, doc, sub->start + sub->len);
+	}
+	else
+	{
+		/* Case 4 */
 		sub = fz_malloc_struct(ctx, pdf_xref_subsec);
 		fz_try(ctx)
 		{
@@ -1006,22 +1213,27 @@ pdf_xref_find_subsection(fz_context *ctx, pdf_document *doc, int start, int len)
 			fz_free(ctx, sub);
 			fz_rethrow(ctx);
 		}
-		xref->num_objects = num_objects;
+		if (xref->num_objects < num_objects)
+			xref->num_objects = num_objects;
 		if (doc->max_xref_len < num_objects)
 			extend_xref_index(ctx, doc, num_objects);
-	}
-	else
-	{
-		/* Case 3 */
-		ensure_solid_xref(ctx, doc, num_objects, doc->num_xref_sections-1);
-		xref = &doc->xref_sections[doc->num_xref_sections-1];
-		sub = xref->subsec;
 	}
 	return &sub->table[start-sub->start];
 }
 
+static inline void
+validate_object_number_range(fz_context *ctx, int first, int len, const char *what)
+{
+	if (first < 0 || first > PDF_MAX_OBJECT_NUMBER)
+		fz_throw(ctx, FZ_ERROR_FORMAT, "first object number in %s out of range", what);
+	if (len < 0 || len > PDF_MAX_OBJECT_NUMBER)
+		fz_throw(ctx, FZ_ERROR_FORMAT, "number of objects in %s out of range", what);
+	if (len > 0 && len - 1 > PDF_MAX_OBJECT_NUMBER - first)
+		fz_throw(ctx, FZ_ERROR_FORMAT, "last object number in %s out of range", what);
+}
+
 static pdf_obj *
-pdf_read_old_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
+pdf_read_old_xref(fz_context *ctx, pdf_document *doc)
 {
 	int start, len, c, i, xref_len, carried;
 	fz_stream *file = doc->file;
@@ -1029,12 +1241,13 @@ pdf_read_old_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
 	pdf_token tok;
 	size_t n;
 	char *s, *e;
+	pdf_lexbuf *buf = &doc->lexbuf.base;
 
-	xref_len = pdf_xref_size_from_old_trailer(ctx, doc, buf);
+	xref_len = pdf_xref_size_from_old_trailer(ctx, doc);
 
 	fz_skip_space(ctx, doc->file);
 	if (fz_skip_string(ctx, doc->file, "xref"))
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find xref marker");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cannot find xref marker");
 	fz_skip_space(ctx, doc->file);
 
 	while (1)
@@ -1055,12 +1268,8 @@ pdf_read_old_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
 			fz_seek(ctx, file, -(2 + (int)strlen(s)), SEEK_CUR);
 		}
 
-		if (start < 0 || start > PDF_MAX_OBJECT_NUMBER
-				|| len < 0 || len > PDF_MAX_OBJECT_NUMBER
-				|| start + len - 1 > PDF_MAX_OBJECT_NUMBER)
-		{
-			fz_throw(ctx, FZ_ERROR_GENERIC, "xref subsection object numbers are out of range");
-		}
+		validate_object_number_range(ctx, start, len, "xref subsection");
+
 		/* broken pdfs where size in trailer undershoots entries in xref sections */
 		if (start + len > xref_len)
 		{
@@ -1078,7 +1287,7 @@ pdf_read_old_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
 			pdf_xref_entry *entry = &table[i];
 			n = fz_read(ctx, file, (unsigned char *) buf->scratch + carried, 20-carried);
 			if (n != (size_t)(20-carried))
-				fz_throw(ctx, FZ_ERROR_GENERIC, "unexpected EOF in xref table");
+				fz_throw(ctx, FZ_ERROR_FORMAT, "unexpected EOF in xref table");
 			n += carried;
 			buf->scratch[n] = '\0';
 			if (!entry->type)
@@ -1093,21 +1302,21 @@ pdf_read_old_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
 					s++;
 
 				if (s == e || !isdigit(*s))
-					fz_throw(ctx, FZ_ERROR_GENERIC, "xref offset missing");
+					fz_throw(ctx, FZ_ERROR_FORMAT, "xref offset missing");
 				while (s < e && isdigit(*s))
 					entry->ofs = entry->ofs * 10 + *s++ - '0';
 
 				while (s < e && iswhite(*s))
 					s++;
 				if (s == e || !isdigit(*s))
-					fz_throw(ctx, FZ_ERROR_GENERIC, "xref generation number missing");
+					fz_throw(ctx, FZ_ERROR_FORMAT, "xref generation number missing");
 				while (s < e && isdigit(*s))
 					entry->gen = entry->gen * 10 + *s++ - '0';
 
 				while (s < e && iswhite(*s))
 					s++;
 				if (s == e || (*s != 'f' && *s != 'n' && *s != 'o'))
-					fz_throw(ctx, FZ_ERROR_GENERIC, "unexpected xref type: 0x%x (%d %d R)", s == e ? 0 : *s, entry->num, entry->gen);
+					fz_throw(ctx, FZ_ERROR_FORMAT, "unexpected xref type: 0x%x (%d %d R)", s == e ? 0 : *s, entry->num, entry->gen);
 				entry->type = *s++;
 
 				/* If the last byte of our buffer isn't an EOL (or space), carry one byte forward */
@@ -1122,13 +1331,13 @@ pdf_read_old_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
 
 	tok = pdf_lex(ctx, file, buf);
 	if (tok != PDF_TOK_TRAILER)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "expected trailer marker");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "expected trailer marker");
 
 	tok = pdf_lex(ctx, file, buf);
 	if (tok != PDF_TOK_OPEN_DICT)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "expected trailer dictionary");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "expected trailer dictionary");
 
-	doc->has_old_style_xrefs = 1;
+	doc->last_xref_was_old_style = 1;
 
 	return pdf_parse_dict(ctx, doc, file, buf);
 }
@@ -1139,8 +1348,7 @@ pdf_read_new_xref_section(fz_context *ctx, pdf_document *doc, fz_stream *stm, in
 	pdf_xref_entry *table;
 	int i, n;
 
-	if (i0 < 0 || i0 > PDF_MAX_OBJECT_NUMBER || i1 < 0 || i1 > PDF_MAX_OBJECT_NUMBER || i0 + i1 - 1 > PDF_MAX_OBJECT_NUMBER)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "xref subsection object numbers are out of range");
+	validate_object_number_range(ctx, i0, i1, "xref subsection");
 
 	table = pdf_xref_find_subsection(ctx, doc, i0, i1);
 	for (i = i0; i < i0 + i1; i++)
@@ -1151,7 +1359,7 @@ pdf_read_new_xref_section(fz_context *ctx, pdf_document *doc, fz_stream *stm, in
 		int c = 0;
 
 		if (fz_is_eof(ctx, stm))
-			fz_throw(ctx, FZ_ERROR_GENERIC, "truncated xref stream");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "truncated xref stream");
 
 		for (n = 0; n < w0; n++)
 			a = (a << 8) + fz_read_byte(ctx, stm);
@@ -1170,12 +1378,12 @@ pdf_read_new_xref_section(fz_context *ctx, pdf_document *doc, fz_stream *stm, in
 		}
 	}
 
-	doc->has_xref_streams = 1;
+	doc->last_xref_was_old_style = 0;
 }
 
 /* Entered with file locked, remains locked throughout. */
 static pdf_obj *
-pdf_read_new_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
+pdf_read_new_xref(fz_context *ctx, pdf_document *doc)
 {
 	fz_stream *stm = NULL;
 	pdf_obj *trailer = NULL;
@@ -1192,9 +1400,9 @@ pdf_read_new_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
 	fz_try(ctx)
 	{
 		ofs = fz_tell(ctx, doc->file);
-		trailer = pdf_parse_ind_obj(ctx, doc, doc->file, buf, &num, &gen, &stm_ofs, NULL);
+		trailer = pdf_parse_ind_obj(ctx, doc, doc->file, &num, &gen, &stm_ofs, NULL);
 		if (num == 0)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Trailer object number cannot be 0\n");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "Trailer object number cannot be 0\n");
 	}
 	fz_catch(ctx)
 	{
@@ -1208,13 +1416,24 @@ pdf_read_new_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
 
 		obj = pdf_dict_get(ctx, trailer, PDF_NAME(Size));
 		if (!obj)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "xref stream missing Size entry (%d 0 R)", num);
+			fz_throw(ctx, FZ_ERROR_FORMAT, "xref stream missing Size entry (%d 0 R)", num);
 
 		size = pdf_to_int(ctx, obj);
 
 		obj = pdf_dict_get(ctx, trailer, PDF_NAME(W));
 		if (!obj)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "xref stream missing W entry (%d  R)", num);
+			fz_throw(ctx, FZ_ERROR_FORMAT, "xref stream missing W entry (%d  R)", num);
+
+		if (pdf_is_indirect(ctx, pdf_array_get(ctx, obj, 0)))
+			fz_throw(ctx, FZ_ERROR_FORMAT, "xref stream object type field width an indirect object");
+		if (pdf_is_indirect(ctx, pdf_array_get(ctx, obj, 1)))
+			fz_throw(ctx, FZ_ERROR_FORMAT, "xref stream object field 2 width an indirect object");
+		if (pdf_is_indirect(ctx, pdf_array_get(ctx, obj, 2)))
+			fz_throw(ctx, FZ_ERROR_FORMAT, "xref stream object field 3 width an indirect object");
+
+		if (doc->file_reading_linearly && pdf_dict_get(ctx, trailer, PDF_NAME(Encrypt)))
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "Cannot read linearly with encryption");
+
 		w0 = pdf_array_get_int(ctx, obj, 0);
 		w1 = pdf_array_get_int(ctx, obj, 1);
 		w2 = pdf_array_get_int(ctx, obj, 2);
@@ -1256,6 +1475,7 @@ pdf_read_new_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
 		pdf_drop_obj(ctx, entry->obj);
 		entry->obj = pdf_keep_obj(ctx, trailer);
 		entry->type = 'n';
+		pdf_set_obj_parent(ctx, trailer, num);
 	}
 	fz_always(ctx)
 	{
@@ -1271,7 +1491,7 @@ pdf_read_new_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
 }
 
 static pdf_obj *
-pdf_read_xref(fz_context *ctx, pdf_document *doc, int64_t ofs, pdf_lexbuf *buf)
+pdf_read_xref(fz_context *ctx, pdf_document *doc, int64_t ofs)
 {
 	pdf_obj *trailer;
 	int c;
@@ -1283,24 +1503,24 @@ pdf_read_xref(fz_context *ctx, pdf_document *doc, int64_t ofs, pdf_lexbuf *buf)
 
 	c = fz_peek_byte(ctx, doc->file);
 	if (c == 'x')
-		trailer = pdf_read_old_xref(ctx, doc, buf);
+		trailer = pdf_read_old_xref(ctx, doc);
 	else if (isdigit(c))
-		trailer = pdf_read_new_xref(ctx, doc, buf);
+		trailer = pdf_read_new_xref(ctx, doc);
 	else
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot recognize xref format");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cannot recognize xref format");
 
 	return trailer;
 }
 
 static int64_t
-read_xref_section(fz_context *ctx, pdf_document *doc, int64_t ofs, pdf_lexbuf *buf)
+read_xref_section(fz_context *ctx, pdf_document *doc, int64_t ofs)
 {
 	pdf_obj *trailer = NULL;
 	pdf_obj *prevobj;
 	int64_t xrefstmofs = 0;
 	int64_t prevofs = 0;
 
-	trailer = pdf_read_xref(ctx, doc, ofs, buf);
+	trailer = pdf_read_xref(ctx, doc, ofs);
 	fz_try(ctx)
 	{
 		pdf_set_populating_xref_trailer(ctx, doc, trailer);
@@ -1311,14 +1531,14 @@ read_xref_section(fz_context *ctx, pdf_document *doc, int64_t ofs, pdf_lexbuf *b
 		if (xrefstmofs)
 		{
 			if (xrefstmofs < 0)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "negative xref stream offset");
+				fz_throw(ctx, FZ_ERROR_FORMAT, "negative xref stream offset");
 
 			/*
 				Read the XRefStm stream, but throw away the resulting trailer. We do not
 				follow any Prev tag therein, as specified on Page 108 of the PDF reference
 				1.7
 			*/
-			pdf_drop_obj(ctx, pdf_read_xref(ctx, doc, xrefstmofs, buf));
+			pdf_drop_obj(ctx, pdf_read_xref(ctx, doc, xrefstmofs));
 		}
 
 		prevobj = pdf_dict_get(ctx, trailer, PDF_NAME(Prev));
@@ -1326,7 +1546,7 @@ read_xref_section(fz_context *ctx, pdf_document *doc, int64_t ofs, pdf_lexbuf *b
 		{
 			prevofs = pdf_to_int64(ctx, prevobj);
 			if (prevofs <= 0)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "invalid offset for previous xref section");
+				fz_throw(ctx, FZ_ERROR_FORMAT, "invalid offset for previous xref section");
 		}
 	}
 	fz_always(ctx)
@@ -1338,14 +1558,19 @@ read_xref_section(fz_context *ctx, pdf_document *doc, int64_t ofs, pdf_lexbuf *b
 }
 
 static void
-pdf_read_xref_sections(fz_context *ctx, pdf_document *doc, int64_t ofs, pdf_lexbuf *buf, int read_previous)
+pdf_read_xref_sections(fz_context *ctx, pdf_document *doc, int64_t ofs, int read_previous)
 {
 	int i, len, cap;
 	int64_t *offsets;
+	int populated = 0;
+	int size, xref_len;
 
 	len = 0;
 	cap = 10;
 	offsets = fz_malloc_array(ctx, cap, int64_t);
+
+	fz_var(populated);
+	fz_var(offsets);
 
 	fz_try(ctx)
 	{
@@ -1369,10 +1594,21 @@ pdf_read_xref_sections(fz_context *ctx, pdf_document *doc, int64_t ofs, pdf_lexb
 			offsets[len++] = ofs;
 
 			pdf_populate_next_xref_level(ctx, doc);
-			ofs = read_xref_section(ctx, doc, ofs, buf);
+			populated = 1;
+			ofs = read_xref_section(ctx, doc, ofs);
 			if (!read_previous)
 				break;
 		}
+
+		/* For pathological files, such as chinese-example.pdf, where the original
+		 * xref in the file is highly fragmented, we can safely solidify it here
+		 * with no ill effects. */
+		ensure_solid_xref(ctx, doc, 0, doc->num_xref_sections-1);
+
+		size = pdf_dict_get_int(ctx, pdf_trailer(ctx, doc), PDF_NAME(Size));
+		xref_len = pdf_xref_len(ctx, doc);
+		if (xref_len > size)
+			fz_throw(ctx, FZ_ERROR_FORMAT, "incorrect number of xref entries in trailer, repairing");
 	}
 	fz_always(ctx)
 	{
@@ -1380,6 +1616,12 @@ pdf_read_xref_sections(fz_context *ctx, pdf_document *doc, int64_t ofs, pdf_lexb
 	}
 	fz_catch(ctx)
 	{
+		/* Undo pdf_populate_next_xref_level if we've done that already. */
+		if (populated)
+		{
+			pdf_drop_xref_subsec(ctx, &doc->xref_sections[doc->num_xref_sections - 1]);
+			doc->num_xref_sections--;
+		}
 		fz_rethrow(ctx);
 	}
 }
@@ -1410,6 +1652,31 @@ pdf_prime_xref_index(fz_context *ctx, pdf_document *doc)
 	}
 }
 
+static void
+check_xref_entry_offsets(fz_context *ctx, pdf_xref_entry *entry, int i, pdf_document *doc, void *arg)
+{
+	int xref_len = (int)(intptr_t)arg;
+
+	if (entry->type == 'n')
+	{
+		/* Special case code: "0000000000 * n" means free,
+		 * according to some producers (inc Quartz) */
+		if (entry->ofs == 0)
+			entry->type = 'f';
+		else if (entry->ofs <= 0 || entry->ofs >= doc->file_size)
+			fz_throw(ctx, FZ_ERROR_FORMAT, "object offset out of range: %d (%d 0 R)", (int)entry->ofs, i);
+	}
+	else if (entry->type == 'o')
+	{
+		/* Read this into a local variable here, because pdf_get_xref_entry
+		 * may solidify the xref, hence invalidating "entry", meaning we
+		 * need a stashed value for the throw. */
+		int64_t ofs = entry->ofs;
+		if (ofs <= 0 || ofs >= xref_len || pdf_get_xref_entry_no_null(ctx, doc, ofs)->type != 'n')
+			fz_throw(ctx, FZ_ERROR_FORMAT, "invalid reference to an objstm that does not exist: %d (%d 0 R)", (int)ofs, i);
+	}
+}
+
 /*
  * load xref tables from pdf
  *
@@ -1417,22 +1684,21 @@ pdf_prime_xref_index(fz_context *ctx, pdf_document *doc)
  */
 
 static void
-pdf_load_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
+pdf_load_xref(fz_context *ctx, pdf_document *doc)
 {
-	int i;
 	int xref_len;
 	pdf_xref_entry *entry;
 
 	pdf_read_start_xref(ctx, doc);
 
-	pdf_read_xref_sections(ctx, doc, doc->startxref, buf, 1);
+	pdf_read_xref_sections(ctx, doc, doc->startxref, 1);
 
 	if (pdf_xref_len(ctx, doc) == 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "found xref was empty");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "found xref was empty");
 
 	pdf_prime_xref_index(ctx, doc);
 
-	entry = pdf_get_xref_entry(ctx, doc, 0);
+	entry = pdf_get_xref_entry_no_null(ctx, doc, 0);
 	/* broken pdfs where first object is missing */
 	if (!entry->type)
 	{
@@ -1446,28 +1712,7 @@ pdf_load_xref(fz_context *ctx, pdf_document *doc, pdf_lexbuf *buf)
 
 	/* broken pdfs where object offsets are out of range */
 	xref_len = pdf_xref_len(ctx, doc);
-	for (i = 0; i < xref_len; i++)
-	{
-		entry = pdf_get_xref_entry(ctx, doc, i);
-		if (entry->type == 'n')
-		{
-			/* Special case code: "0000000000 * n" means free,
-			 * according to some producers (inc Quartz) */
-			if (entry->ofs == 0)
-				entry->type = 'f';
-			else if (entry->ofs <= 0 || entry->ofs >= doc->file_size)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "object offset out of range: %d (%d 0 R)", (int)entry->ofs, i);
-		}
-		if (entry->type == 'o')
-		{
-			/* Read this into a local variable here, because pdf_get_xref_entry
-			 * may solidify the xref, hence invalidating "entry", meaning we
-			 * need a stashed value for the throw. */
-			int64_t ofs = entry->ofs;
-			if (ofs <= 0 || ofs >= xref_len || pdf_get_xref_entry(ctx, doc, ofs)->type != 'n')
-				fz_throw(ctx, FZ_ERROR_GENERIC, "invalid reference to an objstm that does not exist: %d (%d 0 R)", (int)ofs, i);
-		}
-	}
+	pdf_xref_entry_map(ctx, doc, check_xref_entry_offsets, (void *)(intptr_t)xref_len);
 }
 
 static void
@@ -1482,7 +1727,7 @@ pdf_check_linear(fz_context *ctx, pdf_document *doc)
 
 	fz_try(ctx)
 	{
-		dict = pdf_parse_ind_obj(ctx, doc, doc->file, &doc->lexbuf.base, &num, &gen, &stmofs, NULL);
+		dict = pdf_parse_ind_obj(ctx, doc, doc->file, &num, &gen, &stmofs, NULL);
 		if (!pdf_is_dict(ctx, dict))
 			break;
 		o = pdf_dict_get(ctx, dict, PDF_NAME(Linearized));
@@ -1497,6 +1742,8 @@ pdf_check_linear(fz_context *ctx, pdf_document *doc)
 	fz_catch(ctx)
 	{
 		/* Silently swallow this error. */
+		fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+		fz_report_error(ctx);
 	}
 }
 
@@ -1516,21 +1763,21 @@ pdf_load_linear(fz_context *ctx, pdf_document *doc)
 	{
 		pdf_xref_entry *entry;
 
-		dict = pdf_parse_ind_obj(ctx, doc, doc->file, &doc->lexbuf.base, &num, &gen, &stmofs, NULL);
+		dict = pdf_parse_ind_obj(ctx, doc, doc->file, &num, &gen, &stmofs, NULL);
 		if (!pdf_is_dict(ctx, dict))
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to read linearized dictionary");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "Failed to read linearized dictionary");
 		o = pdf_dict_get(ctx, dict, PDF_NAME(Linearized));
 		if (o == NULL)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to read linearized dictionary");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "Failed to read linearized dictionary");
 		lin = pdf_to_int(ctx, o);
 		if (lin != 1)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Unexpected version of Linearized tag (%d)", lin);
+			fz_throw(ctx, FZ_ERROR_FORMAT, "Unexpected version of Linearized tag (%d)", lin);
 		doc->has_linearization_object = 1;
 		len = pdf_dict_get_int(ctx, dict, PDF_NAME(L));
 		if (len != doc->file_length)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "File has been updated since linearization");
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "File has been updated since linearization");
 
-		pdf_read_xref_sections(ctx, doc, fz_tell(ctx, doc->file), &doc->lexbuf.base, 0);
+		pdf_read_xref_sections(ctx, doc, fz_tell(ctx, doc->file), 0);
 
 		doc->linear_page_count = pdf_dict_get_int(ctx, dict, PDF_NAME(N));
 		doc->linear_page_refs = fz_realloc_array(ctx, doc->linear_page_refs, doc->linear_page_count, pdf_obj *);
@@ -1551,6 +1798,8 @@ pdf_load_linear(fz_context *ctx, pdf_document *doc)
 	{
 		pdf_drop_obj(ctx, dict);
 		fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+		fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+		fz_report_error(ctx);
 		/* Drop back to non linearized reading mode */
 		doc->file_reading_linearly = 0;
 	}
@@ -1565,13 +1814,7 @@ static void
 pdf_init_document(fz_context *ctx, pdf_document *doc)
 {
 	pdf_obj *encrypt, *id;
-	pdf_obj *dict = NULL;
-	pdf_obj *obj;
-	pdf_obj *nobj = NULL;
-	int i, repaired = 0;
-
-	fz_var(dict);
-	fz_var(nobj);
+	int repaired = 0;
 
 	fz_try(ctx)
 	{
@@ -1588,6 +1831,13 @@ pdf_init_document(fz_context *ctx, pdf_document *doc)
 
 		pdf_load_version(ctx, doc);
 
+		if (doc->is_fdf)
+		{
+			doc->file_reading_linearly = 0;
+			repaired = 1;
+			break; /* skip to end of try/catch */
+		}
+
 		/* Try to load the linearized file if we are in progressive
 		 * mode. */
 		if (doc->file_reading_linearly)
@@ -1602,20 +1852,21 @@ pdf_init_document(fz_context *ctx, pdf_document *doc)
 		 * and has set us back to non-progressive mode), load normally.
 		 */
 		if (!doc->file_reading_linearly)
-			pdf_load_xref(ctx, doc, &doc->lexbuf.base);
+			pdf_load_xref(ctx, doc);
 	}
 	fz_catch(ctx)
 	{
 		pdf_drop_xref_sections(ctx, doc);
 		fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+		doc->file_reading_linearly = 0;
+		fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+		fz_report_error(ctx);
 		fz_warn(ctx, "trying to repair broken xref");
 		repaired = 1;
 	}
 
 	fz_try(ctx)
 	{
-		int hasroot, hasinfo;
-
 		if (repaired)
 		{
 			/* pdf_repair_xref may access xref_index, so reset it properly */
@@ -1635,73 +1886,111 @@ pdf_init_document(fz_context *ctx, pdf_document *doc)
 
 		if (repaired)
 		{
-			int xref_len = pdf_xref_len(ctx, doc);
 			pdf_repair_obj_stms(ctx, doc);
+			pdf_repair_trailer(ctx, doc);
+		}
+	}
+	fz_catch(ctx)
+	{
+		fz_rethrow(ctx);
+	}
+}
 
-			hasroot = (pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root)) != NULL);
-			hasinfo = (pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Info)) != NULL);
+void pdf_repair_trailer(fz_context *ctx, pdf_document *doc)
+{
+	int hasroot, hasinfo;
+	pdf_obj *obj, *nobj;
+	pdf_obj *dict = NULL;
+	int i;
 
-			for (i = 1; i < xref_len && !hasinfo && !hasroot; ++i)
+	int xref_len = pdf_xref_len(ctx, doc);
+
+	hasroot = (pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root)) != NULL);
+	hasinfo = (pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Info)) != NULL);
+
+	fz_var(dict);
+
+	fz_try(ctx)
+	{
+		/* Scan from the end so we have a better chance of finding
+		 * newer objects if there are multiple instances of Info and
+		 * Root objects.
+		 */
+		for (i = xref_len - 1; i > 0 && (!hasinfo || !hasroot); --i)
+		{
+			pdf_xref_entry *entry = pdf_get_xref_entry_no_null(ctx, doc, i);
+			if (entry->type == 0 || entry->type == 'f')
+				continue;
+
+			fz_try(ctx)
 			{
-				pdf_xref_entry *entry = pdf_get_xref_entry(ctx, doc, i);
-				if (entry->type == 0 || entry->type == 'f')
-					continue;
-
-				fz_try(ctx)
-				{
-					dict = pdf_load_object(ctx, doc, i);
-				}
-				fz_catch(ctx)
-				{
-					fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
-					fz_warn(ctx, "ignoring broken object (%d 0 R)", i);
-					continue;
-				}
-
-				if (!hasroot)
-				{
-					obj = pdf_dict_get(ctx, dict, PDF_NAME(Type));
-					if (pdf_name_eq(ctx, obj, PDF_NAME(Catalog)))
-					{
-						nobj = pdf_new_indirect(ctx, doc, i, 0);
-						pdf_dict_put_drop(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root), nobj);
-						hasroot = 1;
-					}
-				}
-
-				if (!hasinfo)
-				{
-					if (pdf_dict_get(ctx, dict, PDF_NAME(Creator)) || pdf_dict_get(ctx, dict, PDF_NAME(Producer)))
-					{
-						nobj = pdf_new_indirect(ctx, doc, i, 0);
-						pdf_dict_put_drop(ctx, pdf_trailer(ctx, doc), PDF_NAME(Info), nobj);
-						hasinfo = 1;
-					}
-				}
-
-				pdf_drop_obj(ctx, dict);
-				dict = NULL;
+				dict = pdf_load_object(ctx, doc, i);
+			}
+			fz_catch(ctx)
+			{
+				fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+				fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+				fz_report_error(ctx);
+				fz_warn(ctx, "ignoring broken object (%d 0 R)", i);
+				continue;
 			}
 
-			/* ensure that strings are not used in their repaired, non-decrypted form */
-			if (doc->crypt)
-				pdf_clear_xref(ctx, doc);
+			if (!hasroot)
+			{
+				obj = pdf_dict_get(ctx, dict, PDF_NAME(Type));
+				if (obj == PDF_NAME(Catalog))
+				{
+					nobj = pdf_new_indirect(ctx, doc, i, 0);
+					pdf_dict_put_drop(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root), nobj);
+					hasroot = 1;
+				}
+			}
+
+			if (!hasinfo)
+			{
+				if (pdf_dict_get(ctx, dict, PDF_NAME(Creator)) || pdf_dict_get(ctx, dict, PDF_NAME(Producer)))
+				{
+					nobj = pdf_new_indirect(ctx, doc, i, 0);
+					pdf_dict_put_drop(ctx, pdf_trailer(ctx, doc), PDF_NAME(Info), nobj);
+					hasinfo = 1;
+				}
+			}
+
+			pdf_drop_obj(ctx, dict);
+			dict = NULL;
+		}
+	}
+	fz_always(ctx)
+	{
+		/* ensure that strings are not used in their repaired, non-decrypted form */
+		if (doc->crypt)
+		{
+			pdf_crypt *tmp;
+			pdf_clear_xref(ctx, doc);
+
+			/* ensure that Encryption dictionary and ID are cached without decryption,
+			   otherwise a decrypted Encryption dictionary and ID may be used when saving
+			   the PDF causing it to be inconsistent (since strings/streams are encrypted
+			   with the actual encryption key, not the decrypted encryption key). */
+			tmp = doc->crypt;
+			doc->crypt = NULL;
+			fz_try(ctx)
+			{
+				(void) pdf_resolve_indirect(ctx, pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Encrypt)));
+				(void) pdf_resolve_indirect(ctx, pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(ID)));
+			}
+			fz_always(ctx)
+				doc->crypt = tmp;
+			fz_catch(ctx)
+			{
+				fz_rethrow(ctx);
+			}
 		}
 	}
 	fz_catch(ctx)
 	{
 		pdf_drop_obj(ctx, dict);
 		fz_rethrow(ctx);
-	}
-
-	fz_try(ctx)
-	{
-		pdf_read_ocg(ctx, doc);
-	}
-	fz_catch(ctx)
-	{
-		fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
-		fz_warn(ctx, "Ignoring broken Optional Content configuration");
 	}
 }
 
@@ -1715,8 +2004,9 @@ pdf_invalidate_xfa(fz_context *ctx, pdf_document *doc)
 }
 
 static void
-pdf_drop_document_imp(fz_context *ctx, pdf_document *doc)
+pdf_drop_document_imp(fz_context *ctx, fz_document *doc_)
 {
+	pdf_document *doc = (pdf_document*)doc_;
 	int i;
 
 	fz_defer_reap_start(ctx);
@@ -1729,8 +2019,11 @@ pdf_drop_document_imp(fz_context *ctx, pdf_document *doc)
 	fz_catch(ctx)
 	{
 		/* Swallow error, but continue dropping */
+		fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+		fz_report_error(ctx);
 	}
 
+	pdf_set_doc_event_callback(ctx, doc, NULL, NULL, NULL);
 	pdf_drop_js(ctx, doc->js);
 
 	pdf_drop_journal(ctx, doc->journal);
@@ -1768,6 +2061,8 @@ pdf_drop_document_imp(fz_context *ctx, pdf_document *doc)
 		fz_catch(ctx)
 		{
 			/* Swallow error, but continue dropping */
+			fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+			fz_report_error(ctx);
 		}
 	}
 
@@ -1786,7 +2081,7 @@ pdf_drop_document_imp(fz_context *ctx, pdf_document *doc)
 
 	fz_free(ctx, doc->orphans);
 
-	fz_free(ctx, doc->rev_page_map);
+	pdf_drop_page_tree_internal(ctx, doc);
 
 	fz_defer_reap_end(ctx);
 
@@ -1809,6 +2104,10 @@ pdf_keep_document(fz_context *ctx, pdf_document *doc)
  * compressed object streams
  */
 
+/*
+	Do not hold pdf_xref_entry's over call to this function as they
+	may be invalidated!
+*/
 static pdf_xref_entry *
 pdf_load_obj_stm(fz_context *ctx, pdf_document *doc, int num, pdf_lexbuf *buf, int target)
 {
@@ -1823,20 +2122,23 @@ pdf_load_obj_stm(fz_context *ctx, pdf_document *doc, int num, pdf_lexbuf *buf, i
 	int i;
 	pdf_token tok;
 	pdf_xref_entry *ret_entry = NULL;
+	int ret_idx;
 	int xref_len;
 	int found;
+	fz_stream *sub = NULL;
 
 	fz_var(numbuf);
 	fz_var(ofsbuf);
 	fz_var(objstm);
 	fz_var(stm);
+	fz_var(sub);
 
 	fz_try(ctx)
 	{
 		objstm = pdf_load_object(ctx, doc, num);
 
 		if (pdf_obj_marked(ctx, objstm))
-			fz_throw(ctx, FZ_ERROR_GENERIC, "recursive object stream lookup");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "recursive object stream lookup");
 	}
 	fz_catch(ctx)
 	{
@@ -1852,11 +2154,7 @@ pdf_load_obj_stm(fz_context *ctx, pdf_document *doc, int num, pdf_lexbuf *buf, i
 		first = pdf_dict_get_int(ctx, objstm, PDF_NAME(First));
 
 		if (count < 0 || count > PDF_MAX_OBJECT_NUMBER)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "number of objects in object stream out of range");
-		if (first < 0 || first > PDF_MAX_OBJECT_NUMBER
-				|| count < 0 || count > PDF_MAX_OBJECT_NUMBER
-				|| first + count - 1 > PDF_MAX_OBJECT_NUMBER)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "object stream object numbers are out of range");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "number of objects in object stream out of range");
 
 		numbuf = fz_calloc(ctx, count, sizeof(*numbuf));
 		ofsbuf = fz_calloc(ctx, count, sizeof(*ofsbuf));
@@ -1870,12 +2168,12 @@ pdf_load_obj_stm(fz_context *ctx, pdf_document *doc, int num, pdf_lexbuf *buf, i
 		{
 			tok = pdf_lex(ctx, stm, buf);
 			if (tok != PDF_TOK_INT)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "corrupt object stream (%d 0 R)", num);
+				fz_throw(ctx, FZ_ERROR_FORMAT, "corrupt object stream (%d 0 R)", num);
 			numbuf[found] = buf->i;
 
 			tok = pdf_lex(ctx, stm, buf);
 			if (tok != PDF_TOK_INT)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "corrupt object stream (%d 0 R)", num);
+				fz_throw(ctx, FZ_ERROR_FORMAT, "corrupt object stream (%d 0 R)", num);
 			ofsbuf[found] = buf->i;
 
 			if (numbuf[found] <= 0 || numbuf[found] >= xref_len)
@@ -1884,19 +2182,32 @@ pdf_load_obj_stm(fz_context *ctx, pdf_document *doc, int num, pdf_lexbuf *buf, i
 				found++;
 		}
 
+		ret_idx = -1;
 		for (i = 0; i < found; i++)
 		{
 			pdf_xref_entry *entry;
+			uint64_t length;
+			int64_t offset;
 
-			fz_seek(ctx, stm, first + ofsbuf[i], SEEK_SET);
+			offset = first + ofsbuf[i];
+			if (i+1 < found)
+				length = ofsbuf[i+1] - ofsbuf[i];
+			else
+				length = UINT64_MAX;
 
-			obj = pdf_parse_stm_obj(ctx, doc, stm, buf);
+			sub = fz_open_null_filter(ctx, stm, length, offset);
 
-			entry = pdf_get_xref_entry(ctx, doc, numbuf[i]);
+			obj = pdf_parse_stm_obj(ctx, doc, sub, buf);
+			fz_drop_stream(ctx, sub);
+			sub = NULL;
+
+			entry = pdf_get_xref_entry_no_null(ctx, doc, numbuf[i]);
 
 			pdf_set_obj_parent(ctx, obj, numbuf[i]);
 
-			if (entry->type == 'o' && entry->ofs == num)
+			/* We may have set entry->type to be 'O' from being 'o' to avoid nasty
+			 * recursions in pdf_cache_object. Accept the type being 'O' here. */
+			if ((entry->type == 'o' || entry->type == 'O') && entry->ofs == num)
 			{
 				/* If we already have an entry for this object,
 				 * we'd like to drop it and use the new one -
@@ -1913,21 +2224,34 @@ pdf_load_obj_stm(fz_context *ctx, pdf_document *doc, int num, pdf_lexbuf *buf, i
 				else
 				{
 					entry->obj = obj;
+					/* If we've just read a 'null' object, don't leave this as a NULL 'o' object,
+					 * as that will a) confuse the code that called us into thinking that nothing
+					 * was loaded, and b) cause the entire objstm to be reloaded every time that
+					 * object is acccessed. Instead, just mark it as an 'f'. */
+					if (obj == NULL)
+						entry->type = 'f';
 					fz_drop_buffer(ctx, entry->stm_buf);
 					entry->stm_buf = NULL;
 				}
 				if (numbuf[i] == target)
-					ret_entry = entry;
+					ret_idx = i;
 			}
 			else
 			{
 				pdf_drop_obj(ctx, obj);
 			}
 		}
+		/* Parsing our way through the stream can cause the xref to be
+		 * solidified, which will move an entry. We therefore can't
+		 * read the entry for returning until no more parsing is to be
+		 * done. Thus we end up reading this entry twice. */
+		if (ret_idx >= 0)
+			ret_entry = pdf_get_xref_entry_no_null(ctx, doc, numbuf[ret_idx]);
 	}
 	fz_always(ctx)
 	{
 		fz_drop_stream(ctx, stm);
+		fz_drop_stream(ctx, sub);
 		fz_free(ctx, ofsbuf);
 		fz_free(ctx, numbuf);
 		pdf_unmark_obj(ctx, objstm);
@@ -2101,7 +2425,8 @@ pdf_load_hinted_page(fz_context *ctx, pdf_document *doc, int pagenum)
 	fz_catch(ctx)
 	{
 		fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
-		/* Silently swallow the error and proceed as normal */
+		/* Swallow the error and proceed as normal */
+		fz_report_error(ctx);
 	}
 }
 
@@ -2183,13 +2508,13 @@ pdf_load_unencrypted_object(fz_context *ctx, pdf_document *doc, int num)
 	pdf_xref_entry *x;
 
 	if (num <= 0 || num >= pdf_xref_len(ctx, doc))
-		fz_throw(ctx, FZ_ERROR_GENERIC, "object out of range (%d 0 R); xref size %d", num, pdf_xref_len(ctx, doc));
+		fz_throw(ctx, FZ_ERROR_FORMAT, "object out of range (%d 0 R); xref size %d", num, pdf_xref_len(ctx, doc));
 
-	x = pdf_get_xref_entry(ctx, doc, num);
+	x = pdf_get_xref_entry_no_null(ctx, doc, num);
 	if (x->type == 'n')
 	{
 		fz_seek(ctx, doc->file, x->ofs, SEEK_SET);
-		return pdf_parse_ind_obj(ctx, doc, doc->file, &doc->lexbuf.base, NULL, NULL, NULL, NULL);
+		return pdf_parse_ind_obj(ctx, doc, doc->file, NULL, NULL, NULL, NULL);
 	}
 	return NULL;
 }
@@ -2203,13 +2528,15 @@ pdf_cache_object(fz_context *ctx, pdf_document *doc, int num)
 	fz_var(try_repair);
 
 	if (num <= 0 || num >= pdf_xref_len(ctx, doc))
-		fz_throw(ctx, FZ_ERROR_GENERIC, "object out of range (%d 0 R); xref size %d", num, pdf_xref_len(ctx, doc));
+		fz_throw(ctx, FZ_ERROR_FORMAT, "object out of range (%d 0 R); xref size %d", num, pdf_xref_len(ctx, doc));
 
 object_updated:
 	try_repair = 0;
 	rnum = num;
 
 	x = pdf_get_xref_entry(ctx, doc, num);
+	if (x == NULL)
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cannot find object in xref (%d 0 R)", num);
 
 	if (x->obj != NULL)
 		return x;
@@ -2224,13 +2551,17 @@ object_updated:
 
 		fz_try(ctx)
 		{
-			x->obj = pdf_parse_ind_obj(ctx, doc, doc->file, &doc->lexbuf.base,
+			x->obj = pdf_parse_ind_obj(ctx, doc, doc->file,
 					&rnum, &rgen, &x->stm_ofs, &try_repair);
 		}
 		fz_catch(ctx)
 		{
-			if (!try_repair || fz_caught(ctx) == FZ_ERROR_TRYLATER)
+			fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+			fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+			if (!try_repair)
 				fz_rethrow(ctx);
+			else
+				fz_report_error(ctx);
 		}
 
 		if (!try_repair && rnum != num)
@@ -2247,19 +2578,24 @@ object_updated:
 
 		if (try_repair)
 		{
+perform_repair:
 			fz_try(ctx)
 			{
 				pdf_repair_xref(ctx, doc);
 				pdf_prime_xref_index(ctx, doc);
 				pdf_repair_obj_stms(ctx, doc);
+				pdf_repair_trailer(ctx, doc);
 			}
 			fz_catch(ctx)
 			{
 				fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+				fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+				fz_rethrow_if(ctx, FZ_ERROR_REPAIRED);
+				fz_report_error(ctx);
 				if (rnum == num)
-					fz_throw(ctx, FZ_ERROR_GENERIC, "cannot parse object (%d 0 R)", num);
+					fz_throw(ctx, FZ_ERROR_FORMAT, "cannot parse object (%d 0 R)", num);
 				else
-					fz_throw(ctx, FZ_ERROR_GENERIC, "found object (%d 0 R) instead of (%d 0 R)", rnum, num);
+					fz_throw(ctx, FZ_ERROR_FORMAT, "found object (%d 0 R) instead of (%d 0 R)", rnum, num);
 			}
 			goto object_updated;
 		}
@@ -2271,11 +2607,34 @@ object_updated:
 	{
 		if (!x->obj)
 		{
-			x = pdf_load_obj_stm(ctx, doc, x->ofs, &doc->lexbuf.base, num);
+			pdf_xref_entry *orig_x = x;
+			pdf_xref_entry *ox = x; /* This init is unused, but it shuts warnings up. */
+			orig_x->type = 'O'; /* Mark this node so we know we're recursing. */
+			fz_try(ctx)
+				x = pdf_load_obj_stm(ctx, doc, x->ofs, &doc->lexbuf.base, num);
+			fz_always(ctx)
+			{
+				/* Most of the time ox == orig_x, but if pdf_load_obj_stm performed a
+				 * repair, it may not be. It is safe to call pdf_get_xref_entry_no_change
+				 * here, as it does not try/catch. */
+				ox = pdf_get_xref_entry_no_change(ctx, doc, num);
+				/* Bug 706762: ox can be NULL if the object went away during a repair. */
+				if (ox && ox->type == 'O')
+					ox->type = 'o'; /* Not recursing any more. */
+			}
+			fz_catch(ctx)
+				fz_rethrow(ctx);
 			if (x == NULL)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "cannot load object stream containing object (%d 0 R)", num);
+				fz_throw(ctx, FZ_ERROR_FORMAT, "cannot load object stream containing object (%d 0 R)", num);
 			if (!x->obj)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "object (%d 0 R) was not found in its object stream", num);
+			{
+				x->type = 'f';
+				if (ox)
+					ox->type = 'f';
+				if (doc->repair_attempted)
+					fz_throw(ctx, FZ_ERROR_FORMAT, "object (%d 0 R) was not found in its object stream", num);
+				goto perform_repair;
+			}
 		}
 	}
 	else if (doc->hint_obj_offsets && read_hinted_object(ctx, doc, num))
@@ -2288,7 +2647,7 @@ object_updated:
 	}
 	else
 	{
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot find object in xref (%d 0 R)", num);
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cannot find object in xref (%d 0 R)", num);
 	}
 
 	pdf_set_obj_parent(ctx, x->obj, num);
@@ -2324,6 +2683,9 @@ pdf_resolve_indirect(fz_context *ctx, pdf_obj *ref)
 		fz_catch(ctx)
 		{
 			fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+			fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+			fz_rethrow_if(ctx, FZ_ERROR_REPAIRED);
+			fz_report_error(ctx);
 			fz_warn(ctx, "cannot load object (%d 0 R) into cache", num);
 			return NULL;
 		}
@@ -2368,7 +2730,7 @@ pdf_is_local_object(fz_context *ctx, pdf_document *doc, pdf_obj *obj)
 	if (!pdf_is_indirect(ctx, obj))
 		return 0;
 
-	if (xref == NULL || doc->local_xref_nesting == 0)
+	if (xref == NULL)
 		return 0; /* no local xref present */
 
 	num = pdf_to_num(ctx, obj);
@@ -2376,7 +2738,7 @@ pdf_is_local_object(fz_context *ctx, pdf_document *doc, pdf_obj *obj)
 	/* Local xrefs only ever have 1 section, and it should be solid. */
 	sub = xref->subsec;
 	if (num >= sub->start && num < sub->start + sub->len)
-		return sub->table[num - sub->start].type != 'f';
+		return sub->table[num - sub->start].type != 0;
 
 	return 0;
 }
@@ -2414,7 +2776,7 @@ pdf_create_object(fz_context *ctx, pdf_document *doc)
 	num = pdf_xref_len(ctx, doc);
 
 	if (num > PDF_MAX_OBJECT_NUMBER)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "too many objects stored in pdf");
+		fz_throw(ctx, FZ_ERROR_LIMIT, "too many objects stored in pdf");
 
 	entry = pdf_get_incremental_xref_entry(ctx, doc, num);
 	entry->type = 'f';
@@ -2424,6 +2786,9 @@ pdf_create_object(fz_context *ctx, pdf_document *doc)
 	entry->stm_ofs = 0;
 	entry->stm_buf = NULL;
 	entry->obj = NULL;
+
+	pdf_add_journal_fragment(ctx, doc, num, NULL, NULL, 1);
+
 	return num;
 }
 
@@ -2433,7 +2798,7 @@ pdf_delete_local_object(fz_context *ctx, pdf_document *doc, int num)
 	pdf_xref_entry *x;
 
 	if (doc->local_xref == NULL || doc->local_xref_nesting == 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "No local xref to delete from!");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "No local xref to delete from!");
 
 	if (num <= 0 || num >= doc->local_xref->num_objects)
 	{
@@ -2459,6 +2824,8 @@ void
 pdf_delete_object(fz_context *ctx, pdf_document *doc, int num)
 {
 	pdf_xref_entry *x;
+	pdf_xref *xref;
+	int j;
 
 	if (doc->local_xref && doc->local_xref_nesting > 0)
 	{
@@ -2484,6 +2851,47 @@ pdf_delete_object(fz_context *ctx, pdf_document *doc, int num)
 	x->stm_ofs = 0;
 	x->stm_buf = NULL;
 	x->obj = NULL;
+
+	/* Currently we've left a 'free' object in the incremental
+	 * section. This is enough to cause us to think that the
+	 * document has changes. Check back in the non-incremental
+	 * sections to see if the last instance of the object there
+	 * was free (or if this object never appeared). If so, we
+	 * can mark this object as non-existent in the incremental
+	 * xref. This is important so we can 'undo' back to emptiness
+	 * after we save/when we reload a snapshot. */
+	for (j = 1; j < doc->num_xref_sections; j++)
+	{
+		xref = &doc->xref_sections[j];
+
+		if (num < xref->num_objects)
+		{
+			pdf_xref_subsec *sub;
+			for (sub = xref->subsec; sub != NULL; sub = sub->next)
+			{
+				pdf_xref_entry *entry;
+
+				if (num < sub->start || num >= sub->start + sub->len)
+					continue;
+
+				entry = &sub->table[num - sub->start];
+				if (entry->type)
+				{
+					if (entry->type == 'f')
+					{
+						/* It was free already! */
+						x->type = 0;
+						x->gen = 0;
+					}
+					/* It was a real object. */
+					return;
+				}
+			}
+		}
+	}
+	/* It never appeared before. */
+	x->type = 0;
+	x->gen = 0;
 }
 
 static void
@@ -2492,7 +2900,7 @@ pdf_update_local_object(fz_context *ctx, pdf_document *doc, int num, pdf_obj *ne
 	pdf_xref_entry *x;
 
 	if (doc->local_xref == NULL || doc->local_xref_nesting == 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Can't update local object without a local xref");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Can't update local object without a local xref");
 
 	if (!newobj)
 	{
@@ -2515,6 +2923,9 @@ void
 pdf_update_object(fz_context *ctx, pdf_document *doc, int num, pdf_obj *newobj)
 {
 	pdf_xref_entry *x;
+
+	if (!doc)
+		return;
 
 	if (doc->local_xref && doc->local_xref_nesting > 0)
 	{
@@ -2573,7 +2984,7 @@ pdf_update_stream(fz_context *ctx, pdf_document *doc, pdf_obj *obj, fz_buffer *n
 			return;
 		}
 
-		x = pdf_get_xref_entry(ctx, doc, num);
+		x = pdf_get_xref_entry_no_null(ctx, doc, num);
 	}
 
 	fz_drop_buffer(ctx, x->stm_buf);
@@ -2587,7 +2998,7 @@ pdf_update_stream(fz_context *ctx, pdf_document *doc, pdf_obj *obj, fz_buffer *n
 }
 
 int
-pdf_lookup_metadata(fz_context *ctx, pdf_document *doc, const char *key, char *buf, int size)
+pdf_lookup_metadata(fz_context *ctx, pdf_document *doc, const char *key, char *buf, size_t size)
 {
 	if (!strcmp(key, FZ_META_FORMAT))
 	{
@@ -2598,11 +3009,23 @@ pdf_lookup_metadata(fz_context *ctx, pdf_document *doc, const char *key, char *b
 	if (!strcmp(key, FZ_META_ENCRYPTION))
 	{
 		if (doc->crypt)
-			return 1 + (int)fz_snprintf(buf, size, "Standard V%d R%d %d-bit %s",
-					pdf_crypt_version(ctx, doc->crypt),
-					pdf_crypt_revision(ctx, doc->crypt),
-					pdf_crypt_length(ctx, doc->crypt),
-					pdf_crypt_method(ctx, doc->crypt));
+		{
+			const char *stream_method = pdf_crypt_stream_method(ctx, doc->crypt);
+			const char *string_method = pdf_crypt_string_method(ctx, doc->crypt);
+			if (stream_method == string_method)
+				return 1 + (int)fz_snprintf(buf, size, "Standard V%d R%d %d-bit %s",
+						pdf_crypt_version(ctx, doc->crypt),
+						pdf_crypt_revision(ctx, doc->crypt),
+						pdf_crypt_length(ctx, doc->crypt),
+						pdf_crypt_string_method(ctx, doc->crypt));
+			else
+				return 1 + (int)fz_snprintf(buf, size, "Standard V%d R%d %d-bit streams: %s strings: %s",
+						pdf_crypt_version(ctx, doc->crypt),
+						pdf_crypt_revision(ctx, doc->crypt),
+						pdf_crypt_length(ctx, doc->crypt),
+						pdf_crypt_stream_method(ctx, doc->crypt),
+						pdf_crypt_string_method(ctx, doc->crypt));
+		}
 		else
 			return 1 + (int)fz_strlcpy(buf, "None", size);
 	}
@@ -2622,6 +3045,9 @@ pdf_lookup_metadata(fz_context *ctx, pdf_document *doc, const char *key, char *b
 			return -1;
 
 		s = pdf_to_text_string(ctx, info);
+		if (strlen(s) <= 0)
+			return -1;
+
 		n = 1 + (int)fz_strlcpy(buf, s, size);
 		return n;
 	}
@@ -2629,12 +3055,76 @@ pdf_lookup_metadata(fz_context *ctx, pdf_document *doc, const char *key, char *b
 	return -1;
 }
 
+void
+pdf_set_metadata(fz_context *ctx, pdf_document *doc, const char *key, const char *value)
+{
 
-static fz_location
-pdf_resolve_link_imp(fz_context *ctx, fz_document *doc_, const char *uri, float *xp, float *yp)
+	pdf_obj *info = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Info));
+
+	pdf_begin_operation(ctx, doc, "Set Metadata");
+
+	fz_try(ctx)
+	{
+		/* Ensure we have an Info dictionary. */
+		if (!pdf_is_dict(ctx, info))
+		{
+			info = pdf_add_new_dict(ctx, doc, 8);
+			pdf_dict_put_drop(ctx, pdf_trailer(ctx, doc), PDF_NAME(Info), info);
+		}
+
+		if (!strcmp(key, FZ_META_INFO_TITLE))
+			pdf_dict_put_text_string(ctx, info, PDF_NAME(Title), value);
+		else if (!strcmp(key, FZ_META_INFO_AUTHOR))
+			pdf_dict_put_text_string(ctx, info, PDF_NAME(Author), value);
+		else if (!strcmp(key, FZ_META_INFO_SUBJECT))
+			pdf_dict_put_text_string(ctx, info, PDF_NAME(Subject), value);
+		else if (!strcmp(key, FZ_META_INFO_KEYWORDS))
+			pdf_dict_put_text_string(ctx, info, PDF_NAME(Keywords), value);
+		else if (!strcmp(key, FZ_META_INFO_CREATOR))
+			pdf_dict_put_text_string(ctx, info, PDF_NAME(Creator), value);
+		else if (!strcmp(key, FZ_META_INFO_PRODUCER))
+			pdf_dict_put_text_string(ctx, info, PDF_NAME(Producer), value);
+		else if (!strcmp(key, FZ_META_INFO_CREATIONDATE))
+		{
+			int64_t time = pdf_parse_date(ctx, value);
+			if (time >= 0)
+				pdf_dict_put_date(ctx, info, PDF_NAME(CreationDate), time);
+		}
+		else if (!strcmp(key, FZ_META_INFO_MODIFICATIONDATE))
+		{
+			int64_t time = pdf_parse_date(ctx, value);
+			if (time >= 0)
+				pdf_dict_put_date(ctx, info, PDF_NAME(ModDate), time);
+		}
+
+		if (!strncmp(key, FZ_META_INFO, strlen(FZ_META_INFO)))
+			key += strlen(FZ_META_INFO);
+		pdf_dict_put_text_string(ctx, info, pdf_new_name(ctx, key), value);
+		pdf_end_operation(ctx, doc);
+	}
+	fz_catch(ctx)
+	{
+		pdf_abandon_operation(ctx, doc);
+		fz_rethrow(ctx);
+	}
+}
+
+static fz_link_dest
+pdf_resolve_link_imp(fz_context *ctx, fz_document *doc_, const char *uri)
 {
 	pdf_document *doc = (pdf_document*)doc_;
-	return fz_make_location(0, pdf_resolve_link(ctx, doc, uri, xp, yp));
+	return pdf_resolve_link_dest(ctx, doc, uri);
+}
+
+char *pdf_format_link_uri(fz_context *ctx, fz_document *doc, fz_link_dest dest)
+{
+	return pdf_new_uri_from_explicit_dest(ctx, dest);
+}
+
+static fz_document *
+as_pdf(fz_context *ctx, fz_document *doc)
+{
+	return doc;
 }
 
 /*
@@ -2647,24 +3137,80 @@ pdf_resolve_link_imp(fz_context *ctx, fz_document *doc_, const char *uri, float 
 	saves roughly 6MB of space.
 */
 
+static fz_colorspace *pdf_document_output_intent_imp(fz_context *ctx, fz_document *doc)
+{
+	return pdf_document_output_intent(ctx, (pdf_document*)doc);
+}
+
+int pdf_needs_password_imp(fz_context *ctx, fz_document *doc)
+{
+	return pdf_needs_password(ctx, (pdf_document*)doc);
+}
+
+int pdf_authenticate_password_imp(fz_context *ctx, fz_document *doc, const char *pw)
+{
+	return pdf_authenticate_password(ctx, (pdf_document*)doc, pw);
+}
+
+int pdf_has_permission_imp(fz_context *ctx, fz_document *doc, fz_permission p)
+{
+	return pdf_has_permission(ctx, (pdf_document*)doc, p);
+}
+
+fz_outline_iterator *pdf_new_outline_iterator_imp(fz_context *ctx, fz_document *doc)
+{
+	return pdf_new_outline_iterator(ctx, (pdf_document*)doc);
+}
+
+int pdf_lookup_metadata_imp(fz_context *ctx, fz_document *doc, const char *key, char *ptr, size_t size)
+{
+	return pdf_lookup_metadata(ctx, (pdf_document*)doc, key, ptr, size);
+}
+
+void pdf_set_metadata_imp(fz_context *ctx, fz_document *doc, const char *key, const char *value)
+{
+	pdf_set_metadata(ctx, (pdf_document*)doc, key, value);
+}
+
+void pdf_run_document_structure_imp(fz_context *ctx, fz_document *doc, fz_device *dev, fz_cookie *cookie)
+{
+	pdf_run_document_structure(ctx, (pdf_document*)doc, dev, cookie);
+}
+
+
 static pdf_document *
 pdf_new_document(fz_context *ctx, fz_stream *file)
 {
 	pdf_document *doc = fz_new_derived_document(ctx, pdf_document);
 
-	doc->super.drop_document = (fz_document_drop_fn*)pdf_drop_document_imp;
-	doc->super.get_output_intent = (fz_document_output_intent_fn*)pdf_document_output_intent;
-	doc->super.needs_password = (fz_document_needs_password_fn*)pdf_needs_password;
-	doc->super.authenticate_password = (fz_document_authenticate_password_fn*)pdf_authenticate_password;
-	doc->super.has_permission = (fz_document_has_permission_fn*)pdf_has_permission;
-	doc->super.load_outline = (fz_document_load_outline_fn*)pdf_load_outline;
-	doc->super.resolve_link = pdf_resolve_link_imp;
+#ifndef NDEBUG
+	{
+		void pdf_verify_name_table_sanity(void);
+		pdf_verify_name_table_sanity();
+	}
+#endif
+
+	doc->super.drop_document = pdf_drop_document_imp;
+	doc->super.get_output_intent = pdf_document_output_intent_imp;
+	doc->super.needs_password = pdf_needs_password_imp;
+	doc->super.authenticate_password = pdf_authenticate_password_imp;
+	doc->super.has_permission = pdf_has_permission_imp;
+	doc->super.outline_iterator = pdf_new_outline_iterator_imp;
+	doc->super.resolve_link_dest = pdf_resolve_link_imp;
+	doc->super.format_link_uri = pdf_format_link_uri;
 	doc->super.count_pages = pdf_count_pages_imp;
 	doc->super.load_page = pdf_load_page_imp;
-	doc->super.lookup_metadata = (fz_document_lookup_metadata_fn*)pdf_lookup_metadata;
+	doc->super.page_label = pdf_page_label_imp;
+	doc->super.lookup_metadata = pdf_lookup_metadata_imp;
+	doc->super.set_metadata = pdf_set_metadata_imp;
+	doc->super.run_structure = pdf_run_document_structure_imp;
+	doc->super.as_pdf = as_pdf;
 
 	pdf_lexbuf_init(ctx, &doc->lexbuf.base, PDF_LEXBUF_LARGE);
 	doc->file = fz_keep_stream(ctx, file);
+
+	/* Default to PDF-1.7 if the version header is missing and for new documents */
+	doc->version = 17;
 
 	return doc;
 }
@@ -2681,13 +3227,16 @@ pdf_open_document_with_stream(fz_context *ctx, fz_stream *file)
 	{
 		/* fz_drop_document may clobber our error code/message so we have to stash them temporarily. */
 		char message[256];
-		int caught = fz_caught(ctx);
-		fz_strlcpy(message, fz_caught_message(ctx), sizeof message);
+		int code;
+		fz_strlcpy(message, fz_convert_error(ctx, &code), sizeof message);
 		fz_drop_document(ctx, &doc->super);
-		fz_throw(ctx, caught, "%s", message);
+		fz_throw(ctx, code, "%s", message);
 	}
 	return doc;
 }
+
+/* Uncomment the following to test progressive loading. */
+/* #define TEST_PROGRESSIVE_HACK */
 
 pdf_document *
 pdf_open_document(fz_context *ctx, const char *filename)
@@ -2701,6 +3250,9 @@ pdf_open_document(fz_context *ctx, const char *filename)
 	fz_try(ctx)
 	{
 		file = fz_open_file(ctx, filename);
+#ifdef TEST_PROGRESSIVE_HACK
+		file->progressive = 1;
+#endif
 		doc = pdf_new_document(ctx, file);
 		pdf_init_document(ctx, doc);
 	}
@@ -2710,9 +3262,27 @@ pdf_open_document(fz_context *ctx, const char *filename)
 	}
 	fz_catch(ctx)
 	{
+		/* fz_drop_document may clobber our error code/message so we have to stash them temporarily. */
+		char message[256];
+		int code;
+		fz_strlcpy(message, fz_convert_error(ctx, &code), sizeof message);
 		fz_drop_document(ctx, &doc->super);
-		fz_rethrow(ctx);
+		fz_throw(ctx, code, "%s", message);
 	}
+
+#ifdef TEST_PROGRESSIVE_HACK
+	if (doc->file_reading_linearly)
+	{
+		fz_try(ctx)
+			pdf_progressive_advance(ctx, doc, doc->linear_page_count-1);
+		fz_catch(ctx)
+		{
+			doc->file_reading_linearly = 0;
+			/* swallow the error */
+		}
+	}
+#endif
+
 	return doc;
 }
 
@@ -2740,9 +3310,9 @@ pdf_load_hints(fz_context *ctx, pdf_document *doc, int objnum)
 		int max_object_num = pdf_xref_len(ctx, doc);
 
 		stream = pdf_open_stream_number(ctx, doc, objnum);
-		dict = pdf_get_xref_entry(ctx, doc, objnum)->obj;
+		dict = pdf_get_xref_entry_no_null(ctx, doc, objnum)->obj;
 		if (dict == NULL || !pdf_is_dict(ctx, dict))
-			fz_throw(ctx, FZ_ERROR_GENERIC, "malformed hint object");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "malformed hint object");
 
 		shared_hint_offset = pdf_dict_get_int(ctx, dict, PDF_NAME(S));
 
@@ -2842,7 +3412,7 @@ pdf_load_hints(fz_context *ctx, pdf_document *doc, int objnum)
 		{
 			if (doc->hint_shared_ref[i] >= shared_obj_count_total)
 			{
-				fz_throw(ctx, FZ_ERROR_GENERIC, "malformed hint stream (shared refs)");
+				fz_throw(ctx, FZ_ERROR_FORMAT, "malformed hint stream (shared refs)");
 			}
 		}
 
@@ -2908,11 +3478,13 @@ pdf_load_hints(fz_context *ctx, pdf_document *doc, int objnum)
 		/* Now, actually use the data we have gathered. */
 		for (i = 0 /*shared_obj_count_page1*/; i < shared_obj_count_total; i++)
 		{
-			doc->hint_obj_offsets[doc->hint_shared[i].number] = doc->hint_shared[i].offset;
+			if (doc->hint_shared[i].number >= 0 && doc->hint_shared[i].number < max_object_num)
+				doc->hint_obj_offsets[doc->hint_shared[i].number] = doc->hint_shared[i].offset;
 		}
 		for (i = 0; i < doc->linear_page_count; i++)
 		{
-			doc->hint_obj_offsets[doc->hint_page[i].number] = doc->hint_page[i].offset;
+			if (doc->hint_page[i].number >= 0 && doc->hint_page[i].number < max_object_num)
+				doc->hint_obj_offsets[doc->hint_page[i].number] = doc->hint_page[i].offset;
 		}
 	}
 	fz_always(ctx)
@@ -2926,7 +3498,9 @@ pdf_load_hints(fz_context *ctx, pdf_document *doc, int objnum)
 		doc->hints_loaded = 1;
 		/* We won't use the linearized object anymore. */
 		doc->file_reading_linearly = 0;
+		fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
 		/* Any other error becomes a TRYLATER */
+		fz_report_error(ctx);
 		fz_throw(ctx, FZ_ERROR_TRYLATER, "malformed hints object");
 	}
 	doc->hints_loaded = 1;
@@ -2945,7 +3519,6 @@ pdf_load_hint_object(fz_context *ctx, pdf_document *doc)
 		while (1)
 		{
 			pdf_obj *page = NULL;
-			int64_t tmpofs;
 			int num, tok;
 
 			tok = pdf_lex(ctx, doc->file, buf);
@@ -2959,7 +3532,7 @@ pdf_load_hint_object(fz_context *ctx, pdf_document *doc)
 			tok = pdf_lex(ctx, doc->file, buf);
 			if (tok != PDF_TOK_OBJ)
 				break;
-			(void)pdf_repair_obj(ctx, doc, buf, &tmpofs, NULL, NULL, NULL, &page, &tmpofs, NULL);
+			(void)pdf_repair_obj(ctx, doc, buf, NULL, NULL, NULL, NULL, &page, NULL, NULL);
 			pdf_load_hints(ctx, doc, num);
 		}
 	}
@@ -2975,14 +3548,13 @@ pdf_load_hint_object(fz_context *ctx, pdf_document *doc)
 
 pdf_obj *pdf_progressive_advance(fz_context *ctx, pdf_document *doc, int pagenum)
 {
-	pdf_lexbuf *buf = &doc->lexbuf.base;
 	int curr_pos;
 	pdf_obj *page = NULL;
 
 	pdf_load_hinted_page(ctx, doc, pagenum);
 
 	if (pagenum < 0 || pagenum >= doc->linear_page_count)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "page load out of range (%d of %d)", pagenum, doc->linear_page_count);
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "page load out of range (%d of %d)", pagenum, doc->linear_page_count);
 
 	if (doc->linear_pos == doc->file_length)
 		return doc->linear_page_refs[pagenum];
@@ -3015,12 +3587,12 @@ pdf_obj *pdf_progressive_advance(fz_context *ctx, pdf_document *doc, int pagenum
 			pdf_obj *catalog;
 			pdf_obj *pages;
 			doc->linear_pos = doc->file_length;
-			pdf_load_xref(ctx, doc, buf);
+			pdf_load_xref(ctx, doc);
 			catalog = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root));
 			pages = pdf_dict_get(ctx, catalog, PDF_NAME(Pages));
 
 			if (!pdf_is_dict(ctx, pages))
-				fz_throw(ctx, FZ_ERROR_GENERIC, "missing page tree");
+				fz_throw(ctx, FZ_ERROR_FORMAT, "missing page tree");
 			break;
 		}
 	}
@@ -3038,6 +3610,9 @@ pdf_obj *pdf_progressive_advance(fz_context *ctx, pdf_document *doc, int pagenum
 				/* Still not got a page */
 				fz_rethrow(ctx);
 			}
+			// TODO: should we really swallow this error?
+			fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+			fz_report_error(ctx);
 		}
 		else
 			fz_rethrow(ctx);
@@ -3046,14 +3621,23 @@ pdf_obj *pdf_progressive_advance(fz_context *ctx, pdf_document *doc, int pagenum
 	return doc->linear_page_refs[pagenum];
 }
 
+pdf_document *fz_new_pdf_document_from_fz_document(fz_context *ctx, fz_document *ptr)
+{
+	if (!ptr || !ptr->as_pdf)
+		return NULL;
+	return (pdf_document *)fz_keep_document(ctx, ptr->as_pdf(ctx, ptr));
+}
+
 pdf_document *pdf_document_from_fz_document(fz_context *ctx, fz_document *ptr)
 {
 	return (pdf_document *)((ptr && ptr->count_pages == pdf_count_pages_imp) ? ptr : NULL);
 }
 
-pdf_page *pdf_page_from_fz_page(fz_context *ctx, fz_page *ptr)
+pdf_page *pdf_page_from_fz_page(fz_context *ctx, fz_page *page)
 {
-	return (pdf_page *)((ptr && ptr->bound_page == (fz_page_bound_page_fn*)pdf_bound_page) ? ptr : NULL);
+	if (pdf_document_from_fz_document(ctx, page->doc))
+		return (pdf_page*) page;
+	return NULL;
 }
 
 pdf_document *pdf_specifics(fz_context *ctx, fz_document *doc)
@@ -3069,7 +3653,7 @@ pdf_add_object(fz_context *ctx, pdf_document *doc, pdf_obj *obj)
 
 	orig_doc = pdf_get_bound_document(ctx, obj);
 	if (orig_doc && orig_doc != doc)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "tried to add an object belonging to a different document");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "tried to add an object belonging to a different document");
 	if (pdf_is_indirect(ctx, obj))
 		return pdf_keep_obj(ctx, obj);
 	num = pdf_create_object(ctx, doc);
@@ -3132,7 +3716,6 @@ pdf_document *pdf_create_document(fz_context *ctx)
 	doc = pdf_new_document(ctx, NULL);
 	fz_try(ctx)
 	{
-		doc->version = 17;
 		doc->file_size = 0;
 		doc->startxref = 0;
 		doc->num_xref_sections = 0;
@@ -3165,6 +3748,7 @@ pdf_document *pdf_create_document(fz_context *ctx)
 static const char *pdf_extensions[] =
 {
 	"pdf",
+	"fdf",
 	"pclm",
 	"ai",
 	NULL
@@ -3177,15 +3761,60 @@ static const char *pdf_mimetypes[] =
 	NULL
 };
 
+static int
+pdf_recognize_doc_content(fz_context *ctx, const fz_document_handler *handler, fz_stream *stream, fz_archive *dir, void **state, fz_document_recognize_state_free_fn **free_state)
+{
+	const char *match = "%PDF-";
+	const char *match2 = "%FDF-";
+	int pos = 0;
+	int n = 4096+5;
+	int c;
+
+	if (state)
+		*state = NULL;
+	if (free_state)
+		*free_state = NULL;
+
+	if (stream == NULL)
+		return 0;
+
+	do
+	{
+		c = fz_read_byte(ctx, stream);
+		if (c == EOF)
+			return 0;
+		if (c == match[pos] || c == match2[pos])
+		{
+			pos++;
+			if (pos == 5)
+				return 100;
+		}
+		else
+		{
+			/* Restart matching, but recheck c against the start. */
+			pos = (c == match[0]);
+		}
+	}
+	while (--n > 0);
+
+	return 0;
+}
+
+static fz_document *
+open_document(fz_context *ctx, const fz_document_handler *handler, fz_stream *file, fz_stream *accel, fz_archive *zip, void *state)
+{
+	if (file == NULL)
+		return NULL;
+	return (fz_document *)pdf_open_document_with_stream(ctx, file);
+}
+
 fz_document_handler pdf_document_handler =
 {
 	NULL,
-	(fz_document_open_fn*)pdf_open_document,
-	(fz_document_open_with_stream_fn*)pdf_open_document_with_stream,
+	open_document,
 	pdf_extensions,
 	pdf_mimetypes,
-	NULL,
-	NULL
+	pdf_recognize_doc_content
 };
 
 void pdf_mark_xref(fz_context *ctx, pdf_document *doc)
@@ -3294,7 +3923,7 @@ static int pdf_obj_exists(fz_context *ctx, pdf_document *doc, int i)
 	int j;
 
 	if (i < 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Negative object number requested");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Negative object number requested");
 
 	if (i <= doc->max_xref_len)
 		j = doc->xref_index[i];
@@ -3801,7 +4430,7 @@ check_field(fz_context *ctx, pdf_document *doc, pdf_changes *changes, pdf_obj *o
 		t = pdf_dict_get(ctx, old_obj, PDF_NAME(T));
 		if (t != NULL)
 		{
-			name = pdf_to_text_string(ctx, pdf_dict_get(ctx, old_obj, PDF_NAME(T)));
+			name = pdf_dict_get_text_string(ctx, old_obj, PDF_NAME(T));
 			n = strlen(name)+1;
 			if (*name_prefix)
 				n += 1 + strlen(name_prefix);
@@ -3941,7 +4570,7 @@ static int
 pdf_obj_changed_in_version(fz_context *ctx, pdf_document *doc, int num, int version)
 {
 	if (num < 0 || num > doc->max_xref_len)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Invalid object number requested");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Invalid object number requested");
 
 	return version == doc->xref_index[num];
 }
@@ -3978,7 +4607,7 @@ merge_lock_specification(fz_context *ctx, pdf_locked_fields *fields, pdf_obj *lo
 				 * We need to remove <Fields> from <excludes>. */
 				for (i = 0; i < len; i++)
 				{
-					const char *s = pdf_to_text_string(ctx, pdf_array_get(ctx, f, i));
+					const char *s = pdf_array_get_text_string(ctx, f, i);
 					int r, w;
 
 					for (r = w = 0; r < fields->excludes.len; r++)
@@ -3995,7 +4624,7 @@ merge_lock_specification(fz_context *ctx, pdf_locked_fields *fields, pdf_obj *lo
 				 * We need to add <Fields> to <include> (avoiding repetition). */
 				for (i = 0; i < len; i++)
 				{
-					const char *s = pdf_to_text_string(ctx, pdf_array_get(ctx, f, i));
+					const char *s = pdf_array_get_text_string(ctx, f, i);
 
 					for (r = 0; r < fields->includes.len; r++)
 					{
@@ -4017,7 +4646,7 @@ merge_lock_specification(fz_context *ctx, pdf_locked_fields *fields, pdf_obj *lo
 				{
 					for (i = 0; i < len; i++)
 					{
-						const char *s = pdf_to_text_string(ctx, pdf_array_get(ctx, f, i));
+						const char *s = pdf_array_get_text_string(ctx, f, i);
 						if (!strcmp(s, fields->excludes.list[r]))
 							break;
 					}
@@ -4033,7 +4662,7 @@ merge_lock_specification(fz_context *ctx, pdf_locked_fields *fields, pdf_obj *lo
 				fields->all = 1;
 				for (i = 0; i < len; i++)
 				{
-					const char *s = pdf_to_text_string(ctx, pdf_array_get(ctx, f, i));
+					const char *s = pdf_array_get_text_string(ctx, f, i);
 					for (r = 0; r < fields->includes.len; r++)
 					{
 						if (!strcmp(s, fields->includes.list[r]))
@@ -4071,7 +4700,7 @@ find_locked_fields_value(fz_context *ctx, pdf_locked_fields *fields, pdf_obj *v)
 		tp = pdf_dict_get(ctx, sr, PDF_NAME(TransformParams));
 		if (pdf_name_eq(ctx, tm, PDF_NAME(DocMDP)))
 		{
-			int p = pdf_to_int(ctx, pdf_dict_get(ctx, tp, PDF_NAME(P)));
+			int p = pdf_dict_get_int(ctx, tp, PDF_NAME(P));
 
 			if (p == 0)
 				p = 2;
@@ -4334,7 +4963,10 @@ validate_locked_fields(fz_context *ctx, pdf_document *doc, int version, pdf_lock
 	fz_always(ctx)
 		doc->xref_base = o_xref_base;
 	fz_catch(ctx)
+	{
+		fz_free(ctx, changes);
 		fz_rethrow(ctx);
+	}
 
 	for (i = 1; i < num_objs; i++)
 	{
@@ -4360,7 +4992,7 @@ pdf_validate_changes(fz_context *ctx, pdf_document *doc, int version)
 	int result;
 
 	if (version < 0 || version >= n)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "There aren't that many changes to find in this document!");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "There aren't that many changes to find in this document!");
 
 	/* We are wanting to compare version+1 with version to make sure
 	 * that the only changes made in going to version are conformant
@@ -4370,15 +5002,20 @@ pdf_validate_changes(fz_context *ctx, pdf_document *doc, int version)
 	 * from version rather than version+1 will give us bad results! */
 	locked = pdf_find_locked_fields(ctx, doc, unsaved_versions+version+1);
 
-	if (!locked->all && locked->includes.len == 0 && locked->p == 0)
+	fz_try(ctx)
 	{
-		/* If nothing is locked at all, then all changes are permissible. */
-		result = 1;
+		if (!locked->all && locked->includes.len == 0 && locked->p == 0)
+		{
+			/* If nothing is locked at all, then all changes are permissible. */
+			result = 1;
+		}
+		else
+			result = validate_locked_fields(ctx, doc, unsaved_versions+version, locked);
 	}
-	else
-		result = validate_locked_fields(ctx, doc, unsaved_versions+version, locked);
-
-	pdf_drop_locked_fields(ctx, locked);
+	fz_always(ctx)
+		pdf_drop_locked_fields(ctx, locked);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
 
 	return result;
 }
@@ -4457,15 +5094,20 @@ int pdf_find_version_for_obj(fz_context *ctx, pdf_document *doc, pdf_obj *obj)
 	return v;
 }
 
-int pdf_validate_signature(fz_context *ctx, pdf_widget *widget)
+int pdf_validate_signature(fz_context *ctx, pdf_annot *widget)
 {
-	pdf_document *doc = widget->page->doc;
-	int unsaved_versions = pdf_count_unsaved_versions(ctx, doc);
-	int num_versions = pdf_count_versions(ctx, doc) + unsaved_versions;
-	int version = pdf_find_version_for_obj(ctx, doc, widget->obj);
-	int i;
+	pdf_document *doc;
+	int unsaved_versions, num_versions, version, i;
 	pdf_locked_fields *locked = NULL;
 	int o_xref_base;
+
+	if (!widget->page)
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "annotation not bound to any page");
+
+	doc = widget->page->doc;
+	unsaved_versions = pdf_count_unsaved_versions(ctx, doc);
+	num_versions = pdf_count_versions(ctx, doc) + unsaved_versions;
+	version = pdf_find_version_for_obj(ctx, doc, widget->obj);
 
 	if (version > num_versions-1)
 		version = num_versions-1;
@@ -4568,4 +5210,143 @@ void pdf_drop_local_xref(fz_context *ctx, pdf_xref *xref)
 	pdf_drop_xref_subsec(ctx, xref);
 
 	fz_free(ctx, xref);
+}
+
+void pdf_drop_local_xref_and_resources(fz_context *ctx, pdf_document *doc)
+{
+	pdf_purge_local_font_resources(ctx, doc);
+	pdf_purge_locals_from_store(ctx, doc);
+	pdf_drop_local_xref(ctx, doc->local_xref);
+	doc->local_xref = NULL;
+	doc->resynth_required = 1;
+}
+
+void
+pdf_debug_doc_changes(fz_context *ctx, pdf_document *doc)
+{
+	int i, j;
+
+	if (doc->num_incremental_sections == 0)
+		fz_write_printf(ctx, fz_stddbg(ctx), "No incremental xrefs");
+	else
+	{
+		for (i = 0; i < doc->num_incremental_sections; i++)
+		{
+			pdf_xref *xref = &doc->xref_sections[i];
+			pdf_xref_subsec *sub;
+
+			fz_write_printf(ctx, fz_stddbg(ctx), "Incremental xref:\n");
+			for (sub = xref->subsec; sub != NULL; sub = sub->next)
+			{
+				fz_write_printf(ctx, fz_stddbg(ctx), "  Objects %d->%d\n", sub->start, sub->start + sub->len - 1);
+				for (j = 0; j < sub->len; j++)
+				{
+					pdf_xref_entry *e = &sub->table[j];
+					if (e->type == 0)
+						continue;
+					fz_write_printf(ctx, fz_stddbg(ctx), "%d %d obj (%c)\n", j + sub->start, e->gen, e->type);
+					pdf_debug_obj(ctx, e->obj);
+					fz_write_printf(ctx, fz_stddbg(ctx), "\nendobj\n");
+				}
+			}
+		}
+	}
+
+	if (doc->local_xref == NULL)
+		fz_write_printf(ctx, fz_stddbg(ctx), "No local xref");
+	else
+	{
+		for (i = 0; i < doc->num_incremental_sections; i++)
+		{
+			pdf_xref *xref = doc->local_xref;
+			pdf_xref_subsec *sub;
+
+			fz_write_printf(ctx, fz_stddbg(ctx), "Local xref (%sin force):\n", doc->local_xref_nesting == 0 ? "not " : "");
+			for (sub = xref->subsec; sub != NULL; sub = sub->next)
+			{
+				fz_write_printf(ctx, fz_stddbg(ctx), "  Objects %d->%d\n", sub->start, sub->start + sub->len - 1);
+				for (j = 0; j < sub->len; j++)
+				{
+					pdf_xref_entry *e = &sub->table[j];
+					if (e->type == 0)
+						continue;
+					fz_write_printf(ctx, fz_stddbg(ctx), "%d %d obj (%c)\n", j + sub->start, e->gen, e->type);
+					pdf_debug_obj(ctx, e->obj);
+					fz_write_printf(ctx, fz_stddbg(ctx), "\nendobj\n");
+				}
+			}
+		}
+	}
+
+}
+
+pdf_obj *
+pdf_metadata(fz_context *ctx, pdf_document *doc)
+{
+	int initial = doc->xref_base;
+	pdf_obj *obj = NULL;
+
+	fz_var(obj);
+
+	fz_try(ctx)
+	{
+		do
+		{
+			pdf_obj *root = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root));
+			obj = pdf_dict_get(ctx, root, PDF_NAME(Metadata));
+			if (obj)
+				break;
+			doc->xref_base++;
+		}
+		while (doc->xref_base < doc->num_xref_sections);
+	}
+	fz_always(ctx)
+		doc->xref_base = initial;
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+
+	return obj;
+}
+
+int pdf_obj_is_incremental(fz_context *ctx, pdf_obj *obj)
+{
+	pdf_document *doc = pdf_get_bound_document(ctx, obj);
+	int v;
+
+	if (doc == NULL || doc->num_incremental_sections == 0)
+		return 0;
+
+	v = pdf_find_incremental_update_num_for_obj(ctx, doc, obj);
+
+	return (v == 0);
+}
+
+void pdf_minimize_document(fz_context *ctx, pdf_document *doc)
+{
+	int i;
+
+	/* Don't throw anything away if we've done a repair! */
+	if (doc == NULL || doc->repair_attempted)
+		return;
+
+	/* Don't throw anything away in the incremental section, as that's where
+	 * all our changes will be. */
+	for (i = doc->num_incremental_sections; i < doc->num_xref_sections; i++)
+	{
+		pdf_xref *xref = &doc->xref_sections[i];
+		pdf_xref_subsec *sub;
+
+		for (sub = xref->subsec; sub; sub = sub->next)
+		{
+			int len = sub->len;
+			int j;
+			for (j = 0; j < len; j++)
+			{
+				pdf_xref_entry *e = &sub->table[j];
+				if (e->obj == NULL)
+					continue;
+				e->obj = pdf_drop_singleton_obj(ctx, e->obj);
+			}
+		}
+	}
 }

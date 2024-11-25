@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_FONT_H
 #define MUPDF_FITZ_FONT_H
 
@@ -5,27 +27,28 @@
 #include "mupdf/fitz/context.h"
 #include "mupdf/fitz/geometry.h"
 #include "mupdf/fitz/buffer.h"
+#include "mupdf/fitz/color.h"
 
 /* forward declaration for circular dependency */
 struct fz_device;
 
 /* Various font encoding tables and lookup functions */
 
-extern const char *fz_glyph_name_from_adobe_standard[256];
-extern const char *fz_glyph_name_from_iso8859_7[256];
-extern const char *fz_glyph_name_from_koi8u[256];
-extern const char *fz_glyph_name_from_mac_expert[256];
-extern const char *fz_glyph_name_from_mac_roman[256];
-extern const char *fz_glyph_name_from_win_ansi[256];
-extern const char *fz_glyph_name_from_windows_1252[256];
+FZ_DATA extern const char *fz_glyph_name_from_adobe_standard[256];
+FZ_DATA extern const char *fz_glyph_name_from_iso8859_7[256];
+FZ_DATA extern const char *fz_glyph_name_from_koi8u[256];
+FZ_DATA extern const char *fz_glyph_name_from_mac_expert[256];
+FZ_DATA extern const char *fz_glyph_name_from_mac_roman[256];
+FZ_DATA extern const char *fz_glyph_name_from_win_ansi[256];
+FZ_DATA extern const char *fz_glyph_name_from_windows_1252[256];
 
-extern const unsigned short fz_unicode_from_iso8859_1[256];
-extern const unsigned short fz_unicode_from_iso8859_7[256];
-extern const unsigned short fz_unicode_from_koi8u[256];
-extern const unsigned short fz_unicode_from_pdf_doc_encoding[256];
-extern const unsigned short fz_unicode_from_windows_1250[256];
-extern const unsigned short fz_unicode_from_windows_1251[256];
-extern const unsigned short fz_unicode_from_windows_1252[256];
+FZ_DATA extern const unsigned short fz_unicode_from_iso8859_1[256];
+FZ_DATA extern const unsigned short fz_unicode_from_iso8859_7[256];
+FZ_DATA extern const unsigned short fz_unicode_from_koi8u[256];
+FZ_DATA extern const unsigned short fz_unicode_from_pdf_doc_encoding[256];
+FZ_DATA extern const unsigned short fz_unicode_from_windows_1250[256];
+FZ_DATA extern const unsigned short fz_unicode_from_windows_1251[256];
+FZ_DATA extern const unsigned short fz_unicode_from_windows_1252[256];
 
 int fz_iso8859_1_from_unicode(int u);
 int fz_iso8859_7_from_unicode(int u);
@@ -38,6 +61,44 @@ int fz_unicode_from_glyph_name(const char *name);
 int fz_unicode_from_glyph_name_strict(const char *name);
 const char **fz_duplicate_glyph_names_from_unicode(int unicode);
 const char *fz_glyph_name_from_unicode_sc(int unicode);
+
+/**
+ * A text decoder (to read arbitrary encodings and convert to unicode).
+ */
+typedef struct fz_text_decoder fz_text_decoder;
+
+struct fz_text_decoder {
+	// get maximum size estimate of converted text (fast)
+	int (*decode_bound)(fz_text_decoder *dec, unsigned char *input, int n);
+
+	// get exact size of converted text (slow)
+	int (*decode_size)(fz_text_decoder *dec, unsigned char *input, int n);
+
+	// convert text into output buffer
+	void (*decode)(fz_text_decoder *dec, char *output, unsigned char *input, int n);
+
+	// for internal use only; do not touch!
+	void *table1;
+	void *table2;
+};
+
+/* Initialize a text decoder using an IANA encoding name.
+ * See source/fitz/text-decoder.c for the exact list of supported encodings.
+ * Will throw an exception if the requested encoding is not available.
+ *
+ * The following is a subset of the supported encodings (see source/fitz/text-decoder.c for the full list):
+ *   iso-8859-1
+ *   iso-8859-7
+ *   koi8-r
+ *   euc-jp
+ *   shift_jis
+ *   euc-kr
+ *   euc-cn
+ *   gb18030
+ *   euc-tw
+ *   big5
+ */
+void fz_init_text_decoder(fz_context *ctx, fz_text_decoder *dec, const char *encoding);
 
 /**
 	An abstract font handle.
@@ -93,6 +154,12 @@ typedef struct
 	unsigned int fake_italic : 1; /* synthesize italic */
 	unsigned int has_opentype : 1; /* has opentype shaping tables */
 	unsigned int invalid_bbox : 1;
+
+	unsigned int cjk : 1;
+	unsigned int cjk_lang : 2; /* CNS, GB, JAPAN, or KOREA */
+
+	unsigned int embed : 1;
+	unsigned int never_embed : 1;
 } fz_font_flags_t;
 
 /**
@@ -355,6 +422,7 @@ const unsigned char *fz_lookup_noto_music_font(fz_context *ctx, int *len);
 const unsigned char *fz_lookup_noto_symbol1_font(fz_context *ctx, int *len);
 const unsigned char *fz_lookup_noto_symbol2_font(fz_context *ctx, int *len);
 const unsigned char *fz_lookup_noto_emoji_font(fz_context *ctx, int *len);
+const unsigned char *fz_lookup_noto_boxes_font(fz_context *ctx, int *len);
 
 /**
 	Try to load a fallback font for the
@@ -389,8 +457,9 @@ fz_font *fz_load_fallback_font(fz_context *ctx, int script, int language, int se
 fz_font *fz_new_type3_font(fz_context *ctx, const char *name, fz_matrix matrix);
 
 /**
-	Create a new font from a font
-	file in memory.
+	Create a new font from a font file in memory.
+
+	Fonts created in this way, will be eligible for embedding by default.
 
 	name: Name of font (leave NULL to use name from font).
 
@@ -409,6 +478,8 @@ fz_font *fz_new_font_from_memory(fz_context *ctx, const char *name, const unsign
 /**
 	Create a new font from a font file in a fz_buffer.
 
+	Fonts created in this way, will be eligible for embedding by default.
+
 	name: Name of font (leave NULL to use name from font).
 
 	buffer: Buffer to load from.
@@ -423,6 +494,8 @@ fz_font *fz_new_font_from_buffer(fz_context *ctx, const char *name, fz_buffer *b
 
 /**
 	Create a new font from a font file.
+
+	Fonts created in this way, will be eligible for embedding by default.
 
 	name: Name of font (leave NULL to use name from font).
 
@@ -442,6 +515,11 @@ fz_font *fz_new_font_from_file(fz_context *ctx, const char *name, const char *pa
 fz_font *fz_new_base14_font(fz_context *ctx, const char *name);
 fz_font *fz_new_cjk_font(fz_context *ctx, int ordering);
 fz_font *fz_new_builtin_font(fz_context *ctx, const char *name, int is_bold, int is_italic);
+
+/**
+	Control whether a given font should be embedded or not when writing.
+*/
+void fz_set_font_embedding(fz_context *ctx, fz_font *font, int embed);
 
 /**
 	Add a reference to an existing fz_font.
@@ -655,6 +733,16 @@ void fz_hb_lock(fz_context *ctx);
 */
 void fz_hb_unlock(fz_context *ctx);
 
+/**
+	Callback for use in font cmap enumeration.
+*/
+typedef void (fz_cmap_callback)(fz_context *ctx, void *opaque, unsigned long ucs, unsigned int gid);
+
+/**
+	Enumerate a cmap using a callback.
+*/
+void fz_enumerate_font_cmap(fz_context *ctx, fz_font *font, fz_cmap_callback *cb, void *opaque);
+
 struct fz_font
 {
 	int refs;
@@ -678,10 +766,14 @@ struct fz_font
 
 	fz_rect bbox;	/* font bbox is used only for t3 fonts */
 
+	float ascender;
+	float descender;
+
 	int glyph_count;
 
-	/* per glyph bounding box cache */
-	fz_rect *bbox_table;
+	/* per glyph bounding box cache. */
+	fz_rect **bbox_table;
+	int use_glyph_bbox;
 
 	/* substitute metrics */
 	int width_count;
@@ -689,7 +781,7 @@ struct fz_font
 	short *width_table; /* in 1000 units */
 
 	/* cached glyph metrics */
-	float *advance_cache;
+	float **advance_cache;
 
 	/* cached encoding lookup */
 	uint16_t *encoding_cache[256];
@@ -697,6 +789,40 @@ struct fz_font
 	/* cached md5sum for caching */
 	int has_digest;
 	unsigned char digest[16];
+
+	/* Which font to use in a collection. */
+	int subfont;
 };
+
+void fz_ft_lock(fz_context *ctx);
+
+void fz_ft_unlock(fz_context *ctx);
+
+/* Internal function. Must be called with FT_ALLOC_LOCK
+ * held. Returns 1 if this thread (context!) already holds
+ * the freeetype lock. */
+int fz_ft_lock_held(fz_context *ctx);
+
+/* Internal function: Extract a ttf from the ttc that underlies
+ * a given fz_font. Caller takes ownership of the returned
+ * buffer.
+ */
+fz_buffer *fz_extract_ttf_from_ttc(fz_context *ctx, fz_font *font);
+
+/* Internal function: Given a ttf in a buffer, create a subset
+ * ttf in a new buffer that only provides the required gids.
+ * Caller takes ownership of the returned buffer.
+ *
+ * EXPERIMENTAL AND VERY SUBJECT TO CHANGE.
+ */
+fz_buffer *fz_subset_ttf_for_gids(fz_context *ctx, fz_buffer *orig, int *gids, int num_gids, int symbolic, int cidfont);
+
+/* Internal function: Given a cff in a buffer, create a subset
+ * cff in a new buffer that only provides the required gids.
+ * Caller takes ownership of the returned buffer.
+ *
+ * EXPERIMENTAL AND VERY SUBJECT TO CHANGE.
+ */
+fz_buffer *fz_subset_cff_for_gids(fz_context *ctx, fz_buffer *orig, int *gids, int num_gids, int symbolic, int cidfont);
 
 #endif

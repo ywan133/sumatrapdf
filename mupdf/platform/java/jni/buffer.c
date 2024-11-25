@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2023 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* Buffer interface */
 
 JNIEXPORT void JNICALL
@@ -79,8 +101,7 @@ FUN(Buffer_readBytes)(JNIEnv *env, jobject self, jint jat, jobject jbs)
 
 	remaining_input = len - at;
 	remaining_output = (*env)->GetArrayLength(env, jbs);
-	len = fz_minz(0, remaining_output);
-	len = fz_minz(len, remaining_input);
+	len = fz_minz(remaining_output, remaining_input);
 
 	bs = (*env)->GetByteArrayElements(env, jbs, NULL);
 	if (!bs) jni_throw_io(env, "cannot get bytes to read");
@@ -181,7 +202,7 @@ FUN(Buffer_writeBytesFrom)(JNIEnv *env, jobject self, jobject jbs, jint joff, ji
 	bslen = (*env)->GetArrayLength(env, jbs);
 	if (joff < 0) jni_throw_oob_void(env, "offset is negative");
 	if (jlen < 0) jni_throw_oob_void(env, "length is negative");
-	if (off + len >= bslen) jni_throw_oob_void(env, "offset + length is outside of buffer");
+	if (off + len > bslen) jni_throw_oob_void(env, "offset + length is outside of buffer");
 
 	bs = (*env)->GetByteArrayElements(env, jbs, NULL);
 	if (!bs) jni_throw_io_void(env, "cannot get bytes to write");
@@ -307,4 +328,26 @@ FUN(Buffer_save)(JNIEnv *env, jobject self, jstring jfilename)
 			(*env)->ReleaseStringUTFChars(env, jfilename, filename);
 	fz_catch(ctx)
 		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT jobject JNICALL
+FUN(Buffer_slice)(JNIEnv *env, jobject self, jint start, jint end)
+{
+	fz_context *ctx = get_context(env);
+	fz_buffer *buf = from_Buffer(env, self);
+	fz_buffer *copy = NULL;
+	jobject jcopy = NULL;
+
+	if (!ctx || !buf) return NULL;
+
+	fz_try(ctx)
+		copy = fz_slice_buffer(ctx, buf, start, end);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	jcopy = (*env)->NewObject(env, cls_Buffer, mid_Buffer_init, copy);
+	if (!jcopy || (*env)->ExceptionCheck(env))
+		return NULL;
+
+	return jcopy;
 }

@@ -1,6 +1,30 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include "color-imp.h"
+
+#include <string.h>
 
 #if FZ_ENABLE_ICC
 
@@ -27,13 +51,30 @@ static void fz_premultiply_row(fz_context *ctx, int n, int c, int w, unsigned ch
 	for (; w > 0; w--)
 	{
 		a = s[n1];
-		for (k = 0; k < c; k++)
-			s[k] = fz_mul255(s[k], a);
+		if (a == 0)
+			memset(s, 0, c);
+		else if (a != 255)
+			for (k = 0; k < c; k++)
+				s[k] = fz_mul255(s[k], a);
 		s += n;
 	}
 }
 
-static void fz_unmultiply_row(fz_context *ctx, int n, int c, int w, unsigned char *s, const unsigned char *in)
+static void fz_premultiply_row_0or1(fz_context *ctx, int n, int c, int w, unsigned char *s)
+{
+	unsigned char a;
+	int n1 = n-1;
+	for (; w > 0; w--)
+	{
+		a = s[n1];
+		if (a == 0)
+			memset(s, 0, c);
+		s += n;
+	}
+}
+
+/* Returns 0 for all the alphas being 0, 1 for them being 0 or 255, 2 otherwise. */
+static int fz_unmultiply_row(fz_context *ctx, int n, int c, int w, unsigned char *s, const unsigned char *in)
 {
 	int a, inva;
 	int k;
@@ -41,15 +82,62 @@ static void fz_unmultiply_row(fz_context *ctx, int n, int c, int w, unsigned cha
 	for (; w > 0; w--)
 	{
 		a = in[n1];
-		inva = a ? 255 * 256 / a : 0;
+		if (a != 0)
+			goto nonzero;
 		for (k = 0; k < c; k++)
-			s[k] = (in[k] * inva) >> 8;
+			s[k] = 0;
 		for (;k < n1; k++)
 			s[k] = in[k];
-		s[n1] = a;
+		s[n1] = 0;
 		s += n;
 		in += n;
 	}
+	return 0;
+	for (; w > 0; w--)
+	{
+		a = in[n1];
+nonzero:
+		if (a != 0 && a != 255)
+			goto varying;
+		k = 0;
+		if (a == 0)
+			for (; k < c; k++)
+				s[k] = 0;
+		for (;k < n; k++)
+			s[k] = in[k];
+		s += n;
+		in += n;
+	}
+	return 1;
+	for (; w > 0; w--)
+	{
+		a = in[n1];
+varying:
+		if (a == 0)
+		{
+			for (k = 0; k < c; k++)
+				s[k] = 0;
+			for (;k < n1; k++)
+				s[k] = in[k];
+			s[k] = 0;
+		}
+		else if (a == 255)
+		{
+			memcpy(s, in, n);
+		}
+		else
+		{
+			inva = 255 * 256 / a;
+			for (k = 0; k < c; k++)
+				s[k] = (in[k] * inva) >> 8;
+			for (;k < n1; k++)
+				s[k] = in[k];
+			s[n1] = a;
+		}
+		s += n;
+		in += n;
+	}
+	return 2;
 }
 
 struct fz_icc_link
@@ -104,7 +192,7 @@ void fz_new_icc_context(fz_context *ctx)
 {
 	cmsContext glo = cmsCreateContext(&fz_lcms_memhandler, ctx);
 	if (!glo)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cmsCreateContext failed");
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "cmsCreateContext failed");
 	ctx->colorspace->icc_instance = glo;
 	cmsSetLogErrorHandler(glo, fz_lcms_log_error);
 }
@@ -129,7 +217,7 @@ static void fz_lcms_log_error(cmsContext id, cmsUInt32Number error_code, const c
 void fz_new_icc_context(fz_context *ctx)
 {
 	if (glo_ctx != NULL)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Stock LCMS2 library cannot be used in multiple contexts!");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Stock LCMS2 library cannot be used in multiple contexts!");
 	glo_ctx = ctx;
 	cmsSetLogErrorHandler(fz_lcms_log_error);
 }
@@ -148,7 +236,7 @@ fz_icc_profile *fz_new_icc_profile(fz_context *ctx, unsigned char *data, size_t 
 	fz_icc_profile *profile;
 	profile = cmsOpenProfileFromMem(GLO data, (cmsUInt32Number)size);
 	if (profile == NULL)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cmsOpenProfileFromMem failed");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "cmsOpenProfileFromMem failed");
 	return profile;
 }
 
@@ -202,7 +290,8 @@ fz_new_icc_link(fz_context *ctx,
 	fz_colorspace *prf,
 	fz_color_params rend,
 	int format,
-	int copy_spots)
+	int copy_spots,
+	int premult)
 {
 	GLOINIT
 	cmsHPROFILE src_pro = src->u.icc.profile;
@@ -251,11 +340,16 @@ fz_new_icc_link(fz_context *ctx,
 	if (copy_spots)
 		flags |= cmsFLAGS_COPY_ALPHA;
 
+#ifdef cmsFLAGS_PREMULT
+	if (premult)
+		flags |= cmsFLAGS_PREMULT;
+#endif
+
 	if (prf_pro == NULL)
 	{
 		transform = cmsCreateTransform(GLO src_pro, src_fmt, dst_pro, dst_fmt, rend.ri, flags);
 		if (!transform)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cmsCreateTransform(%s,%s) failed", src->name, dst->name);
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "cmsCreateTransform(%s,%s) failed", src->name, dst->name);
 	}
 
 	/* LCMS proof creation links don't work properly with the Ghent test files. Handle this in a brutish manner. */
@@ -263,13 +357,13 @@ fz_new_icc_link(fz_context *ctx,
 	{
 		transform = cmsCreateTransform(GLO src_pro, src_fmt, dst_pro, dst_fmt, INTENT_RELATIVE_COLORIMETRIC, flags);
 		if (!transform)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cmsCreateTransform(src=proof,dst) failed");
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "cmsCreateTransform(src=proof,dst) failed");
 	}
 	else if (prf_pro == dst_pro)
 	{
 		transform = cmsCreateTransform(GLO src_pro, src_fmt, prf_pro, dst_fmt, rend.ri, flags);
 		if (!transform)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cmsCreateTransform(src,proof=dst) failed");
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "cmsCreateTransform(src,proof=dst) failed");
 	}
 	else
 	{
@@ -291,11 +385,11 @@ fz_new_icc_link(fz_context *ctx,
 
 		src_to_prf_link = cmsCreateTransform(GLO src_pro, src_fmt, prf_pro, prf_fmt, rend.ri, flags);
 		if (!src_to_prf_link)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cmsCreateTransform(src,proof) failed");
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "cmsCreateTransform(src,proof) failed");
 		src_to_prf_pro = cmsTransform2DeviceLink(GLO src_to_prf_link, 3.4, flags);
 		cmsDeleteTransform(GLO src_to_prf_link);
 		if (!src_to_prf_pro)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cmsTransform2DeviceLink(src,proof) failed");
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "cmsTransform2DeviceLink(src,proof) failed");
 
 		hProfiles[0] = src_to_prf_pro;
 		hProfiles[1] = prf_pro;
@@ -303,7 +397,7 @@ fz_new_icc_link(fz_context *ctx,
 		transform = cmsCreateMultiprofileTransform(GLO hProfiles, 3, src_fmt, dst_fmt, INTENT_RELATIVE_COLORIMETRIC, flags);
 		cmsCloseProfile(GLO src_to_prf_pro);
 		if (!transform)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cmsCreateMultiprofileTransform(src,proof,dst) failed");
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "cmsCreateMultiprofileTransform(src,proof,dst) failed");
 	}
 
 	fz_try(ctx)
@@ -329,7 +423,7 @@ fz_icc_transform_color(fz_context *ctx, fz_color_converter *cc, const float *src
 #else
 	uint16_t s16[FZ_MAX_COLORS];
 	uint16_t d16[FZ_MAX_COLORS];
-	int dn = cc->ds->n;
+	int dn = cc->dst_n;
 	int i;
 	if (cc->ss->type == FZ_COLORSPACE_LAB)
 	{
@@ -377,32 +471,64 @@ fz_icc_transform_pixmap(fz_context *ctx, fz_icc_link *link, const fz_pixmap *src
 	cmm_num_dst = T_CHANNELS(dst_format);
 	cmm_extras = T_EXTRA(src_format);
 	if (cmm_num_src != sc || cmm_num_dst != dc || cmm_extras != ssp+sa || sa != da || (copy_spots && ssp != dsp))
-		fz_throw(ctx, FZ_ERROR_GENERIC, "bad setup in ICC pixmap transform: src: %d vs %d+%d+%d, dst: %d vs %d+%d+%d", cmm_num_src, sc, ssp, sa, cmm_num_dst, dc, dsp, da);
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "bad setup in ICC pixmap transform: src: %d vs %d+%d+%d, dst: %d vs %d+%d+%d", cmm_num_src, sc, ssp, sa, cmm_num_dst, dc, dsp, da);
 
 	inputpos = src->samples;
 	outputpos = dst->samples;
+
+#ifdef cmsFLAGS_PREMULT
+	/* LCMS2MT can only handle premultiplied data if the number of 'extra'
+	 * channels is the same. If not, do it by steam. */
+	if (sa && cmm_extras != (int)T_EXTRA(dst_format))
+#else
+	/* Vanilla LCMS2 cannot handle premultiplied data. If present, do it by steam. */
 	if (sa)
+#endif
 	{
 		buffer = fz_malloc(ctx, ss);
 		for (; h > 0; h--)
 		{
-			fz_unmultiply_row(ctx, sn, sc, sw, buffer, inputpos);
-			cmsDoTransform(GLO link->handle, buffer, outputpos, sw);
-			fz_premultiply_row(ctx, dn, dc, dw, outputpos);
+			int mult = fz_unmultiply_row(ctx, sn, sc, sw, buffer, inputpos);
+			if (mult == 0)
+			{
+				/* Solid transparent row. No point in doing the transform
+				 * because it will premultiplied back to 0. */
+				memset(outputpos, 0, ds);
+			}
+			else
+			{
+				cmsDoTransform(GLO link->handle, buffer, outputpos, sw);
+				if (!copy_spots)
+				{
+					/* Copy the alpha by steam */
+					unsigned char *d = outputpos + dn - 1;
+					const unsigned char *s = inputpos + sn -1;
+					int w = sw;
+
+					while (w--)
+					{
+						*d = *s;
+						d += dn;
+						s += sn;
+					}
+				}
+				if (mult == 1)
+					fz_premultiply_row_0or1(ctx, dn, dc, dw, outputpos);
+				else if (mult == 2)
+					fz_premultiply_row(ctx, dn, dc, dw, outputpos);
+			}
 			inputpos += ss;
 			outputpos += ds;
 		}
 		fz_free(ctx, buffer);
 	}
 	else
-	{
 		for (; h > 0; h--)
 		{
 			cmsDoTransform(GLO link->handle, inputpos, outputpos, sw);
 			inputpos += ss;
 			outputpos += ds;
 		}
-	}
 }
 
 #endif

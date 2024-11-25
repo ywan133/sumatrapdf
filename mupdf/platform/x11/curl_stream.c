@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "curl_stream.h"
 
@@ -51,6 +73,7 @@ typedef struct curlstate
 
 	/* START: The following entries are protected by the lock */
 	CURLcode curl_error;
+	char error_buffer[CURL_ERROR_SIZE];
 	int data_arrived;
 	int complete;
 	int kill_thread;
@@ -126,17 +149,17 @@ static size_t on_curl_header(void *ptr, size_t size, size_t nmemb, void *state_)
 	struct curlstate *state = state_;
 
 	lock(state);
-	if (strncmp(ptr, "Accept-Ranges: bytes", 20) == 0)
+	if (fz_strncasecmp(ptr, "Accept-Ranges: bytes", 20) == 0)
 	{
 		DEBUG_MESSAGE(("header arrived with Accept-Ranges!\n"));
 		state->accept_ranges = 1;
 	}
 
-	if (strncmp(ptr, "Content-Length:", 15) == 0)
+	if (fz_strncasecmp(ptr, "Content-Length:", 15) == 0)
 	{
 		char *s = ptr;
 		state->content_length = fz_atoi(s + 15);
-		DEBUG_MESSAGE(("header arrived with Content-Length: %d\n", state->content_length));
+		DEBUG_MESSAGE(("header arrived with Content-Length: %zu\n", state->content_length));
 	}
 	unlock(state);
 
@@ -179,7 +202,7 @@ static size_t on_curl_data(void *ptr, size_t size, size_t nmemb, void *state_)
 				return 0;
 			}
 			memset(state->map, 0, (state->map_length+7)>>3);
-			DEBUG_MESSAGE(("have range header content_length=%d!\n", state->content_length));
+			DEBUG_MESSAGE(("have range header content_length=%zu!\n", state->content_length));
 		}
 		else
 		{
@@ -222,6 +245,10 @@ static size_t on_curl_data(void *ptr, size_t size, size_t nmemb, void *state_)
 	 * code this to allow for curl calling us to copy smaller blocks
 	 * as they arrive. */
 	old_start = state->current_fill_start;
+	if (state->current_fill_start + size > state->buffer_max) {
+		unlock(state);
+		return 0;
+	}
 	memcpy(state->buffer + state->current_fill_start, ptr, size);
 	state->current_fill_start += size;
 	/* If we've reached the end, or at least a different block
@@ -300,7 +327,7 @@ static void fetch_chunk(struct curlstate *state)
 			if (block == map_length)
 			{
 				/* We've got it all! */
-				DEBUG_MESSAGE(("we got it all block=%d map_length=%d!\n", block, map_length));
+				DEBUG_MESSAGE(("we got it all block=%zu map_length=%zu!\n", block, map_length));
 				state->complete = 1;
 				state->kill_thread = 1;
 				unlock(state);
@@ -316,7 +343,7 @@ static void fetch_chunk(struct curlstate *state)
 		return;
 	}
 
-	DEBUG_MESSAGE(("block requested was %d, fetching %d\n", state->next_fill_start>>BLOCK_SHIFT, block));
+	DEBUG_MESSAGE(("block requested was %zu, fetching %zu\n", state->next_fill_start>>BLOCK_SHIFT, block));
 
 	/* Set up fetch of that block */
 	start = block<<BLOCK_SHIFT;
@@ -345,27 +372,32 @@ static int cs_next(fz_context *ctx, fz_stream *stream, size_t len)
 	int block = read_point>>BLOCK_SHIFT;
 	size_t left_over = (-read_point) & (BLOCK_SIZE-1);
 	unsigned char *buf = state->public_buffer;
+	int err_type;
 
 	assert(len != 0);
 
 	stream->rp = stream->wp = buf;
 	lock(state);
+	err_type = state->complete ? FZ_ERROR_GENERIC : FZ_ERROR_TRYLATER;
 
 	/* If we got an error from the fetching thread,
 	 * throw it here (but just once). */
 	if (state->curl_error)
 	{
 		CURLcode err = state->curl_error;
+		char errstr[CURL_ERROR_SIZE];
+		memcpy(errstr, state->error_buffer, CURL_ERROR_SIZE);
+		memset(state->error_buffer, 0, CURL_ERROR_SIZE);
 		state->curl_error = 0;
 		unlock(state);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot fetch data: %s", curl_easy_strerror(err));
+		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot fetch data: %s: %s", curl_easy_strerror(err), errstr);
 	}
 
 	if ((size_t) read_point > state->content_length)
 	{
 		unlock(state);
 		if (state->data_arrived == 0)
-			fz_throw(ctx, FZ_ERROR_TRYLATER, "read of a block we don't have (A) (offset=%ld)", read_point);
+			fz_throw(ctx, err_type, "read of a block we don't have (A) (offset=%ld)", read_point);
 		return EOF;
 	}
 
@@ -379,7 +411,7 @@ static int cs_next(fz_context *ctx, fz_stream *stream, size_t len)
 		if (read_point + len > state->current_fill_start)
 		{
 			unlock(state);
-			fz_throw(ctx, FZ_ERROR_TRYLATER, "read of a block we don't have (B) (offset=%ld)", read_point);
+			fz_throw(ctx, err_type, "read of a block we don't have (B) (offset=%ld)", read_point);
 		}
 		memcpy(buf, state->buffer + read_point, len);
 		unlock(state);
@@ -402,7 +434,7 @@ static int cs_next(fz_context *ctx, fz_stream *stream, size_t len)
 		{
 			state->next_fill_start = block<<BLOCK_SHIFT;
 			unlock(state);
-			fz_throw(ctx, FZ_ERROR_TRYLATER, "read of a block we don't have (C) (offset=%ld)", read_point);
+			fz_throw(ctx, err_type, "read of a block we don't have (C) (offset=%ld)", read_point);
 		}
 		block++;
 		memcpy(buf, state->buffer + read_point, left_over);
@@ -425,7 +457,7 @@ static int cs_next(fz_context *ctx, fz_stream *stream, size_t len)
 			stream->pos += len_read;
 			/* If we haven't fetched anything, throw. */
 			if (len_read == 0)
-				fz_throw(ctx, FZ_ERROR_TRYLATER, "read of a block we don't have (D) (offset=%ld)", read_point);
+				fz_throw(ctx, err_type, "read of a block we don't have (D) (offset=%ld)", read_point);
 			/* Otherwise, we got at least one byte, so we can safely return that. */
 			return *stream->rp++;
 		}
@@ -450,7 +482,7 @@ static int cs_next(fz_context *ctx, fz_stream *stream, size_t len)
 			stream->pos += len_read;
 			/* If we haven't fetched anything, throw. */
 			if (len_read == 0)
-				fz_throw(ctx, FZ_ERROR_TRYLATER, "read of a block we don't have (E) (offset=%ld)", read_point);
+				fz_throw(ctx, err_type, "read of a block we don't have (E) (offset=%ld)", read_point);
 			/* Otherwise, we got at least one byte, so we can safely return that. */
 			return *stream->rp++;
 		}
@@ -498,11 +530,13 @@ static void cs_seek(fz_context *ctx, fz_stream *stm, int64_t offset, int whence)
 	{
 		size_t clen;
 		int data_arrived;
+		int complete;
 		lock(state);
 		data_arrived = state->data_arrived;
 		clen = state->content_length;
+		complete = state->complete;
 		unlock(state);
-		if (!data_arrived)
+		if (!data_arrived && !complete)
 			fz_throw(ctx, FZ_ERROR_TRYLATER, "still awaiting file length");
 		stm->pos = clen + offset;
 	}
@@ -533,6 +567,9 @@ fetcher_thread(curlstate *state)
 	}
 	if (state->more_data)
 		state->more_data(state->more_data_arg, 1);
+	lock(state);
+	state->complete = 1;
+	unlock(state);
 }
 
 #ifdef _WIN32
@@ -579,6 +616,11 @@ fz_stream *fz_open_url(fz_context *ctx, const char *url, int kbps, void (*more_d
 	curl_easy_setopt(state->easy, CURLOPT_WRITEHEADER, state);
 	curl_easy_setopt(state->easy, CURLOPT_WRITEFUNCTION, on_curl_data);
 	curl_easy_setopt(state->easy, CURLOPT_WRITEDATA, state);
+	curl_easy_setopt(state->easy, CURLOPT_FAILONERROR, 1L);
+	curl_easy_setopt(state->easy, CURLOPT_ERRORBUFFER, &state->error_buffer);
+#ifdef DEBUG_BLOCK_FETCHING
+	curl_easy_setopt(state->easy, CURLOPT_VERBOSE, 1L);
+#endif
 
 	/* Get only the HEAD first. */
 	state->head = 1;

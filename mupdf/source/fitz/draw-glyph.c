@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "draw-imp.h"
 #include "glyph-imp.h"
@@ -144,12 +166,13 @@ float
 fz_subpixel_adjust(fz_context *ctx, fz_matrix *ctm, fz_matrix *subpix_ctm, unsigned char *qe, unsigned char *qf)
 {
 	float size = fz_matrix_expansion(*ctm);
-	int q;
-	float pix_e, pix_f, r;
+	int q, hq, vq, qmin;
+	float pix_e, pix_f, r, hr, vr, rmin;
 
-	/* Quantise the subpixel positions. */
-	/* We never need more than 4 subpixel positions for glyphs - arguably
-	 * even that is too much. */
+	/* Quantise the subpixel positions. First, in the direction of
+	 * movement (i.e. normally X). We never need more than 4 subpixel
+	 * positions for glyphs - arguably even that is too much.
+	 * Suppress this as we get larger, because it makes less impact. */
 	if (size >= 48)
 		q = 0, r = 0.5f;
 	else if (size >= 24)
@@ -157,22 +180,40 @@ fz_subpixel_adjust(fz_context *ctx, fz_matrix *ctm, fz_matrix *subpix_ctm, unsig
 	else
 		q = 192, r = 0.125f;
 
+	/* Then in the 'downward' direction (normally Y). */
+	if (size >= 8)
+		qmin = 0, rmin = 0.5f;
+	else if (size >= 4)
+		qmin = 128, rmin =  0.25f;
+	else
+		qmin = 192, rmin = 0.125f;
+
+	/* Suppress subpixel antialiasing in y axis if we have a horizontal
+	 * matrix, and in x axis if we have a vertical matrix, unless we're
+	 * really small. */
+	hq = vq = q;
+	hr = vr = r;
+	if (ctm->a == 0 && ctm->d == 0)
+		hq = qmin, hr = rmin;
+	if (ctm->b == 0 && ctm->c == 0)
+		vq = qmin, vr = rmin;
+
 	/* Split translation into pixel and subpixel parts */
 	subpix_ctm->a = ctm->a;
 	subpix_ctm->b = ctm->b;
 	subpix_ctm->c = ctm->c;
 	subpix_ctm->d = ctm->d;
-	subpix_ctm->e = ctm->e + r;
+	subpix_ctm->e = ctm->e + hr;
 	pix_e = floorf(subpix_ctm->e);
 	subpix_ctm->e -= pix_e;
-	subpix_ctm->f = ctm->f + r;
+	subpix_ctm->f = ctm->f + vr;
 	pix_f = floorf(subpix_ctm->f);
 	subpix_ctm->f -= pix_f;
 
 	/* Quantise the subpixel part */
-	*qe = (int)(subpix_ctm->e * 256) & q;
+	*qe = (int)(subpix_ctm->e * 256) & hq;
 	subpix_ctm->e = *qe / 256.0f;
-	*qf = (int)(subpix_ctm->f * 256) & q;
+	*qf = (int)(subpix_ctm->f * 256) & vq;
 	subpix_ctm->f = *qf / 256.0f;
 
 	/* Reassemble the complete translation */
@@ -183,7 +224,7 @@ fz_subpixel_adjust(fz_context *ctx, fz_matrix *ctm, fz_matrix *subpix_ctm, unsig
 }
 
 fz_glyph *
-fz_render_stroked_glyph(fz_context *ctx, fz_font *font, int gid, fz_matrix *trm, fz_matrix ctm, const fz_stroke_state *stroke, const fz_irect *scissor, int aa)
+fz_render_stroked_glyph(fz_context *ctx, fz_font *font, int gid, fz_matrix *trm, fz_matrix ctm, fz_colorspace *model, const fz_stroke_state *stroke, const fz_irect *scissor, int aa)
 {
 	if (fz_font_ft_face(ctx, font))
 	{
@@ -195,7 +236,7 @@ fz_render_stroked_glyph(fz_context *ctx, fz_font *font, int gid, fz_matrix *trm,
 		(void)fz_subpixel_adjust(ctx, trm, &subpix_trm, &qe, &qf);
 		return fz_render_ft_stroked_glyph(ctx, font, gid, subpix_trm, ctm, stroke, aa);
 	}
-	return fz_render_glyph(ctx, font, gid, trm, NULL, scissor, 1, aa);
+	return fz_render_glyph(ctx, font, gid, trm, model, scissor, 1, aa);
 }
 
 static unsigned do_hash(unsigned char *s, int len)

@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_OUTPUT_H
 #define MUPDF_FITZ_OUTPUT_H
 
@@ -32,7 +54,7 @@ typedef void (fz_output_write_fn)(fz_context *ctx, void *state, const void *data
 
 	state: The output stream state to seek within.
 
-	offset, whence: as defined for fs_seek_output.
+	offset, whence: as defined for fz_seek().
 */
 typedef void (fz_output_seek_fn)(fz_context *ctx, void *state, int64_t offset, int whence);
 
@@ -53,6 +75,14 @@ typedef int64_t (fz_output_tell_fn)(fz_context *ctx, void *state);
 	when the output stream is closed, to flush any pending writes.
 */
 typedef void (fz_output_close_fn)(fz_context *ctx, void *state);
+
+/**
+	A function type for use when implementing
+	fz_outputs. The supplied function of this type is called
+	when the output stream is reset, and resets the state
+	to that when it was first initialised.
+*/
+typedef void (fz_output_reset_fn)(fz_context *ctx, void *state);
 
 /**
 	A function type for use when implementing
@@ -85,9 +115,15 @@ struct fz_output
 	fz_output_tell_fn *tell;
 	fz_output_close_fn *close;
 	fz_output_drop_fn *drop;
+	fz_output_reset_fn *reset;
 	fz_stream_from_output_fn *as_stream;
 	fz_truncate_fn *truncate;
+	int closed;
 	char *bp, *wp, *ep;
+	/* If buffered is non-zero, then we have that many
+	 * bits (1-7) waiting to be written in bits. */
+	int buffered;
+	int bits;
 };
 
 /**
@@ -113,6 +149,15 @@ fz_output *fz_new_output(fz_context *ctx, int bufsiz, void *state, fz_output_wri
 	overwriting it.
 */
 fz_output *fz_new_output_with_path(fz_context *, const char *filename, int append);
+
+/**
+	Open an output stream that writes to a
+	given FILE *.
+
+	file: The file pointers to write to. NULL is interpreted as effectively
+	meaning /dev/null or similar.
+*/
+fz_output *fz_new_output_with_file_ptr(fz_context *ctx, FILE *file);
 
 /**
 	Open an output stream that appends
@@ -197,6 +242,14 @@ void fz_flush_output(fz_context *ctx, fz_output *out);
 void fz_close_output(fz_context *, fz_output *);
 
 /**
+	Reset a closed output stream. Returns state to
+	(broadly) that which it was in when opened. Not
+	all outputs can be reset, so this may throw an
+	exception.
+*/
+void fz_reset_output(fz_context *, fz_output *);
+
+/**
 	Free an output stream. Don't forget to close it first!
 */
 void fz_drop_output(fz_context *, fz_output *);
@@ -231,6 +284,7 @@ void fz_truncate_output(fz_context *, fz_output *);
 	size: Size of data to write in bytes.
 */
 void fz_write_data(fz_context *ctx, fz_output *out, const void *data, size_t size);
+void fz_write_buffer(fz_context *ctx, fz_output *out, fz_buffer *data);
 
 /**
 	Write a string. Does not write zero terminator.
@@ -271,10 +325,38 @@ void fz_write_base64(fz_context *ctx, fz_output *out, const unsigned char *data,
 void fz_write_base64_buffer(fz_context *ctx, fz_output *out, fz_buffer *data, int newline);
 
 /**
+	Write num_bits of data to the end of the output stream, assumed to be packed
+	most significant bits first.
+*/
+void fz_write_bits(fz_context *ctx, fz_output *out, unsigned int data, int num_bits);
+
+/**
+	Sync to byte boundary after writing bits.
+*/
+void fz_write_bits_sync(fz_context *ctx, fz_output *out);
+
+/**
+	Copy the stream contents to the output.
+*/
+void fz_write_stream(fz_context *ctx, fz_output *out, fz_stream *in);
+
+/**
 	Our customised 'printf'-like string formatter.
-	Takes %c, %d, %s, %u, %x, as usual.
-	Modifiers are not supported except for zero-padding ints (e.g.
-	%02d, %03u, %04x, etc).
+	Takes %c, %d, %s, %u, %x, %X as usual.
+	The only modifiers supported are:
+	1) zero-padding ints (e.g. %02d, %03u, %04x, etc).
+	2) ' to indicate that ' should be inserted into
+		integers as thousands separators.
+	3) , to indicate that , should be inserted into
+		integers as thousands separators.
+	4) _ to indicate that , should be inserted into
+		integers as thousands separators.
+	Posix chooses the thousand separator in a locale
+	specific way - we do not. We always apply it every
+	3 characters for the positive part of integers, so
+	other styles, such as Indian (123,456,78) are not
+	supported.
+
 	%g output in "as short as possible hopefully lossless
 	non-exponent" form, see fz_ftoa for specifics.
 	%f and %e output as usual.
@@ -284,8 +366,9 @@ void fz_write_base64_buffer(fz_context *ctx, fz_output *out, fz_buffer *data, in
 	%P outputs a fz_point*.
 	%n outputs a PDF name (with appropriate escaping).
 	%q and %( output escaped strings in C/PDF syntax.
-	%l{d,u,x} indicates that the values are int64_t.
-	%z{d,u,x} indicates that the value is a size_t.
+	%l{d,u,x,X} indicates that the values are int64_t.
+	%z{d,u,x,X} indicates that the value is a size_t.
+	%< outputs a quoted (utf8) string (for XML).
 
 	user: An opaque pointer that is passed to the emit function.
 

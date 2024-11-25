@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 package com.artifex.mupdf.fitz.android;
 
 import android.graphics.Bitmap;
@@ -15,19 +37,31 @@ public final class AndroidDrawDevice extends NativeDevice
 		Context.init();
 	}
 
-	private native long newNative(Bitmap bitmap, int xOrigin, int yOrigin, int patchX0, int patchY0, int patchX1, int patchY1);
+	private native long newNative(Bitmap bitmap, int xOrigin, int yOrigin, int patchX0, int patchY0, int patchX1, int patchY1, boolean clear);
+
+	public AndroidDrawDevice(Bitmap bitmap, int xOrigin, int yOrigin, int patchX0, int patchY0, int patchX1, int patchY1, boolean clear) {
+		super(0);
+		pointer = newNative(bitmap, xOrigin, yOrigin, patchX0, patchY0, patchX1, patchY1, clear);
+	}
 
 	public AndroidDrawDevice(Bitmap bitmap, int xOrigin, int yOrigin, int patchX0, int patchY0, int patchX1, int patchY1) {
-		super(0);
-		pointer = newNative(bitmap, xOrigin, yOrigin, patchX0, patchY0, patchX1, patchY1);
+		this(bitmap, xOrigin, yOrigin, patchX0, patchY0, patchX1, patchY1, true);
+	}
+
+	public AndroidDrawDevice(Bitmap bitmap, int xOrigin, int yOrigin, boolean clear) {
+		this(bitmap, xOrigin, yOrigin, 0, 0, bitmap.getWidth(), bitmap.getHeight(), clear);
 	}
 
 	public AndroidDrawDevice(Bitmap bitmap, int xOrigin, int yOrigin) {
-		this(bitmap, xOrigin, yOrigin, 0, 0, bitmap.getWidth(), bitmap.getHeight());
+		this(bitmap, xOrigin, yOrigin, 0, 0, bitmap.getWidth(), bitmap.getHeight(), true);
+	}
+
+	public AndroidDrawDevice(Bitmap bitmap, boolean clear) {
+		this(bitmap, 0, 0, clear);
 	}
 
 	public AndroidDrawDevice(Bitmap bitmap) {
-		this(bitmap, 0, 0);
+		this(bitmap, 0, 0, true);
 	}
 
 	public static Bitmap drawPage(Page page, Matrix ctm) {
@@ -36,9 +70,12 @@ public final class AndroidDrawDevice extends NativeDevice
 		int h = ibox.y1 - ibox.y0;
 		Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
 		AndroidDrawDevice dev = new AndroidDrawDevice(bmp, ibox.x0, ibox.y0);
-		page.run(dev, ctm, null);
-		dev.close();
-		dev.destroy();
+		try {
+			page.run(dev, ctm, null);
+			dev.close();
+		} finally {
+			dev.destroy();
+		}
 		return bmp;
 	}
 

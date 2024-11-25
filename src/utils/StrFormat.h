@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 /*
@@ -37,100 +37,84 @@ but it's easy to mis-count when adding {} to the mix.
 
 namespace fmt {
 
-// arbitrary limits, but should be large enough for us
-// the bigger the limit, the bigger the sizeof(Fmt)
-enum { MaxInstructions = 32 };
-enum {
-    // more than MaxInstructions for positional args
-    MaxArgs = 32 + 8
-};
-
 enum class Type {
-    FormatStr, // from format string
+    // concrete types for Arg
     Char,
     Int,
     Float,
     Double,
     Str,
     WStr,
-    Any,
-    Invalid,
-};
 
-// formatting instruction
-struct Inst {
-    Type t;
-    int argNo; // <0 for strings that come from formatting string
+    // for Inst.t
+    RawStr, // copy part of format string
+    Any,
+
+    None,
 };
 
 // argument to a formatting instruction
 // at the front are arguments given with i(), s() etc.
 // at the end are FormatStr arguments from format string
 struct Arg {
-    Type t = Type::Invalid;
-    size_t len = 0; // for s when FormatStr
+    Type t{Type::None};
     union {
         char c;
-        int i;
+        i64 i;
         float f;
         double d;
         const char* s;
         const WCHAR* ws;
-    };
+    } u{};
+
     Arg() = default;
+
+    Arg(char c) {
+        t = Type::Char;
+        u.c = c;
+    }
+
     Arg(int arg) {
         t = Type::Int;
-        i = arg;
+        u.i = (i64)arg;
     }
+
+    Arg(size_t arg) {
+        t = Type::Int;
+        u.i = (i64)arg;
+    }
+
+    Arg(i64 arg) {
+        t = Type::Int;
+        u.i = arg;
+    }
+
+    Arg(float f) {
+        t = Type::Float;
+        u.f = f;
+    }
+
+    Arg(double d) {
+        t = Type::Double;
+        u.d = d;
+    }
+
     Arg(const char* arg) {
         t = Type::Str;
-        s = arg;
+        u.s = arg;
     }
+
     Arg(const WCHAR* arg) {
         t = Type::WStr;
-        ws = arg;
+        u.ws = arg;
     }
 };
 
-class Fmt {
-  public:
-    Fmt(const char* fmt);
-    Fmt& i(int);
-    Fmt& s(const char*);
-    Fmt& s(const WCHAR*);
-    Fmt& c(char);
-    Fmt& f(float);
-    Fmt& f(double);
+char* Format(const char* s, const Arg& a1 = Arg(), const Arg& a2 = Arg(), const Arg& a3 = Arg(), const Arg& a4 = Arg(),
+             const Arg& a5 = Arg(), const Arg& a6 = Arg());
 
-    Fmt& ParseFormat(const char* fmt);
-    Fmt& Reset();
-    char* Get();
-    char* GetDup();
+char* FormatTemp(const char* s, const Arg);
+char* FormatTemp(const char* s, const Arg, const Arg);
+char* FormatTemp(const char* s, const Arg, const Arg, const Arg);
 
-    bool isOk; // true if mismatch between formatting instruction and args
-
-  private:
-    const char* parseArgDef(const char* fmt);
-    void addFormatStr(const char* s, size_t len);
-    const char* parseArgDefPerc(const char*);
-    const char* parseArgDefPositional(const char*);
-    Fmt& addArgType(Type t);
-    void serializeInst(int n);
-
-    DWORD threadId;
-    const char* format;
-    Inst instructions[MaxInstructions];
-    int nInst;
-    Arg args[MaxArgs];
-    int nArgs;
-    int nArgsUsed;
-    int maxArgNo;
-    int currPercArgNo;
-    int currArgFromFormatNo; // counts from the end of args
-    str::Str res;
-};
-
-std::string_view Format(const char* s, Arg& a1);
-std::string_view Format(const char* s, Arg& a1, Arg& a2);
-std::string_view Format(const char* s, Arg& a1, Arg& a2, Arg& a3);
 } // namespace fmt

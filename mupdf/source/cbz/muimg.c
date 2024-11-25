@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <string.h>
@@ -34,7 +56,7 @@ img_count_pages(fz_context *ctx, fz_document *doc_, int chapter)
 }
 
 static fz_rect
-img_bound_page(fz_context *ctx, fz_page *page_)
+img_bound_page(fz_context *ctx, fz_page *page_, fz_box_type box)
 {
 	img_page *page = (img_page*)page_;
 	fz_image *image = page->image;
@@ -99,7 +121,7 @@ img_load_page(fz_context *ctx, fz_document *doc_, int chapter, int number)
 	img_page *page = NULL;
 
 	if (number < 0 || number >= doc->page_count)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot load page %d", number);
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "invalid page number %d", number);
 
 	fz_var(pixmap);
 	fz_var(image);
@@ -141,7 +163,7 @@ img_load_page(fz_context *ctx, fz_document *doc_, int chapter, int number)
 }
 
 static int
-img_lookup_metadata(fz_context *ctx, fz_document *doc_, const char *key, char *buf, int size)
+img_lookup_metadata(fz_context *ctx, fz_document *doc_, const char *key, char *buf, size_t size)
 {
 	img_document *doc = (img_document*)doc_;
 	if (!strcmp(key, FZ_META_FORMAT))
@@ -150,11 +172,9 @@ img_lookup_metadata(fz_context *ctx, fz_document *doc_, const char *key, char *b
 }
 
 static fz_document *
-img_open_document_with_stream(fz_context *ctx, fz_stream *file)
+img_open_document(fz_context *ctx, const fz_document_handler *handler, fz_stream *file, fz_stream *accel, fz_archive *dir, void *state)
 {
-	img_document *doc = NULL;
-
-	doc = fz_new_derived_document(ctx, img_document);
+	img_document *doc = fz_new_derived_document(ctx, img_document);
 
 	doc->super.drop_document = img_drop_document;
 	doc->super.count_pages = img_count_pages;
@@ -213,6 +233,33 @@ img_open_document_with_stream(fz_context *ctx, fz_stream *file)
 	return (fz_document*)doc;
 }
 
+static int
+img_recognize_content(fz_context *ctx, const fz_document_handler *handler, fz_stream *stream, fz_archive *dir, void **state, fz_document_recognize_state_free_fn **free_state)
+{
+	unsigned char data[8];
+	size_t n;
+	int fmt;
+
+	if (stream == NULL)
+		return 0;
+
+	if (state)
+		*state = NULL;
+	if (free_state)
+		*free_state = NULL;
+
+	n = fz_read(ctx, stream, data, 8);
+
+	if (n != 8)
+		return 0;
+
+	fmt = fz_recognize_image_format(ctx, data);
+	if (fmt != FZ_IMAGE_UNKNOWN)
+		return 100;
+
+	return 0;
+}
+
 static const char *img_extensions[] =
 {
 	"bmp",
@@ -231,11 +278,13 @@ static const char *img_extensions[] =
 	"jxr",
 	"pam",
 	"pbm",
+	"pfm",
 	"pgm",
 	"pkm",
 	"png",
 	"pnm",
 	"ppm",
+	"psd",
 	"tif",
 	"tiff",
 	"wdp",
@@ -254,6 +303,7 @@ static const char *img_mimetypes[] =
 	"image/png",
 	"image/tiff",
 	"image/vnd.ms-photo",
+	"image/vnd.adobe.photoshop",
 	"image/x-jb2",
 	"image/x-jbig2",
 	"image/x-portable-anymap",
@@ -261,6 +311,7 @@ static const char *img_mimetypes[] =
 	"image/x-portable-bitmap",
 	"image/x-portable-greymap",
 	"image/x-portable-pixmap",
+	"image/x-portable-floatmap",
 	"image/x-tiff",
 	NULL
 };
@@ -268,10 +319,8 @@ static const char *img_mimetypes[] =
 fz_document_handler img_document_handler =
 {
 	NULL,
-	NULL,
-	img_open_document_with_stream,
+	img_open_document,
 	img_extensions,
 	img_mimetypes,
-	NULL,
-	NULL
+	img_recognize_content
 };
