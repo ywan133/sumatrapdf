@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
@@ -67,8 +67,8 @@ void DictTestMapStrToInt() {
         toRemove.Append(str::Dup(k));
         utassert(toRemove.size() == d.Count());
         ok = d.Get(k, &val);
-        CrashIf(!ok);
-        CrashIf(i != val);
+        ReportIf(!ok);
+        ReportIf(i != val);
     }
     for (const char* k : toRemove) {
         ok = d.Remove(k, nullptr);

@@ -2,7 +2,7 @@ package main
 
 // List of languages we support, their iso codes and id as understood
 // by Windows SDK (LANG_* and SUBLANG_*_*).
-// See http://msdn.microsoft.com/en-us/library/dd318693.aspx for the full list.
+// See https://msdn.microsoft.com/en-us/library/dd318693.aspx for the full list.
 var gLangs = [][]string{
 	{"af", "Afrikaans", "_LANGID(LANG_AFRIKAANS)"},
 	{"am", "Armenian (Հայերեն)", "_LANGID(LANG_ARMENIAN)"},
@@ -29,6 +29,7 @@ var gLangs = [][]string{
 	{"fa", "Persian (فارسی)", "_LANGID(LANG_FARSI)", "RTL"},
 	{"fi", "Finnish (Suomi)", "_LANGID(LANG_FINNISH)"},
 	{"fr", "French (Français)", "_LANGID(LANG_FRENCH)"},
+	{"fo", "Faroese (Føroyskt)", "_LANGID(LANG_FAEROESE)"},
 	{"fy-nl", "Frisian (Frysk)", "_LANGID(LANG_FRISIAN)"},
 	{"ga", "Irish (Gaeilge)", "_LANGID(LANG_IRISH)"},
 	{"gl", "Galician (Galego)", "_LANGID(LANG_GALICIAN)"},
@@ -59,6 +60,7 @@ var gLangs = [][]string{
 	{"pt", "Portuguese - Portugal (Português)", "_LANGID(LANG_PORTUGUESE)"},
 	{"ro", "Romanian (Română)", "_LANGID(LANG_ROMANIAN)"},
 	{"ru", "Russian (Русский)", "_LANGID(LANG_RUSSIAN)"},
+	{"sat", "Santali (ᱥᱟᱱᱛᱟᱲᱤ)", "(LANGID)-1"},
 	{"si", "Sinhala (සිංහල)", "_LANGID(LANG_SINHALESE)"},
 	{"sk", "Slovak (Slovenčina)", "_LANGID(LANG_SLOVAK)"},
 	{"sl", "Slovenian (Slovenščina)", "_LANGID(LANG_SLOVENIAN)"},

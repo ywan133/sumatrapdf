@@ -5,7 +5,15 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Launch dbg 64",
+            "name": "doit.bat",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "cwd": "${workspaceFolder}",
+            "program": "${workspaceFolder}/do"
+        },
+        {
+            "name": "dbg 64",
             "type": "cppvsdbg",
             "preLaunchTask": "build-dbg-64",
             "request": "launch",
@@ -14,10 +22,42 @@
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
-            "externalConsole": false
         },
         {
-            "name": "Launch dbg 64 installer",
+            "name": "dbg 64 tstcol",
+            "type": "cppvsdbg",
+            "preLaunchTask": "build-dbg-64",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/dbg64/SumatraPDF-dll.exe",
+            "args": ["-set-color-range", "#00ff00", "#c0c0c0"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+        },
+        {
+            "name": "dbg 64 test browser",
+            "type": "cppvsdbg",
+            "preLaunchTask": "build-dbg-64",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/dbg64/SumatraPDF-dll.exe",
+            "args": ["-test-browser"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+        },
+        {
+            "name": "rel 64 asan stress",
+            "type": "cppvsdbg",
+            "preLaunchTask": "build-rel-asan-64",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/rel64_asan/SumatraPDF.exe",
+            "args": ["-n", "2", "-rand", "-console", "-stress-test", "d:\\sumstress"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+        },
+        {
+            "name": "installer dbg 64",
             "type": "cppvsdbg",
             "preLaunchTask": "build-dbg-64",
             "request": "launch",
@@ -26,7 +66,6 @@
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
-            "externalConsole": false
         }
     ]
 }

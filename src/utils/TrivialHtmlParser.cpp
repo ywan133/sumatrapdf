@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "BaseUtil.h"
@@ -16,29 +16,29 @@ name/val pointers inside Element/Attr structs refer to
 memory inside HtmlParser::s, so they don't need to be freed.
 */
 
-bool HtmlElement::NameIs(const char* name) const {
-    if (!this->name) {
-        CrashIf(Tag_NotFound == this->tag);
-        HtmlTag tag = FindHtmlTag(name, str::Len(name));
-        return tag == this->tag;
+bool HtmlElement::NameIs(const char* nameIn) const {
+    if (!name) {
+        ReportIf(Tag_NotFound == tag);
+        HtmlTag tg = FindHtmlTag(nameIn, str::Len(nameIn));
+        return tg == tag;
     }
-    return str::EqI(this->name, name);
+    return str::EqI(name, nameIn);
 }
 
 // for now just ignores any namespace qualifier
 // (i.e. succeeds for "opf:content" with name="content" and any value of ns)
 // TODO: add proper namespace support
-bool HtmlElement::NameIsNS(const char* name, const char* ns) const {
-    CrashIf(!ns);
+bool HtmlElement::NameIsNS(const char* nameIn, const char*) const {
+    // ReportIf(!ns);
     const char* nameStart = nullptr;
-    if (this->name) {
-        nameStart = str::FindChar(this->name, ':');
+    if (name) {
+        nameStart = str::FindChar(name, ':');
     }
     if (!nameStart) {
-        return NameIs(name);
+        return NameIs(nameIn);
     }
     ++nameStart;
-    return str::EqI(nameStart, name);
+    return str::EqI(nameStart, nameIn);
 }
 
 HtmlElement* HtmlElement::GetChildByTag(HtmlTag tag, int idx) const {
@@ -62,7 +62,8 @@ static WCHAR IntToChar(int codepoint) {
 
 // caller needs to free() the result
 WCHAR* DecodeHtmlEntitites(const char* string, uint codepage) {
-    WCHAR* fixed = strconv::FromCodePage(string, codepage);
+    TempWStr fixedTemp = strconv::StrCPToWStrTemp(string, codepage);
+    WCHAR* fixed = str::Dup(fixedTemp);
     WCHAR* dst = fixed;
     const WCHAR* src = fixed;
 
@@ -106,10 +107,17 @@ WCHAR* DecodeHtmlEntitites(const char* string, uint codepage) {
     return fixed;
 }
 
+// TODO: optimize
+char* DecodeHtmlEntititesTemp(const char* s, uint codepage) {
+    WCHAR* ws = DecodeHtmlEntitites(s, codepage);
+    char* res = ToUtf8Temp(ws);
+    str::Free(ws);
+    return res;
+}
+
 HtmlParser::HtmlParser()
 
-{
-}
+    = default;
 
 HtmlParser::~HtmlParser() {
     if (freeHtml) {
@@ -144,6 +152,15 @@ WCHAR* HtmlElement::GetAttribute(const char* name) const {
     for (HtmlAttr* attr = firstAttr; attr; attr = attr->next) {
         if (str::EqI(attr->name, name)) {
             return DecodeHtmlEntitites(attr->val, codepage);
+        }
+    }
+    return nullptr;
+}
+
+char* HtmlElement::GetAttributeTemp(const char* name) const {
+    for (HtmlAttr* attr = firstAttr; attr; attr = attr->next) {
+        if (str::EqI(attr->name, name)) {
+            return DecodeHtmlEntititesTemp(attr->val, codepage);
         }
     }
     return nullptr;
@@ -239,7 +256,7 @@ size_t HtmlParser::TotalAttrCount() const {
 
 // Parse s in place i.e. we assume we can modify it. Must be 0-terminated.
 // The caller owns the memory for s.
-HtmlElement* HtmlParser::ParseInPlace(std::span<u8> d, uint codepage) {
+HtmlElement* HtmlParser::ParseInPlace(const ByteSlice& d, uint codepage) {
     if (this->html) {
         Reset();
     }
@@ -263,7 +280,7 @@ HtmlElement* HtmlParser::ParseInPlace(std::span<u8> d, uint codepage) {
         }
         if (!tok->IsTag()) {
             // ignore text content
-            CrashIf(!tok->IsText());
+            ReportIf(!tok->IsText());
             continue;
         }
         if (!tok->IsEndTag()) {
@@ -290,9 +307,9 @@ HtmlElement* HtmlParser::ParseInPlace(std::span<u8> d, uint codepage) {
     return rootElement;
 }
 
-HtmlElement* HtmlParser::Parse(std::span<u8> d, uint codepage) {
-    char* s = str::DupN(d);
-    HtmlElement* root = ParseInPlace(str::ToSpan(s), codepage);
+HtmlElement* HtmlParser::Parse(const ByteSlice& d, uint codepage) {
+    char* s = str::Dup(d);
+    HtmlElement* root = ParseInPlace(ToByteSlice(s), codepage);
     freeHtml = true;
     return root;
 }

@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "BaseUtil.h"
@@ -7,7 +7,7 @@
 #include "HtmlPullParser.h"
 
 static void HtmlAddWithNesting(str::Str* out, HtmlToken* tok, size_t nesting) {
-    CrashIf(!tok->IsStartTag() && !tok->IsEndTag() && !tok->IsEmptyElementEndTag());
+    ReportIf(!tok->IsStartTag() && !tok->IsEndTag() && !tok->IsEmptyElementEndTag());
     bool isInline = IsInlineTag(tok->tag);
     // add a newline before block start tags (unless there already is one)
     bool onNewLine = out->size() == 0 || out->Last() == '\n';
@@ -49,7 +49,7 @@ static bool IsWsText(const char* s, size_t len) {
     return s == end;
 }
 
-std::span<u8> PrettyPrintHtml(std::span<u8> d) {
+ByteSlice PrettyPrintHtml(const ByteSlice& d) {
     size_t n = d.size();
     str::Str res(n);
     HtmlPullParser parser(d);
@@ -86,5 +86,7 @@ std::span<u8> PrettyPrintHtml(std::span<u8> d) {
             }
         }
     }
-    return res.StealAsSpan();
+    size_t sz = res.size();
+    u8* dres = (u8*)res.StealData();
+    return {dres, sz};
 }

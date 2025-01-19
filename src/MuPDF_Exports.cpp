@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 // Re-declare variables for when building libmupdf.dll,
@@ -33,12 +33,3 @@ extern "C" {
 }
 // copied from colorspace.c
 const fz_color_params fz_default_color_params = {FZ_RI_RELATIVE_COLORIMETRIC, 1, 0, 0};
-
-// adapted for mupdf/source/fitz/time.c
-
-#if 0
-extern "C" void fz_redirect_dll_io_to_console() {
-    // TODO(port):
-    //fz_redirect_io_to_console();
-}
-#endif

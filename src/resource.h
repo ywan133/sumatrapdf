@@ -3,14 +3,12 @@
 // Used by SumatraPDF.rc
 //
 #define IDI_SUMATRAPDF                  1
-#define IDI_PDFDOC                      2
-#define IDI_RAMICRO                     3
+
 #define IDD_DIALOG_GOTO_PAGE            129
 #define IDD_DIALOG_GET_PASSWORD         130
 #define IDD_DIALOG_PDF_ASSOCIATE        131
 #define IDC_CURSORDRAG                  132
 #define IDD_DIALOG_CHANGE_LANGUAGE      134
-#define IDD_DIALOG_NEW_VERSION          135
 #define IDD_DIALOG_SETTINGS             136
 #define IDD_DIALOG_FIND                 137 
 #define IDD_DIALOG_CUSTOM_ZOOM          138
@@ -34,9 +32,6 @@
 #define IDC_DONT_ASK_ME_AGAIN           1014
 #define IDC_ADD_PAGE_STATIC             1015
 #define IDC_CHANGE_LANG_LANG_LIST       1017
-#define IDC_YOU_HAVE                    1018
-#define IDC_NEW_AVAILABLE               1019
-#define IDC_SKIP_THIS_VERSION           1020
 #define IDC_SECTION_VIEW                1021
 #define IDC_DEFAULT_LAYOUT_LABEL        1022
 #define IDC_DEFAULT_LAYOUT              1023
@@ -46,7 +41,6 @@
 #define IDC_REMEMBER_STATE_PER_DOCUMENT 1027
 #define IDC_SECTION_ADVANCED            1028
 #define IDC_CHECK_FOR_UPDATES           1029
-#define IDC_SET_DEFAULT_READER          1030
 #define IDC_REMEMBER_OPENED_FILES       1031
 #define IDC_FIND_EDIT                   1032
 #define IDC_MATCH_CASE                  1033
@@ -66,12 +60,13 @@
 #define IDC_SECTION_PRINT_COMPATIBILITY 1070
 #define IDC_TOC_LABEL_WITH_CLOSE        1101
 #define IDC_FAV_LABEL_WITH_CLOSE        1106
-#define IDC_TABBAR                      1110
 #define IDB_RELOADING_CUE               2010
 
-#define IDD_RAMICRO_SPLASH              3061
-
 #define IDC_STATIC                      -1
+
+#define IDR_DLL_PAK                     1
+#define IDR_TRANSLATIONS                2
+#define IDR_MANUAL_PAK                  3
 
 // Next default values for new objects
 //

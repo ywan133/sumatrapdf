@@ -1,9 +1,12 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "BaseUtil.h"
-#include "ThreadUtil.h"
 #include "ScopedWin.h"
+#include "WinDynCalls.h"
+#include "WinUtil.h"
+
+#include "ThreadUtil.h"
 
 #if COMPILER_MSVC
 
@@ -26,7 +29,16 @@ typedef struct tagTHREADNAME_INFO {
                                 // EXCEPTION_EXECUTE_HANDLER. This might mask exceptions that were
                                 // not intended to be handled
 #pragma warning(disable : 6322) // silence /analyze: Empty _except block
-void SetThreadName(DWORD threadId, const char* threadName) {
+void SetThreadName(const char* threadName, DWORD threadId) {
+    if (DynSetThreadDescription && threadId == 0) {
+        TempWStr ws = ToWStrTemp(threadName);
+        DynSetThreadDescription(GetCurrentThread(), ws);
+        return;
+    }
+
+    if (threadId == 0) {
+        threadId = GetCurrentThreadId();
+    }
     THREADNAME_INFO info;
     info.dwType = 0x1000;
     info.szName = threadName;
@@ -45,57 +57,35 @@ void SetThreadName(DWORD, const char*) {
 }
 #endif // COMPILER_MSVC
 
-// We need a way to uniquely identified threads (so that we can test for equality).
-// Thread id assigned by the OS might be recycled. The memory address given to ThreadBase
-// object can be recycled as well, so we keep our own counter.
-static int GenUniqueThreadId() {
-    static LONG gThreadNoSeq = 0;
-    return (int)InterlockedIncrement(&gThreadNoSeq);
-}
-
-ThreadBase::ThreadBase(const char* name) {
-    threadNo = GenUniqueThreadId();
-    threadName = str::Dup(name);
-    // lf("ThreadBase() %d", threadNo);
-}
-
-ThreadBase::~ThreadBase() {
-    // lf("~ThreadBase() %d", threadNo);
-    CloseHandle(hThread);
-}
-
-DWORD WINAPI ThreadBase::ThreadProc(void* data) {
-    ThreadBase* thread = reinterpret_cast<ThreadBase*>(data);
-    if (thread->threadName) {
-        SetThreadName(GetCurrentThreadId(), thread->threadName);
-    }
-    thread->Run();
+static DWORD WINAPI ThreadFunc0(void* data) {
+    auto* fn = (Func0*)(data);
+    fn->Call();
+    delete fn;
+    DestroyTempAllocator();
     return 0;
 }
 
-void ThreadBase::Start() {
-    CrashIf(hThread);
-    hThread = CreateThread(nullptr, 0, ThreadProc, this, 0, 0);
-}
-
-bool ThreadBase::Join(DWORD waitMs) {
-    DWORD res = WaitForSingleObject(hThread, waitMs);
-    if (WAIT_OBJECT_0 == res) {
-        CloseHandle(hThread);
-        hThread = nullptr;
-        return true;
+HANDLE StartThread(const Func0& fn, const char* threadName) {
+    auto fp = new Func0(fn);
+    DWORD threadId = 0;
+    HANDLE hThread = CreateThread(nullptr, 0, ThreadFunc0, (void*)fp, 0, &threadId);
+    if (!hThread) {
+        return nullptr;
     }
-    return false;
+    if (threadName != nullptr) {
+        SetThreadName(threadName, threadId);
+    }
+    return hThread;
 }
 
-static DWORD WINAPI ThreadFunc(void* data) {
-    auto* func = reinterpret_cast<std::function<void()>*>(data);
-    (*func)();
-    delete func;
-    return 0;
+void RunAsync(const Func0& fn, const char* threadName) {
+    HANDLE hThread = StartThread(fn, threadName);
+    SafeCloseHandle(&hThread);
 }
 
-void RunAsync(const std::function<void()>& func) {
-    auto fp = new std::function<void()>(func);
-    AutoCloseHandle h(CreateThread(nullptr, 0, ThreadFunc, fp, 0, 0));
+AtomicInt gDangerousThreadCount;
+
+bool AreDangerousThreadsPending() {
+    auto count = gDangerousThreadCount.Get();
+    return count != 0;
 }

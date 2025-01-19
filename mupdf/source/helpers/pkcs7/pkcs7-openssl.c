@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
@@ -8,13 +30,13 @@
 pdf_pkcs7_signer *
 pkcs7_openssl_read_pfx(fz_context *ctx, const char *pfile, const char *pw)
 {
-	fz_throw(ctx, FZ_ERROR_GENERIC, "No OpenSSL support.");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "No OpenSSL support.");
 }
 
 pdf_pkcs7_verifier *
 pkcs7_openssl_new_verifier(fz_context *ctx)
 {
-	fz_throw(ctx, FZ_ERROR_GENERIC, "No OpenSSL support.");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "No OpenSSL support.");
 }
 
 #else
@@ -97,7 +119,7 @@ static const char AdobeCA_p7c[] = {
 #warning detect version of openssl at compile time
 #endif
 
-#ifdef LIBRESSL_VERSION_NUMBER
+#if defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x3060000fL
 
 static inline const STACK_OF(PKCS12_SAFEBAG) *
 PKCS12_SAFEBAG_get0_safes(const PKCS12_SAFEBAG *bag)
@@ -206,6 +228,11 @@ static BIO *BIO_new_stream(fz_context *ctx, fz_stream *stm)
 	}
 
 	bio = BIO_new(methods);
+	if (!bio)
+	{
+		BIO_meth_free(methods);
+		return NULL;
+	}
 	data = BIO_get_data(bio);
 	data->ctx = ctx;
 	data->stm = stm;
@@ -428,7 +455,7 @@ check_digest(fz_context *ctx, pdf_pkcs7_verifier *verifier, fz_stream *stm, unsi
 	int res = PDF_SIGNATURE_ERROR_UNKNOWN;
 
 	if (sig_len > INT_MAX)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Signature length too large");
+		fz_throw(ctx, FZ_ERROR_LIMIT, "Signature length too large");
 
 	bsig = BIO_new_mem_buf(sig, (int)sig_len);
 	pk7sig = d2i_PKCS7_bio(bsig, NULL);
@@ -506,9 +533,9 @@ exit:
 
 typedef struct
 {
-	pdf_pkcs7_designated_name base;
+	pdf_pkcs7_distinguished_name base;
 	char buf[8192];
-} pdf_pkcs7_designated_name_openssl;
+} pdf_pkcs7_distinguished_name_openssl;
 
 typedef struct
 {
@@ -609,9 +636,14 @@ static char *x509_get_name_entry_string(fz_context *ctx, X509_NAME *name, int ni
 	return data ? fz_strdup(ctx, (const char *)ASN1_STRING_get0_data(data)) : NULL;
 }
 
-static pdf_pkcs7_designated_name *x509_designated_name(fz_context *ctx, X509 *x509)
+static pdf_pkcs7_distinguished_name *x509_distinguished_name(fz_context *ctx, X509 *x509)
 {
-	pdf_pkcs7_designated_name *dn = fz_malloc_struct(ctx, pdf_pkcs7_designated_name);
+	pdf_pkcs7_distinguished_name *dn;
+
+	if (x509 == NULL)
+		return NULL;
+
+	dn = fz_malloc_struct(ctx, pdf_pkcs7_distinguished_name);
 
 	fz_try(ctx)
 	{
@@ -624,18 +656,18 @@ static pdf_pkcs7_designated_name *x509_designated_name(fz_context *ctx, X509 *x5
 	}
 	fz_catch(ctx)
 	{
-		pdf_signature_drop_designated_name(ctx, dn);
+		pdf_signature_drop_distinguished_name(ctx, dn);
 		fz_rethrow(ctx);
 	}
 
-	return (pdf_pkcs7_designated_name *)dn;
+	return (pdf_pkcs7_distinguished_name *)dn;
 }
 
-static pdf_pkcs7_designated_name *signer_designated_name(fz_context *ctx, pdf_pkcs7_signer *signer)
+static pdf_pkcs7_distinguished_name *signer_distinguished_name(fz_context *ctx, pdf_pkcs7_signer *signer)
 {
 	openssl_signer *osigner = (openssl_signer *)signer;
 	X509 *x509 = osigner->x509;
-	pdf_pkcs7_designated_name *dn = fz_malloc_struct(ctx, pdf_pkcs7_designated_name);
+	pdf_pkcs7_distinguished_name *dn = fz_malloc_struct(ctx, pdf_pkcs7_distinguished_name);
 
 	fz_try(ctx)
 	{
@@ -648,7 +680,7 @@ static pdf_pkcs7_designated_name *signer_designated_name(fz_context *ctx, pdf_pk
 	}
 	fz_catch(ctx)
 	{
-		pdf_signature_drop_designated_name(ctx, dn);
+		pdf_signature_drop_distinguished_name(ctx, dn);
 		fz_rethrow(ctx);
 	}
 
@@ -684,6 +716,14 @@ static int signer_create_digest(fz_context *ctx, pdf_pkcs7_signer *signer, fz_st
 	if (si == NULL)
 		goto exit;
 
+#ifdef CLUSTER
+	{
+		ASN1_UTCTIME *sign_time;
+		time_t now = 1112281971; /* release date of MuPDF 0.1 */
+		sign_time = X509_time_adj(NULL, 0, &now);
+		PKCS7_add_signed_attribute(si, NID_pkcs9_signingTime, V_ASN1_UTCTIME, sign_time);
+	}
+#endif
 	PKCS7_add_signed_attribute(si, NID_pkcs9_contentType, V_ASN1_OBJECT, OBJ_nid2obj(NID_pkcs7_data));
 	PKCS7_add_certificate(p7, osigner->x509);
 
@@ -754,15 +794,12 @@ pdf_pkcs7_signer *pkcs7_openssl_read_pfx(fz_context *ctx, const char *pfile, con
 		signer = fz_malloc_struct(ctx, openssl_signer);
 		signer->base.keep = keep_signer;
 		signer->base.drop = drop_signer;
-		signer->base.get_signing_name = signer_designated_name;
+		signer->base.get_signing_name = signer_distinguished_name;
 		signer->base.max_digest_size = max_digest_size;
 		signer->base.create_digest = signer_create_digest;
 		signer->refs = 1;
 
 		OpenSSL_add_all_algorithms();
-
-		EVP_add_digest(EVP_md5());
-		EVP_add_digest(EVP_sha1());
 
 		ERR_load_crypto_strings();
 
@@ -770,15 +807,15 @@ pdf_pkcs7_signer *pkcs7_openssl_read_pfx(fz_context *ctx, const char *pfile, con
 
 		pfxbio = BIO_new_file(pfile, "rb");
 		if (pfxbio == NULL)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Can't open pfx file: %s", pfile);
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "Can't open pfx file: %s", pfile);
 
 		p12 = d2i_PKCS12_bio(pfxbio, NULL);
 		if (p12 == NULL)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Invalid pfx file: %s", pfile);
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "Invalid pfx file: %s", pfile);
 
 		asafes = PKCS12_unpack_authsafes(p12);
 		if (asafes == NULL)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Invalid pfx file: %s", pfile);
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "Invalid pfx file: %s", pfile);
 
 		/* Nothing in this for loop can fz_throw */
 		for (i = 0; i < sk_PKCS7_num(asafes); i++)
@@ -810,10 +847,10 @@ pdf_pkcs7_signer *pkcs7_openssl_read_pfx(fz_context *ctx, const char *pfile, con
 		sk_PKCS7_pop_free (asafes, PKCS7_free);
 
 		if (signer->pkey == NULL)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to obtain public key");
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "Failed to obtain public key");
 
 		if (signer->x509 == NULL)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to obtain certificate");
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "Failed to obtain certificate");
 	}
 	fz_always(ctx)
 	{
@@ -829,16 +866,16 @@ pdf_pkcs7_signer *pkcs7_openssl_read_pfx(fz_context *ctx, const char *pfile, con
 	return &signer->base;
 }
 
-pdf_pkcs7_designated_name *get_signatory(fz_context *ctx, pdf_pkcs7_verifier *verifier, unsigned char *sig, size_t sig_len)
+pdf_pkcs7_distinguished_name *get_signatory(fz_context *ctx, pdf_pkcs7_verifier *verifier, unsigned char *sig, size_t sig_len)
 {
-	pdf_pkcs7_designated_name *name = NULL;
+	pdf_pkcs7_distinguished_name *name = NULL;
 	PKCS7 *pk7sig = NULL;
 	BIO *bsig = NULL;
 	STACK_OF(PKCS7_SIGNER_INFO) *sk = NULL;
 	X509 *x509 = NULL;
 
 	if (sig_len > INT_MAX)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Signature length too large");
+		fz_throw(ctx, FZ_ERROR_LIMIT, "Signature length too large");
 
 	bsig = BIO_new_mem_buf(sig, (int)sig_len);
 	pk7sig = d2i_PKCS7_bio(bsig, NULL);
@@ -852,7 +889,7 @@ pdf_pkcs7_designated_name *get_signatory(fz_context *ctx, pdf_pkcs7_verifier *ve
 	x509 = pk7_signer(pk7_certs(pk7sig), sk_PKCS7_SIGNER_INFO_value(sk, 0));
 
 	fz_try(ctx)
-		name = x509_designated_name(ctx, x509);
+		name = x509_distinguished_name(ctx, x509);
 	fz_catch(ctx)
 	{
 		PKCS7_free(pk7sig);

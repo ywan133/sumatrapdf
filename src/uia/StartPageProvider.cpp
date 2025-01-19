@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 #include "utils/BaseUtil.h"
@@ -14,14 +14,13 @@ SumatraUIAutomationStartPageProvider::SumatraUIAutomationStartPageProvider(HWND 
     // root->AddRef(); Don't add refs to our parent & owner.
 }
 
-SumatraUIAutomationStartPageProvider::~SumatraUIAutomationStartPageProvider() {
-}
+SumatraUIAutomationStartPageProvider::~SumatraUIAutomationStartPageProvider() = default;
 
 // IUnknown
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationStartPageProvider::QueryInterface(REFIID riid, void** ppv) {
     static const QITAB qit[] = {QITABENT(SumatraUIAutomationStartPageProvider, IRawElementProviderSimple),
                                 QITABENT(SumatraUIAutomationStartPageProvider, IRawElementProviderFragment),
-                                {0}};
+                                {nullptr}};
     return QISearch(this, qit, riid, ppv);
 }
 
@@ -31,7 +30,7 @@ ULONG STDMETHODCALLTYPE SumatraUIAutomationStartPageProvider::AddRef() {
 
 ULONG STDMETHODCALLTYPE SumatraUIAutomationStartPageProvider::Release() {
     LONG res = InterlockedDecrement(&refCount);
-    CrashIf(res < 0);
+    ReportIf(res < 0);
     if (0 == res) {
         delete this;
     }
@@ -72,7 +71,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationStartPageProvider::GetRuntimeId(SAF
     int rId[] = {(int)canvasHwnd, SUMATRA_UIA_STARTPAGE_RUNTIME_ID};
     for (LONG i = 0; i < 2; i++) {
         HRESULT hr = SafeArrayPutElement(psa, &i, (void*)&(rId[i]));
-        CrashIf(FAILED(hr));
+        ReportIf(FAILED(hr));
     }
 
     *pRetVal = psa;
@@ -109,7 +108,7 @@ SumatraUIAutomationStartPageProvider::get_FragmentRoot(IRawElementProviderFragme
     return S_OK;
 }
 
-HRESULT STDMETHODCALLTYPE SumatraUIAutomationStartPageProvider::GetPatternProvider([[maybe_unused]] PATTERNID patternId,
+HRESULT STDMETHODCALLTYPE SumatraUIAutomationStartPageProvider::GetPatternProvider(__unused PATTERNID patternId,
                                                                                    IUnknown** pRetVal) {
     *pRetVal = nullptr;
     return S_OK;

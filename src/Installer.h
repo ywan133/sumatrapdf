@@ -1,25 +1,20 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-#define INSTALLER_FRAME_CLASS_NAME L"SUMATRA_PDF_INSTALLER_FRAME"
+constexpr int kInstallerWinDy = 340;
 
-#define BROWSER_PLUGIN_NAME L"npPdfViewer.dll"
-#define SEARCH_FILTER_DLL_NAME L"PdfFilter.dll"
-#define PREVIEW_DLL_NAME L"PdfPreview.dll"
+enum class PreviousInstallationType { None = 0, User = 1, Machine = 2, Both = 3 };
 
-#define INSTALLER_WIN_DX 420
-#define INSTALLER_WIN_DY 340
+struct PreviousInstallationInfo {
+    char* installationDir = nullptr;
+    PreviousInstallationType typ = PreviousInstallationType::None;
+    bool searchFilterInstalled = false;
+    bool previewInstalled = false;
+    bool allUsers = false;
 
-#define WIN_BG_COLOR RGB(0xff, 0xf2, 0) // yellow
-
-// TODO: should scale
-#define WINDOW_MARGIN DpiScale(8)
-
-/* The window is divided in three parts:
-- top part, where we display nice graphics
-- middle part, where we either display messages or advanced options
-- bottom part, with install/uninstall button
-*/
+    PreviousInstallationInfo() = default;
+    ~PreviousInstallationInfo();
+};
 
 // This is the height of the lower part
 extern int gBottomPartDy;
@@ -27,17 +22,12 @@ extern int gBottomPartDy;
 extern int gButtonDy;
 
 #define WM_APP_INSTALLATION_FINISHED (WM_APP + 1)
+#define WM_APP_START_INSTALLATION (WM_APP + 2)
 
-struct ButtonCtrl;
-
-extern WCHAR* firstError;
-extern Flags* gCli;
-extern const WCHAR* gDefaultMsg;
+extern char* gFirstError;
+extern const char* gDefaultMsg;
 extern HWND gHwndFrame;
-extern HFONT gFontDefault;
-extern WCHAR* gMsgError;
-extern bool gShowOptions;
-extern bool gReproBug;
+extern char* gMsgError;
 
 extern Gdiplus::Color COLOR_MSG_WELCOME;
 extern Gdiplus::Color COLOR_MSG_OK;
@@ -54,35 +44,46 @@ extern Gdiplus::Color gCol4Shadow;
 extern Gdiplus::Color gCol5;
 extern Gdiplus::Color gCol5Shadow;
 
-ButtonCtrl* CreateDefaultButtonCtrl(HWND hwndParent, const WCHAR* s);
-void InitInstallerUninstaller();
-void OnPaintFrame(HWND hwnd);
+void OnPaintFrame(HWND hwnd, bool skipoMessage);
 void AnimStep();
-void NotifyFailed(const WCHAR* msg);
-void SetMsg(const WCHAR* msg, Gdiplus::Color color);
+
+void NotifyFailed(const char* msg);
+
+void SetMsg(const char* msg, Gdiplus::Color color);
 void SetDefaultMsg();
 
-int KillProcessesWithModule(const WCHAR* modulePath, bool waitUntilTerminated);
+int KillProcessesWithModule(const char* modulePath, bool waitUntilTerminated);
 
-const WCHAR** GetSupportedExts();
+TempStr GetShortcutPathTemp(int csidl);
 
-WCHAR* GetShortcutPath(int csidl);
+bool ExtractInstallerFiles(char* dir);
 
-WCHAR* GetExistingInstallationDir();
-WCHAR* GetInstallDirNoFree();
-WCHAR* GetInstalledExePath();
+char* GetExistingInstallationDir();
 
-WCHAR* GetInstallationFilePath(const WCHAR* name);
-WCHAR* GetExistingInstallationFilePath(const WCHAR* name);
+void GetPreviousInstallInfo(PreviousInstallationInfo* info);
 
-void RegisterPreviewer(bool silent);
-void UnRegisterPreviewer(bool silent);
-bool IsPreviewerInstalled();
+char* GetInstallationFilePathTemp(const char* name);
 
-void RegisterSearchFilter(bool silent);
-void UnRegisterSearchFilter(bool silent);
-bool IsSearchFilterInstalled();
+void RegisterPreviewer(bool allUsers);
+void UnRegisterPreviewer();
+
+void RegisterSearchFilter(bool allUsers);
+void UnRegisterSearchFilter();
 
 void UninstallBrowserPlugin();
 
-bool CheckInstallUninstallPossible(bool silent = false);
+bool CheckInstallUninstallPossible(HWND hwnd, bool silent = false);
+char* GetInstallerLogPath();
+
+TempStr GetRegPathUninstTemp(const char* appName);
+
+// Installer.cpp
+void RemoveAppShortcuts();
+
+// RegistryInstaller.cpp
+
+bool WriteUninstallerRegistryInfo(HKEY hkey, bool allUsers, const char* installedExePat);
+bool WriteExtendedFileExtensionInfo(HKEY hkey, const char* installedExePat);
+bool RemoveUninstallerRegistryInfo(HKEY hkey);
+void RemoveInstallRegistryKeys(HKEY hkey);
+int GetInstallerWinDx();

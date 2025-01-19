@@ -1,41 +1,36 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-extern bool gAddCrashMeMenu;
-
-#define SEP_ITEM "-----"
+struct BuildMenuCtx;
+struct MenuOwnerDrawInfo;
 
 struct MenuDef {
     const char* title = nullptr;
-    int id = 0;
-    int flags = 0;
+    UINT_PTR idOrSubmenu = 0;
 };
 
-// value associated with menu item for owner-drawn purposes
-struct MenuOwnerDrawInfo {
-    const WCHAR* text = nullptr;
-    // copy of MENUITEMINFO fields
-    uint fType = 0;
-    uint fState = 0;
-    HBITMAP hbmpChecked = nullptr;
-    HBITMAP hbmpUnchecked = nullptr;
-    HBITMAP hbmpItem = nullptr;
-};
+constexpr const char* kMenuSeparator = "-----";
+
+extern bool gShowDebugMenu;
+extern bool gAddCrashMeMenu;
 
 void FreeAllMenuDrawInfos();
 void FreeMenuOwnerDrawInfo(MenuOwnerDrawInfo*);
 void MarkMenuOwnerDraw(HMENU);
 void FreeMenuOwnerDrawInfoData(HMENU);
-void MenuOwnerDrawnMesureItem(HWND, MEASUREITEMSTRUCT*);
-void MenuOwnerDrawnDrawItem(HWND, DRAWITEMSTRUCT*);
+void MenuCustomDrawMesureItem(HWND, MEASUREITEMSTRUCT*);
+void MenuCustomDrawItem(HWND, DRAWITEMSTRUCT*);
 HFONT GetMenuFont();
 
-HMENU BuildMenuFromMenuDef(MenuDef menuDefs[], HMENU menu, int flagFilter = 0);
-HMENU BuildMenu(WindowInfo* win);
-void OnWindowContextMenu(WindowInfo* win, int x, int y);
-void OnAboutContextMenu(WindowInfo* win, int x, int y);
-void OnMenuZoom(WindowInfo* win, int menuId);
-void OnMenuCustomZoom(WindowInfo* win);
-int MenuIdFromVirtualZoom(float virtualZoom);
-void UpdateAppMenu(WindowInfo* win, HMENU m);
-void ShowHideMenuBar(WindowInfo* win, bool showTemporarily = false);
+HMENU BuildMenuFromDef(MenuDef* menuDefs, HMENU menu, BuildMenuCtx* ctx);
+void RemoveBadMenuSeparators(HMENU menu);
+HMENU BuildMenu(MainWindow* win);
+void OnWindowContextMenu(MainWindow* win, int x, int y);
+void OnAboutContextMenu(MainWindow* win, int x, int y);
+int CmdIdFromVirtualZoom(float virtualZoom);
+void UpdateAppMenu(MainWindow* win, HMENU m);
+void ToggleMenuBar(MainWindow* win, bool showTemporarily);
+float ZoomMenuItemToZoom(int menuItemId);
+std::pair<bool, bool> GetCommandIdState(BuildMenuCtx* ctx, int cmdId);
+BuildMenuCtx* NewBuildMenuCtx(WindowTab* tab, Point pt);
+void DeleteBuildMenuCtx(BuildMenuCtx*);

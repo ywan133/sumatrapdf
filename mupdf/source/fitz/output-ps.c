@@ -1,15 +1,40 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include "z-imp.h"
+
+#include <limits.h>
 
 typedef struct ps_band_writer_s
 {
 	fz_band_writer super;
 	z_stream stream;
+	int stream_started;
 	int stream_ended;
-	int input_size;
+	size_t input_size;
 	unsigned char *input;
-	int output_size;
+	size_t output_size;
 	unsigned char *output;
 } ps_band_writer;
 
@@ -61,10 +86,10 @@ ps_write_header(fz_context *ctx, fz_band_writer *writer_, fz_colorspace *cs)
 	int err;
 
 	if (writer->super.s != 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Postscript writer cannot cope with spot colors");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Postscript writer cannot cope with spot colors");
 
 	if (alpha != 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Postscript output cannot have alpha");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Postscript output cannot have alpha");
 
 	writer->super.w = w;
 	writer->super.h = h;
@@ -73,10 +98,11 @@ ps_write_header(fz_context *ctx, fz_band_writer *writer_, fz_colorspace *cs)
 	writer->stream.zalloc = fz_zlib_alloc;
 	writer->stream.zfree = fz_zlib_free;
 	writer->stream.opaque = ctx;
+	writer->stream_started = 1;
 
 	err = deflateInit(&writer->stream, Z_DEFAULT_COMPRESSION);
 	if (err != Z_OK)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "compression error %d", err);
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "compression error %d", err);
 
 	fz_write_printf(ctx, out, "%%%%Page: %d %d\n", pagenum, pagenum);
 	fz_write_printf(ctx, out, "%%%%PageBoundingBox: 0 0 %d %d\n", w_points, h_points);
@@ -96,7 +122,7 @@ ps_write_header(fz_context *ctx, fz_band_writer *writer_, fz_colorspace *cs)
 		fz_write_string(ctx, out, "/DeviceCMYK setcolorspace\n");
 		break;
 	default:
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Unexpected colorspace for ps output");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Unexpected colorspace for ps output");
 	}
 	fz_write_printf(ctx, out,
 		"<<\n"
@@ -121,18 +147,10 @@ ps_write_trailer(fz_context *ctx, fz_band_writer *writer_)
 	fz_output *out = writer->super.out;
 	int err;
 
-	writer->stream.next_in = NULL;
-	writer->stream.avail_in = 0;
-	writer->stream.next_out = (Bytef*)writer->output;
-	writer->stream.avail_out = (uInt)writer->output_size;
-
-	err = deflate(&writer->stream, Z_FINISH);
-	if (err != Z_STREAM_END)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "compression error %d", err);
 	writer->stream_ended = 1;
 	err = deflateEnd(&writer->stream);
 	if (err != Z_OK)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "compression error %d", err);
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "compression error %d", err);
 
 	fz_write_data(ctx, out, writer->output, writer->output_size - writer->stream.avail_out);
 	fz_write_string(ctx, out, "\nshowpage\n%%%%PageTrailer\n%%%%EndPageTrailer\n\n");
@@ -143,7 +161,7 @@ ps_drop_band_writer(fz_context *ctx, fz_band_writer *writer_)
 {
 	ps_band_writer *writer = (ps_band_writer *)writer_;
 
-	if (!writer->stream_ended)
+	if (writer->stream_started && !writer->stream_ended)
 	{
 		int err = deflateEnd(&writer->stream);
 		if (err != Z_OK)
@@ -166,6 +184,7 @@ void fz_write_pixmap_as_ps(fz_context *ctx, fz_output *out, const fz_pixmap *pix
 	{
 		fz_write_header(ctx, writer, pixmap->w, pixmap->h, pixmap->n, pixmap->alpha, pixmap->xres, pixmap->yres, 0, pixmap->colorspace, pixmap->seps);
 		fz_write_band(ctx, writer, pixmap->stride, pixmap->h, pixmap->samples);
+		fz_close_band_writer(ctx, writer);
 	}
 	fz_always(ctx)
 	{
@@ -201,19 +220,30 @@ ps_write_band(fz_context *ctx, fz_band_writer *writer_, int stride, int band_sta
 	int w = writer->super.w;
 	int h = writer->super.h;
 	int n = writer->super.n;
-	int x, y, i, err;
-	int required_input;
-	int required_output;
+	int x, y, i, err, finalband;
+	size_t required_input;
+	size_t required_output;
+	size_t remain;
 	unsigned char *o;
 
 	if (!out)
 		return;
 
-	if (band_start+band_height >= h)
+
+	finalband = (band_start+band_height >= h);
+	if (finalband)
 		band_height = h - band_start;
 
-	required_input = w*n*band_height;
-	required_output = (int)deflateBound(&writer->stream, required_input);
+	required_input = w;
+	if (required_input > SIZE_MAX / n)
+		fz_throw(ctx, FZ_ERROR_LIMIT, "ps data too large.");
+	required_input = required_input * n;
+	if (required_input > SIZE_MAX / band_height)
+		fz_throw(ctx, FZ_ERROR_LIMIT, "ps data too large.");
+	required_input *= band_height;
+	required_output = required_input >= UINT_MAX ? UINT_MAX : deflateBound(&writer->stream, (uLong)required_input);
+	if (required_output < required_input || required_output > UINT_MAX)
+		required_output = UINT_MAX;
 
 	if (writer->input == NULL || writer->input_size < required_input)
 	{
@@ -242,16 +272,38 @@ ps_write_band(fz_context *ctx, fz_band_writer *writer_, int stride, int band_sta
 		samples += stride - w*n;
 	}
 
-	writer->stream.next_in = (Bytef*)writer->input;
-	writer->stream.avail_in = required_input;
-	writer->stream.next_out = (Bytef*)writer->output;
-	writer->stream.avail_out = (uInt)writer->output_size;
+	remain = o - writer->input;
+	o = writer->input;
 
-	err = deflate(&writer->stream, Z_NO_FLUSH);
-	if (err != Z_OK)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "compression error %d", err);
+	do
+	{
+		size_t eaten;
 
-	fz_write_data(ctx, out, writer->output, writer->output_size - writer->stream.avail_out);
+		writer->stream.next_in = o;
+		writer->stream.avail_in = (uInt)(remain <= UINT_MAX ? remain : UINT_MAX);
+		writer->stream.next_out = writer->output;
+		writer->stream.avail_out = writer->output_size <= UINT_MAX ? (uInt)writer->output_size : UINT_MAX;
+
+		err = deflate(&writer->stream, (finalband && remain == writer->stream.avail_in) ? Z_FINISH : Z_NO_FLUSH);
+		if (err != Z_OK && err != Z_STREAM_END)
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "compression error %d", err);
+
+		/* We are guaranteed that writer->stream.next_in will have been updated for the
+		 * data that has been eaten. */
+		eaten = (writer->stream.next_in - o);
+		remain -= eaten;
+		o += eaten;
+
+		/* We are guaranteed that writer->stream.next_out will have been updated for the
+		 * data that has been written. */
+		if (writer->stream.next_out != writer->output)
+			fz_write_data(ctx, out, writer->output, writer->output_size - writer->stream.avail_out);
+
+		/* Zlib only guarantees to have finished when we have no more data to feed in, and
+		 * the last call to deflate did not return with avail_out == 0. (i.e. no more is
+		 * buffered internally.) */
+	}
+	while (remain != 0 || writer->stream.avail_out == 0);
 }
 
 fz_band_writer *fz_new_ps_band_writer(fz_context *ctx, fz_output *out)
@@ -298,6 +350,7 @@ ps_end_page(fz_context *ctx, fz_document_writer *wri_, fz_device *dev)
 		bw = fz_new_ps_band_writer(ctx, wri->out);
 		fz_write_header(ctx, bw, pix->w, pix->h, pix->n, pix->alpha, pix->xres, pix->yres, 0, pix->colorspace, pix->seps);
 		fz_write_band(ctx, bw, pix->stride, pix->h, pix->samples);
+		fz_close_band_writer(ctx, bw);
 	}
 	fz_always(ctx)
 	{
@@ -329,16 +382,20 @@ ps_drop_writer(fz_context *ctx, fz_document_writer *wri_)
 fz_document_writer *
 fz_new_ps_writer_with_output(fz_context *ctx, fz_output *out, const char *options)
 {
-	fz_ps_writer *wri = fz_new_derived_document_writer(ctx, fz_ps_writer, ps_begin_page, ps_end_page, ps_close_writer, ps_drop_writer);
+	fz_ps_writer *wri = NULL;
+
+	fz_var(wri);
 
 	fz_try(ctx)
 	{
+		wri = fz_new_derived_document_writer(ctx, fz_ps_writer, ps_begin_page, ps_end_page, ps_close_writer, ps_drop_writer);
 		fz_parse_draw_options(ctx, &wri->draw, options);
 		wri->out = out;
 		fz_write_ps_file_header(ctx, wri->out);
 	}
 	fz_catch(ctx)
 	{
+		fz_drop_output(ctx, out);
 		fz_free(ctx, wri);
 		fz_rethrow(ctx);
 	}
@@ -350,13 +407,5 @@ fz_document_writer *
 fz_new_ps_writer(fz_context *ctx, const char *path, const char *options)
 {
 	fz_output *out = fz_new_output_with_path(ctx, path ? path : "out.ps", 0);
-	fz_document_writer *wri = NULL;
-	fz_try(ctx)
-		wri = fz_new_ps_writer_with_output(ctx, out, options);
-	fz_catch(ctx)
-	{
-		fz_drop_output(ctx, out);
-		fz_rethrow(ctx);
-	}
-	return wri;
+	return fz_new_ps_writer_with_output(ctx, out, options);
 }

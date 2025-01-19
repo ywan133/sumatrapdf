@@ -2,10 +2,46 @@
 
 LIBRARY libmupdf
 EXPORTS
-
-; Fitz exports
-
-	; new stuff
+	pdf_annot_filespec
+	pdf_load_embedded_file_contents
+	pdf_get_embedded_file_params
+	fz_urldecode
+	fz_new_odt_writer
+	fz_new_odt_writer_with_output
+	fz_new_docx_writer
+	fz_new_docx_writer_with_output
+	pdf_string_from_annot_type
+	fz_page_number_from_location
+	fz_lookup_metadata
+	pdf_drop_annot
+	fz_open_document_with_stream
+	fz_authenticate_password
+	fz_set_use_document_css
+	fz_count_chapter_pages
+	fz_run_page_annots
+	fz_string_from_buffer
+	fz_open_document
+	fz_drop_separations
+	fz_set_user_css
+	fz_clone_pixmap_area_with_different_seps
+	fz_layout_document
+	fz_run_page_widgets
+	fz_register_document_handlers
+	fz_count_chapters
+	fz_transform_page
+	fz_load_chapter_page
+	fz_run_page_contents
+	fz_resolve_link_dest
+	fz_report_error
+	fz_ignore_error
+	pdf_was_repaired
+	pdf_has_unsaved_changes
+	pdf_can_be_saved_incrementally
+	pdf_annot_page
+	pdf_drop_page_tree
+	pdf_annot_obj
+	pdf_annot_field_label
+	pdf_annot_field_flags
 	fz_new_pdfocr_writer_with_output
 	fz_new_pdfocr_writer
 	fz_is_point_inside_rect
@@ -25,6 +61,7 @@ EXPORTS
 	fz_load_outline
 	fz_load_page
 	fz_bound_page
+	fz_bound_page_box
 	fz_run_page
 	fz_new_pdf_writer_with_output
 	pdf_obj_num_is_stream
@@ -34,7 +71,7 @@ EXPORTS
 	pdf_xobject_resources
 	pdf_page_resources
 	xps_drop_part
-	pdf_install_load_system_font_funcs
+	install_load_windows_font_funcs
 	pdf_page_transform
 	pdf_page_obj_transform
 	fz_close_device
@@ -62,7 +99,7 @@ EXPORTS
 	fz_set_warning_callback
 	fz_set_error_callback
 	fz_new_buffer_from_shared_data
-	pdf_update_appearance
+	pdf_update_annot
 	pdf_dict_put_drop
 	pdf_add_page
 	pdf_add_image
@@ -75,10 +112,8 @@ EXPORTS
 	pdf_flatten_inheritable_page_items
 	fz_resolve_link
 	pdf_is_embedded_file
-	pdf_embedded_file_name
 	fz_new_image_from_svg
 	destroy_system_font_list
-	drop_cached_fonts_for_ctx
 	pdf_doc_was_linearized
 	pdf_load_page_tree
 	pdf_annot_ap
@@ -273,7 +308,6 @@ EXPORTS
 	fz_load_jxr_info
 	fz_load_tiff_subimage_count
 	fz_load_tiff_subimage
-	fz_new_link
 	fz_keep_link
 	fz_drop_link
 	;fz_free_link_dest
@@ -412,7 +446,6 @@ EXPORTS
 	gettimeofday
 	fz_fopen_utf8
 	fz_utf8_from_wchar
-	fz_wchar_from_utf8
 	fz_fopen_utf8
 	fz_free_argv
 	fz_new_text
@@ -444,6 +477,7 @@ EXPORTS
 	fz_xml_find
 	fz_xml_find_next
 	fz_xml_find_down
+	fz_contains_rect
 
 ; MuPDF exports
 
@@ -645,7 +679,6 @@ EXPORTS
 	pdf_set_int
 	pdf_new_pdf_device
 	pdf_write_document
-	pdf_localise_page_resources
 	pdf_lookup_page_number
 	pdf_count_pages
 	pdf_lookup_page_obj
@@ -714,7 +747,6 @@ EXPORTS
 	pdf_repair_obj
 	pdf_progressive_advance
 	pdf_drop_document
-	pdf_embedded_file_stream
 
 ; MuXPS exports
 
@@ -845,12 +877,30 @@ EXPORTS
 	inflateInit_
 	inflateInit2_
 
-; lzma exports (required for LzmaSimpleArchive)
+; lzma exports (needed for LzmaSimpleArchive)
 
 ;	LzmaDecode
 ;	x86_Convert
 
-; libwebp exports (required for WebpReader)
+; libwebp exports (needed for WebpReader)
 
 	WebPDecodeBGRAInto
 	WebPGetInfo
+
+; libavif exports (needed for AvifReader)
+
+; libheif exports (needed for AvifReader)
+	heif_get_file_mime_type
+	heif_context_alloc
+	heif_context_free
+	heif_context_read_from_memory_without_copy
+	heif_context_get_primary_image_handle
+	heif_image_handle_release
+	heif_image_handle_has_alpha_channel
+	heif_decode_image
+	heif_image_get_width
+	heif_image_get_height
+	heif_image_get_plane_readonly
+	heif_image_handle_get_width
+	heif_image_handle_get_height
+	heif_image_release

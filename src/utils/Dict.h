@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 namespace dict {
@@ -28,44 +28,8 @@ class MapStrToInt {
 
     bool Insert(const char* key, int val, int* existingValOut = nullptr, const char** existingKeyOut = nullptr);
 
-    bool Remove(const char* key, int* removedValOut);
-    bool Get(const char* key, int* valOut);
-};
-
-class MapWStrToInt {
-  public:
-    PoolAllocator allocator;
-    HashTable* h = nullptr;
-
-    explicit MapWStrToInt(size_t initialSize = DEFAULT_HASH_TABLE_INITIAL_SIZE);
-    ~MapWStrToInt();
-
-    size_t Count() const;
-
-    // if a key doesn't exist, inserts a key with a given value and return true
-    // if a key exists, returns false and sets prevValOut to existing value
-    bool Insert(const WCHAR* key, int val, int* prevValOut);
-    bool Remove(const WCHAR* key, int* removedValOut);
-    bool Get(const WCHAR* key, int* valOut);
+    bool Remove(const char* key, int* removedValOut) const;
+    bool Get(const char* key, int* valOut) const;
 };
 
 } // namespace dict
-
-class StringInterner {
-    dict::MapStrToInt strToInt;
-    Vec<const char*> intToStr;
-
-  public:
-    StringInterner() {
-    }
-
-    int Intern(const char* s, bool* alreadyPresent = nullptr);
-    size_t StringsCount() const {
-        return intToStr.size();
-    }
-    const char* GetByIndex(size_t n) const {
-        return intToStr.at(n);
-    }
-
-    int nInternCalls{0}; // so we know how effective interning is
-};

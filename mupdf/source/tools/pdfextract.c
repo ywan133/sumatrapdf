@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /*
  * pdfextract -- the ultimate way to extract images and fonts from pdfs
  */
@@ -11,6 +33,7 @@
 static pdf_document *doc = NULL;
 static fz_context *ctx = NULL;
 static int dorgb = 0;
+static int doalpha = 0;
 static int doicc = 1;
 
 static int usage(void)
@@ -18,6 +41,7 @@ static int usage(void)
 	fprintf(stderr, "usage: mutool extract [options] file.pdf [object numbers]\n");
 	fprintf(stderr, "\t-p\tpassword\n");
 	fprintf(stderr, "\t-r\tconvert images to rgb\n");
+	fprintf(stderr, "\t-a\tembed SMasks as alpha channel\n");
 	fprintf(stderr, "\t-N\tdo not use ICC color conversions\n");
 	return 1;
 }
@@ -89,11 +113,13 @@ static void saveimage(pdf_obj *ref)
 {
 	fz_image *image = NULL;
 	fz_pixmap *pix = NULL;
+	fz_pixmap *mask = NULL;
 	char buf[32];
 	fz_compressed_buffer *cbuf;
 	int type;
 
 	fz_var(image);
+	fz_var(mask);
 	fz_var(pix);
 
 	fz_try(ctx)
@@ -125,12 +151,27 @@ static void saveimage(pdf_obj *ref)
 		else
 		{
 			pix = fz_get_pixmap_from_image(ctx, image, NULL, NULL, 0, 0);
+			if (image->mask && doalpha)
+			{
+				mask = fz_get_pixmap_from_image(ctx, image->mask, NULL, NULL, 0, 0);
+				if (mask->w == pix->w && mask->h == pix->h)
+				{
+					fz_pixmap *apix = fz_new_pixmap_from_color_and_mask(ctx, pix, mask);
+					fz_drop_pixmap(ctx, pix);
+					pix = apix;
+				}
+				else
+				{
+					fz_warn(ctx, "cannot combine image with smask if different resolution");
+				}
+			}
 			writepixmap(pix, buf);
 		}
 	}
 	fz_always(ctx)
 	{
 		fz_drop_image(ctx, image);
+		fz_drop_pixmap(ctx, mask);
 		fz_drop_pixmap(ctx, pix);
 	}
 	fz_catch(ctx)
@@ -169,7 +210,7 @@ static void savefont(pdf_obj *dict)
 
 		obj = pdf_dict_get(ctx, obj, PDF_NAME(Subtype));
 		if (obj && !pdf_is_name(ctx, obj))
-			fz_throw(ctx, FZ_ERROR_GENERIC, "invalid font descriptor subtype");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "invalid font descriptor subtype");
 
 		if (pdf_name_eq(ctx, obj, PDF_NAME(Type1C)))
 			ext = "cff";
@@ -178,12 +219,11 @@ static void savefont(pdf_obj *dict)
 		else if (pdf_name_eq(ctx, obj, PDF_NAME(OpenType)))
 			ext = "otf";
 		else
-			fz_throw(ctx, FZ_ERROR_GENERIC, "unhandled font type '%s'", pdf_to_name(ctx, obj));
+			fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "unhandled font type '%s'", pdf_to_name(ctx, obj));
 	}
 
 	if (!stream)
 	{
-		fz_warn(ctx, "unhandled font type");
 		return;
 	}
 
@@ -212,10 +252,9 @@ static void savefont(pdf_obj *dict)
 
 static void extractobject(int num)
 {
-	pdf_obj *ref;
+	pdf_obj *ref = NULL;
 
-	if (!doc)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "no file specified");
+	fz_var(ref);
 
 	fz_try(ctx)
 	{
@@ -230,21 +269,25 @@ static void extractobject(int num)
 	fz_always(ctx)
 		pdf_drop_obj(ctx, ref);
 	fz_catch(ctx)
+	{
+		fz_report_error(ctx);
 		fz_warn(ctx, "ignoring object %d", num);
+	}
 }
 
 int pdfextract_main(int argc, char **argv)
 {
 	char *infile;
 	char *password = "";
-	int c, o;
+	int c, o, ret = 0;
 
-	while ((c = fz_getopt(argc, argv, "p:rN")) != -1)
+	while ((c = fz_getopt(argc, argv, "p:raN")) != -1)
 	{
 		switch (c)
 		{
 		case 'p': password = fz_optarg; break;
 		case 'r': dorgb++; break;
+		case 'a': doalpha++; break;
 		case 'N': doicc^=1; break;
 		default: return usage();
 		}
@@ -267,28 +310,40 @@ int pdfextract_main(int argc, char **argv)
 	else
 		fz_disable_icc(ctx);
 
-	doc = pdf_open_document(ctx, infile);
-	if (pdf_needs_password(ctx, doc))
-		if (!pdf_authenticate_password(ctx, doc, password))
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cannot authenticate password: %s", infile);
+	fz_var(doc);
 
-	if (fz_optind == argc)
+	fz_try(ctx)
 	{
-		int len = pdf_count_objects(ctx, doc);
-		for (o = 1; o < len; o++)
-			extractobject(o);
-	}
-	else
-	{
-		while (fz_optind < argc)
+		doc = pdf_open_document(ctx, infile);
+		if (pdf_needs_password(ctx, doc))
+			if (!pdf_authenticate_password(ctx, doc, password))
+				fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot authenticate password: %s", infile);
+
+		if (fz_optind == argc)
 		{
-			extractobject(atoi(argv[fz_optind]));
-			fz_optind++;
+			int len = pdf_count_objects(ctx, doc);
+			for (o = 1; o < len; o++)
+				extractobject(o);
+		}
+		else
+		{
+			while (fz_optind < argc)
+			{
+				extractobject(atoi(argv[fz_optind]));
+				fz_optind++;
+			}
 		}
 	}
+	fz_always(ctx)
+		pdf_drop_document(ctx, doc);
+	fz_catch(ctx)
+	{
+		fz_report_error(ctx);
+		ret = 1;
+	}
 
-	pdf_drop_document(ctx, doc);
 	fz_flush_warnings(ctx);
 	fz_drop_context(ctx);
-	return 0;
+
+	return ret;
 }

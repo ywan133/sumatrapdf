@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2022 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
@@ -14,11 +36,13 @@ struct pdf_js
 	pdf_document *doc;
 	pdf_obj *form;
 	js_State *imp;
+	pdf_js_console *console;
+	void *console_user;
 };
 
 FZ_NORETURN static void rethrow(pdf_js *js)
 {
-	js_newerror(js->imp, fz_caught_message(js->ctx));
+	js_newerror(js->imp, fz_convert_error(js->ctx, NULL));
 	js_throw(js->imp);
 }
 
@@ -50,21 +74,79 @@ static pdf_js *unpack_arguments(js_State *J, ...)
 
 static void app_alert(js_State *J)
 {
-	pdf_js *js = unpack_arguments(J, "cMsg", "nIcon", "nType", "cTitle", 0);
-	pdf_alert_event event;
+	pdf_js *js = unpack_arguments(J, "cMsg", "nIcon", "nType", "cTitle", "oDoc", "oCheckbox", NULL);
+	pdf_alert_event evt;
 
-	event.message = js_tostring(J, 1);
-	event.icon_type = js_tointeger(J, 2);
-	event.button_group_type = js_tointeger(J, 3);
-	event.title = js_isdefined(J, 4) ? js_tostring(J, 4) : "PDF Alert";
-	event.button_pressed = 0; /* WIP WIP WIP IS THIS CORRECT? */
+	/* TODO: Currently we do not support app.openDoc() in javascript actions, hence
+	oDoc can only point to the current document (or not be passed). When mupdf
+	supports opening other documents oDoc must be converted to a pdf_document * that
+	can be passed to the callback. In the mean time, we just pas the current document.
+	*/
+	evt.doc = js->doc;
+
+	evt.message = js_tostring(J, 1);
+	evt.icon_type = js_tointeger(J, 2);
+	evt.button_group_type = js_tointeger(J, 3);
+	evt.title = js_isdefined(J, 4) ? js_tostring(J, 4) : "PDF alert";
+
+	evt.has_check_box = 0;
+	evt.check_box_message = NULL;
+	evt.initially_checked = 0;
+	evt.finally_checked = 0;
+
+	if (js_isobject(J, 6))
+	{
+		evt.has_check_box = 1;
+		evt.check_box_message = "Do not show this message again";
+		if (js_hasproperty(J, 6, "cMsg"))
+		{
+			if (js_iscoercible(J, -1))
+				evt.check_box_message = js_tostring(J, -1);
+			js_pop(J, 1);
+		}
+		if (js_hasproperty(J, 6, "bInitialValue"))
+		{
+			evt.initially_checked = js_tointeger(J, -1);
+			js_pop(J, 1);
+		}
+		if (js_hasproperty(J, 6, "bAfterValue"))
+		{
+			evt.finally_checked = js_tointeger(J, -1);
+			js_pop(J, 1);
+		}
+	}
+
+	/* These are the default buttons automagically "pressed"
+	when the dialog box window is closed in Acrobat. */
+	switch (evt.button_group_type)
+	{
+	default:
+	case PDF_ALERT_BUTTON_GROUP_OK:
+		evt.button_pressed = PDF_ALERT_BUTTON_OK;
+		break;
+	case PDF_ALERT_BUTTON_GROUP_OK_CANCEL:
+		evt.button_pressed = PDF_ALERT_BUTTON_CANCEL;
+		break;
+	case PDF_ALERT_BUTTON_GROUP_YES_NO:
+		evt.button_pressed = PDF_ALERT_BUTTON_YES;
+		break;
+	case PDF_ALERT_BUTTON_GROUP_YES_NO_CANCEL:
+		evt.button_pressed = PDF_ALERT_BUTTON_CANCEL;
+		break;
+	}
 
 	fz_try(js->ctx)
-		pdf_event_issue_alert(js->ctx, js->doc, &event);
+		pdf_event_issue_alert(js->ctx, js->doc, &evt);
 	fz_catch(js->ctx)
 		rethrow(js);
 
-	js_pushnumber(J, event.button_pressed);
+	if (js_isobject(J, 6))
+	{
+		js_pushboolean(js->imp, evt.finally_checked);
+		js_setproperty(js->imp, 6, "bAfterValue");
+	}
+
+	js_pushnumber(J, evt.button_pressed);
 }
 
 static void app_execMenuItem(js_State *J)
@@ -111,7 +193,7 @@ static void field_getName(js_State *J)
 	pdf_obj *field = js_touserdata(J, 0, "Field");
 	char *name = NULL;
 	fz_try(js->ctx)
-		name = pdf_field_name(js->ctx, field);
+		name = pdf_load_field_name(js->ctx, field);
 	fz_catch(js->ctx)
 		rethrow(js);
 	if (js_try(J)) {
@@ -285,6 +367,26 @@ static void field_setValue(js_State *J)
 		rethrow(js);
 }
 
+static void field_getType(js_State *J)
+{
+	pdf_js *js = js_getcontext(J);
+	pdf_obj *field = js_touserdata(J, 0, "Field");
+	const char *type;
+
+	fz_try(js->ctx)
+		type = pdf_field_type_string(js->ctx, field);
+	fz_catch(js->ctx)
+		rethrow(js);
+
+	js_pushstring(J, type);
+}
+
+static void field_setType(js_State *J)
+{
+	pdf_js *js = js_getcontext(J);
+	fz_warn(js->ctx, "Unexpected call to field_setType");
+}
+
 static void doc_getField(js_State *J)
 {
 	pdf_js *js = js_getcontext(J);
@@ -320,6 +422,93 @@ static void doc_setNumPages(js_State *J)
 	pdf_js *js = js_getcontext(J);
 	fz_warn(js->ctx, "Unexpected call to doc_setNumPages");
 }
+
+static void doc_getMetaString(js_State *J, const char *key)
+{
+	pdf_js *js = js_getcontext(J);
+	char buf[256];
+	int ret;
+
+	fz_try(js->ctx)
+		ret = fz_lookup_metadata(js->ctx, &js->doc->super, key, buf, nelem(buf)) > 0;
+	fz_catch(js->ctx)
+		rethrow(js);
+
+	if (ret > 0)
+		js_pushstring(J, buf);
+	else
+		js_pushundefined(J);
+}
+
+static void doc_setMetaString(js_State *J, const char *key)
+{
+	pdf_js *js = js_getcontext(J);
+	const char *value = js_tostring(J, 1);
+	fz_set_metadata(js->ctx, &js->doc->super, key, value);
+}
+
+static void doc_getMetaDate(js_State *J, const char *key)
+{
+	pdf_js *js = js_getcontext(J);
+	char buf[256];
+	int ret;
+	double time;
+
+	fz_try(js->ctx)
+	{
+		ret = fz_lookup_metadata(js->ctx, &js->doc->super, key, buf, nelem(buf)) > 0;
+		if (ret > 0)
+			time = pdf_parse_date(js->ctx, buf);
+	}
+	fz_catch(js->ctx)
+		rethrow(js);
+
+	if (ret > 0)
+	{
+		js_getglobal(J, "Date");
+		js_pushnumber(J, time * 1000);
+		js_construct(J, 1);
+	}
+	else
+		js_pushundefined(J);
+}
+
+static void doc_setMetaDate(js_State *J, const char *key)
+{
+	pdf_js *js = js_getcontext(J);
+	int64_t time;
+	char value[40];
+
+	// Coerce the argument into a date object and extract the time value.
+	js_getglobal(J, "Date");
+	js_copy(J, 1);
+	js_construct(J, 1);
+	time = js_tonumber(J, -1) / 1000;
+	js_pop(J, 1);
+
+	fz_try(js->ctx)
+		if (pdf_format_date(js->ctx, time, value, nelem(value)))
+			fz_set_metadata(js->ctx, &js->doc->super, key, value);
+	fz_catch(js->ctx)
+		rethrow(js);
+}
+
+static void doc_getAuthor(js_State *J) { doc_getMetaString(J, FZ_META_INFO_AUTHOR); }
+static void doc_setAuthor(js_State *J) { doc_setMetaString(J, FZ_META_INFO_AUTHOR); }
+static void doc_getTitle(js_State *J) { doc_getMetaString(J, FZ_META_INFO_TITLE); }
+static void doc_setTitle(js_State *J) { doc_setMetaString(J, FZ_META_INFO_TITLE); }
+static void doc_getSubject(js_State *J) { doc_getMetaString(J, FZ_META_INFO_SUBJECT); }
+static void doc_setSubject(js_State *J) { doc_setMetaString(J, FZ_META_INFO_SUBJECT); }
+static void doc_getKeywords(js_State *J) { doc_getMetaString(J, FZ_META_INFO_KEYWORDS); }
+static void doc_setKeywords(js_State *J) { doc_setMetaString(J, FZ_META_INFO_KEYWORDS); }
+static void doc_getCreator(js_State *J) { doc_getMetaString(J, FZ_META_INFO_CREATOR); }
+static void doc_setCreator(js_State *J) { doc_setMetaString(J, FZ_META_INFO_CREATOR); }
+static void doc_getProducer(js_State *J) { doc_getMetaString(J, FZ_META_INFO_PRODUCER); }
+static void doc_setProducer(js_State *J) { doc_setMetaString(J, FZ_META_INFO_PRODUCER); }
+static void doc_getCreationDate(js_State *J) { doc_getMetaDate(J, FZ_META_INFO_CREATIONDATE); }
+static void doc_setCreationDate(js_State *J) { doc_setMetaDate(J, FZ_META_INFO_CREATIONDATE); }
+static void doc_getModDate(js_State *J) { doc_getMetaDate(J, FZ_META_INFO_MODIFICATIONDATE); }
+static void doc_setModDate(js_State *J) { doc_setMetaDate(J, FZ_META_INFO_MODIFICATIONDATE); }
 
 static void doc_resetForm(js_State *J)
 {
@@ -367,18 +556,18 @@ static void doc_print(js_State *J)
 
 static void doc_mailDoc(js_State *J)
 {
-	pdf_js *js = unpack_arguments(J, "bUI", "cTo", "cCc", "cBcc", "cSubject", "cMessage", 0);
-	pdf_mail_doc_event event;
+	pdf_js *js = unpack_arguments(J, "bUI", "cTo", "cCc", "cBcc", "cSubject", "cMessage", NULL);
+	pdf_mail_doc_event evt;
 
-	event.ask_user = js_isdefined(J, 1) ? js_toboolean(J, 1) : 1;
-	event.to = js_tostring(J, 2);
-	event.cc = js_tostring(J, 3);
-	event.bcc = js_tostring(J, 4);
-	event.subject = js_tostring(J, 5);
-	event.message = js_tostring(J, 6);
+	evt.ask_user = js_isdefined(J, 1) ? js_toboolean(J, 1) : 1;
+	evt.to = js_tostring(J, 2);
+	evt.cc = js_tostring(J, 3);
+	evt.bcc = js_tostring(J, 4);
+	evt.subject = js_tostring(J, 5);
+	evt.message = js_tostring(J, 6);
 
 	fz_try(js->ctx)
-		pdf_event_issue_mail_doc(js->ctx, js->doc, &event);
+		pdf_event_issue_mail_doc(js->ctx, js->doc, &evt);
 	fz_catch(js->ctx)
 		rethrow(js);
 }
@@ -394,13 +583,42 @@ static void doc_calculateNow(js_State *J)
 
 static void console_println(js_State *J)
 {
-	int i, top = js_gettop(J);
-	for (i = 1; i < top; ++i) {
-		const char *s = js_tostring(J, i);
-		if (i > 1) putchar(' ');
-		fputs(s, stdout);
+	pdf_js *js = js_getcontext(J);
+	if (js->console && js->console->write)
+	{
+		int i, top = js_gettop(J);
+		js->console->write(js->console_user, "\n");
+		for (i = 1; i < top; ++i) {
+			const char *s = js_tostring(J, i);
+			if (i > 1)
+				js->console->write(js->console_user, " ");
+			js->console->write(js->console_user, s);
+		}
 	}
-	putchar('\n');
+	js_pushboolean(J, 1);
+}
+
+static void console_clear(js_State *J)
+{
+	pdf_js *js = js_getcontext(J);
+	if (js->console && js->console->clear)
+		js->console->clear(js->console_user);
+	js_pushundefined(J);
+}
+
+static void console_show(js_State *J)
+{
+	pdf_js *js = js_getcontext(J);
+	if (js->console && js->console->show)
+		js->console->show(js->console_user);
+	js_pushundefined(J);
+}
+
+static void console_hide(js_State *J)
+{
+	pdf_js *js = js_getcontext(J);
+	if (js->console && js->console->hide)
+		js->console->hide(js->console_user);
 	js_pushundefined(J);
 }
 
@@ -656,9 +874,14 @@ static void addproperty(js_State *J, const char *name, js_CFunction getfun, js_C
 	js_defaccessor(J, -3, realname, JS_READONLY | JS_DONTENUM | JS_DONTCONF);
 }
 
-static void declare_dom(pdf_js *js)
+static int declare_dom(pdf_js *js)
 {
 	js_State *J = js->imp;
+
+	if (js_try(J))
+	{
+		return -1;
+	}
 
 	/* Allow access to the global environment via the 'global' name */
 	js_pushglobal(J);
@@ -689,7 +912,7 @@ static void declare_dom(pdf_js *js)
 #endif
 		js_defproperty(J, -2, "app.platform", JS_READONLY | JS_DONTENUM | JS_DONTCONF);
 
-		addmethod(J, "app.alert", app_alert, 4);
+		addmethod(J, "app.alert", app_alert, 6);
 		addmethod(J, "app.execMenuItem", app_execMenuItem, 1);
 		addmethod(J, "app.launchURL", app_launchURL, 2);
 	}
@@ -699,6 +922,7 @@ static void declare_dom(pdf_js *js)
 	js_newobject(J);
 	{
 		addproperty(J, "Field.value", field_getValue, field_setValue);
+		addproperty(J, "Field.type", field_getType, field_setType);
 		addproperty(J, "Field.borderStyle", field_getBorderStyle, field_setBorderStyle);
 		addproperty(J, "Field.textColor", field_getTextColor, field_setTextColor);
 		addproperty(J, "Field.fillColor", field_getFillColor, field_setFillColor);
@@ -712,6 +936,9 @@ static void declare_dom(pdf_js *js)
 	js_newobject(J);
 	{
 		addmethod(J, "console.println", console_println, 1);
+		addmethod(J, "console.clear", console_clear, 0);
+		addmethod(J, "console.show", console_show, 0);
+		addmethod(J, "console.hide", console_hide, 0);
 	}
 	js_defglobal(J, "console", JS_READONLY | JS_DONTCONF | JS_DONTENUM);
 
@@ -720,6 +947,14 @@ static void declare_dom(pdf_js *js)
 	js_pushglobal(J);
 	{
 		addproperty(J, "Doc.numPages", doc_getNumPages, doc_setNumPages);
+		addproperty(J, "Doc.author", doc_getAuthor, doc_setAuthor);
+		addproperty(J, "Doc.title", doc_getTitle, doc_setTitle);
+		addproperty(J, "Doc.subject", doc_getSubject, doc_setSubject);
+		addproperty(J, "Doc.keywords", doc_getKeywords, doc_setKeywords);
+		addproperty(J, "Doc.creator", doc_getCreator, doc_setCreator);
+		addproperty(J, "Doc.producer", doc_getProducer, doc_setProducer);
+		addproperty(J, "Doc.creationDate", doc_getCreationDate, doc_setCreationDate);
+		addproperty(J, "Doc.modDate", doc_getModDate, doc_setModDate);
 		addmethod(J, "Doc.getField", doc_getField, 1);
 		addmethod(J, "Doc.resetForm", doc_resetForm, 0);
 		addmethod(J, "Doc.calculateNow", doc_calculateNow, 0);
@@ -727,14 +962,21 @@ static void declare_dom(pdf_js *js)
 		addmethod(J, "Doc.mailDoc", doc_mailDoc, 6);
 	}
 	js_pop(J, 1);
+
+	js_endtry(J);
+
+	return 0;
 }
 
-static void preload_helpers(pdf_js *js)
+static int preload_helpers(pdf_js *js)
 {
+	if (js_try(js->imp))
+		return -1;
+
 	/* When testing on the cluster:
 	 * Use a fixed date for "new Date" and Date.now().
 	 * Sadly, this breaks uses of the Date function without the new keyword.
-	 * Return a fixed number from Math.random().
+	 * Return a fixed random sequence from Math.random().
 	 */
 #ifdef CLUSTER
 	js_dostring(js->imp,
@@ -743,19 +985,25 @@ static void preload_helpers(pdf_js *js)
 "Date.now = function() { return 298252800000; }\n"
 "Date.UTC = function() { return 298252800000; }\n"
 "Date.parse = MuPDFOldDate.parse;\n"
-"Math.random = function() { return 1/4; }\n"
+"Math.random = function() { return (Math.random.seed = Math.random.seed * 48271 % 2147483647) / 2147483647; }\n"
+"Math.random.seed = 217;\n"
 	);
 #endif
 
 	js_dostring(js->imp,
 #include "js/util.js.h"
 	);
+
+	js_endtry(js->imp);
+	return 0;
 }
 
 void pdf_drop_js(fz_context *ctx, pdf_js *js)
 {
 	if (js)
 	{
+		if (js->console && js->console->drop)
+			js->console->drop(js->console, js->console_user);
 		js_freestate(js->imp);
 		fz_free(ctx, js);
 	}
@@ -765,6 +1013,26 @@ static void *pdf_js_alloc(void *actx, void *ptr, int n)
 {
 	return fz_realloc_no_throw(actx, ptr, n);
 }
+
+static void default_js_console_clear(void *user)
+{
+	fz_context *ctx = user;
+	fz_write_string(ctx, fz_stddbg(ctx), "--- clear console ---\n");
+}
+
+static void default_js_console_write(void *user, const char *message)
+{
+	fz_context *ctx = user;
+	fz_write_string(ctx, fz_stddbg(ctx), message);
+}
+
+static pdf_js_console default_js_console = {
+	NULL,
+	NULL,
+	NULL,
+	default_js_console_clear,
+	default_js_console_write,
+};
 
 static pdf_js *pdf_new_js(fz_context *ctx, pdf_document *doc)
 {
@@ -785,13 +1053,18 @@ static pdf_js *pdf_new_js(fz_context *ctx, pdf_document *doc)
 		/* Initialise the javascript engine, passing the fz_context for use in memory allocation. */
 		js->imp = js_newstate(pdf_js_alloc, ctx, 0);
 		if (!js->imp)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cannot initialize javascript engine");
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot initialize javascript engine");
 
 		/* Also set our pdf_js context, so we can retrieve it in callbacks. */
 		js_setcontext(js->imp, js);
 
-		declare_dom(js);
-		preload_helpers(js);
+		js->console = &default_js_console;
+		js->console_user = js->ctx;
+
+		if (declare_dom(js))
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot initialize dom interface");
+		if (preload_helpers(js))
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot initialize helper functions");
 	}
 	fz_catch(ctx)
 	{
@@ -829,18 +1102,19 @@ static void pdf_js_load_document_level(pdf_js *js)
 				fz_snprintf(buf, sizeof buf, "%d", pdf_to_num(ctx, code));
 			else
 				fz_snprintf(buf, sizeof buf, "Root/Names/JavaScript/Names/%d/JS", (i+1)*2);
-			pdf_js_execute(js, buf, codebuf);
+			pdf_js_execute(js, buf, codebuf, NULL);
 			fz_free(ctx, codebuf);
 		}
+		pdf_end_operation(ctx, doc);
 	}
 	fz_always(ctx)
+		pdf_drop_obj(ctx, javascript);
+	fz_catch(ctx)
 	{
 		if (in_op)
-			pdf_end_operation(ctx, doc);
-		pdf_drop_obj(ctx, javascript);
-	}
-	fz_catch(ctx)
+			pdf_abandon_operation(ctx, doc);
 		fz_rethrow(ctx);
+	}
 }
 
 void pdf_js_event_init(pdf_js *js, pdf_obj *target, const char *value, int willCommit)
@@ -879,18 +1153,39 @@ int pdf_js_event_result(pdf_js *js)
 	return rc;
 }
 
-void pdf_js_event_init_keystroke(pdf_js *js, pdf_obj *target, pdf_keystroke_event *event)
+int pdf_js_event_result_validate(pdf_js *js, char **newtext)
+{
+	int rc = 1;
+	*newtext = NULL;
+	if (js)
+	{
+		js_getglobal(js->imp, "event");
+		js_getproperty(js->imp, -1, "rc");
+		rc = js_tryboolean(js->imp, -1, 1);
+		js_pop(js->imp, 1);
+		if (rc)
+		{
+			js_getproperty(js->imp, -1, "value");
+			*newtext = fz_strdup(js->ctx, js_trystring(js->imp, -1, ""));
+			js_pop(js->imp, 1);
+		}
+		js_pop(js->imp, 1);
+	}
+	return rc;
+}
+
+void pdf_js_event_init_keystroke(pdf_js *js, pdf_obj *target, pdf_keystroke_event *evt)
 {
 	if (js)
 	{
-		pdf_js_event_init(js, target, event->value, event->willCommit);
+		pdf_js_event_init(js, target, evt->value, evt->willCommit);
 		js_getglobal(js->imp, "event");
 		{
-			js_pushstring(js->imp, event->change);
+			js_pushstring(js->imp, evt->change);
 			js_setproperty(js->imp, -2, "change");
-			js_pushnumber(js->imp, event->selStart);
+			js_pushnumber(js->imp, evt->selStart);
 			js_setproperty(js->imp, -2, "selStart");
-			js_pushnumber(js->imp, event->selEnd);
+			js_pushnumber(js->imp, evt->selEnd);
 			js_setproperty(js->imp, -2, "selEnd");
 		}
 		js_pop(js->imp, 1);
@@ -911,6 +1206,9 @@ int pdf_js_event_result_keystroke(pdf_js *js, pdf_keystroke_event *evt)
 			{
 				js_getproperty(js->imp, -1, "change");
 				evt->newChange = fz_strdup(js->ctx, js_trystring(js->imp, -1, ""));
+				js_pop(js->imp, 1);
+				js_getproperty(js->imp, -1, "value");
+				evt->newValue = fz_strdup(js->ctx, js_trystring(js->imp, -1, ""));
 				js_pop(js->imp, 1);
 				js_getproperty(js->imp, -1, "selStart");
 				evt->selStart = js_tryinteger(js->imp, -1, 0);
@@ -938,36 +1236,60 @@ char *pdf_js_event_value(pdf_js *js)
 	return value;
 }
 
-void pdf_js_execute(pdf_js *js, const char *name, const char *source)
+void pdf_js_execute(pdf_js *js, const char *name, const char *source, char **result)
 {
 	fz_context *ctx;
+	js_State *J;
 
 	if (!js)
 		return;
 
 	ctx = js->ctx;
-	pdf_begin_implicit_operation(js->ctx, js->doc);
+	J = js->imp;
+
+	pdf_begin_implicit_operation(ctx, js->doc);
 	fz_try(ctx)
 	{
-		if (js_ploadstring(js->imp, name, source))
-		{
-			fz_warn(ctx, "%s", js_trystring(js->imp, -1, "Error"));
-			break;
+		if (js_ploadstring(J, name, source)) {
+			if (result)
+				*result = fz_strdup(ctx, js_trystring(J, -1, "Error"));
+			js_pop(J, 1);
+		} else {
+			js_pushundefined(J);
+			if (js_pcall(J, 0)) {
+				if (result)
+					*result = fz_strdup(ctx, js_trystring(J, -1, "Error"));
+				js_pop(J, 1);
+			} else {
+				if (result)
+					*result = fz_strdup(ctx, js_tryrepr(J, -1, "can't convert to string"));
+				js_pop(J, 1);
+			}
 		}
-		js_pushundefined(js->imp);
-		if (js_pcall(js->imp, 0))
-		{
-			fz_warn(ctx, "%s", js_trystring(js->imp, -1, "Error"));
-			break;
-		}
-	}
-	fz_always(ctx)
-	{
-		js_pop(js->imp, 1);
-		pdf_end_operation(js->ctx, js->doc);
+		pdf_end_operation(ctx, js->doc);
 	}
 	fz_catch(ctx)
+	{
+		pdf_abandon_operation(ctx, js->doc);
 		fz_rethrow(ctx);
+	}
+}
+
+pdf_js_console *pdf_js_get_console(fz_context *ctx, pdf_document *doc)
+{
+	return (doc && doc->js) ? doc->js->console : NULL;
+}
+
+void pdf_js_set_console(fz_context *ctx, pdf_document *doc, pdf_js_console *console, void *user)
+{
+	if (doc->js)
+	{
+		if (doc->js->console && doc->js->console->drop)
+			doc->js->console->drop(doc->js->console, doc->js->console_user);
+
+		doc->js->console = console;
+		doc->js->console_user = user;
+	}
 }
 
 void pdf_enable_js(fz_context *ctx, pdf_document *doc)
@@ -997,10 +1319,13 @@ void pdf_enable_js(fz_context *ctx, pdf_document *doc) { }
 void pdf_disable_js(fz_context *ctx, pdf_document *doc) { }
 int pdf_js_supported(fz_context *ctx, pdf_document *doc) { return 0; }
 void pdf_js_event_init(pdf_js *js, pdf_obj *target, const char *value, int willCommit) { }
-void pdf_js_event_init_keystroke(pdf_js *js, pdf_obj *target, pdf_keystroke_event *event) { }
+void pdf_js_event_init_keystroke(pdf_js *js, pdf_obj *target, pdf_keystroke_event *evt) { }
 int pdf_js_event_result_keystroke(pdf_js *js, pdf_keystroke_event *evt) { return 1; }
 int pdf_js_event_result(pdf_js *js) { return 1; }
 char *pdf_js_event_value(pdf_js *js) { return ""; }
-void pdf_js_execute(pdf_js *js, const char *name, const char *source) { }
+void pdf_js_execute(pdf_js *js, const char *name, const char *source, char **result) { }
+int pdf_js_event_result_validate(pdf_js *js, char **newvalue) { *newvalue=NULL; return 1; }
+pdf_js_console *pdf_js_get_console(fz_context *ctx, pdf_document *doc) { return NULL; }
+void pdf_js_set_console(fz_context *ctx, pdf_document *doc, pdf_js_console *console, void *user) { }
 
 #endif /* FZ_ENABLE_JS */

@@ -108,7 +108,13 @@
     "xlocmes": "cpp",
     "xlocmon": "cpp",
     "xloctime": "cpp",
-    "span": "cpp"
+    "span": "cpp",
+    "bit": "cpp",
+    "coroutine": "cpp",
+    "format": "cpp",
+    "stop_token": "cpp",
+    "MAE.C": "cpp",
+    "MAR.C": "cpp"
   },
   "C_Cpp.loggingLevel": "Debug"
 }

@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "BaseUtil.h"
@@ -23,8 +23,8 @@ static inline const char* SkipDigits(const char* s) {
 class ParseArgs {
   public:
     str::Str path;
-    bool canceled{false};
-    ValueVisitor* visitor{nullptr};
+    bool canceled = false;
+    ValueVisitor* visitor = nullptr;
 
     explicit ParseArgs(ValueVisitor* visitor) : visitor(visitor) {
     }
@@ -66,7 +66,7 @@ static const char* ExtractString(str::Str& string, const char* data) {
                 break;
             case 'u':
                 if (str::Parse(data + 1, "%4x", &i) && 0 < i && i < 0x10000) {
-                    char buf[5] = {0};
+                    char buf[5]{};
                     wchar_t c = (wchar_t)i;
                     WideCharToMultiByte(CP_UTF8, 0, &c, 1, buf, dimof(buf), nullptr, nullptr);
                     string.Append(buf);
@@ -115,14 +115,14 @@ static const char* ParseNumber(ParseArgs& args, const char* data) {
         if ('+' == *data || '-' == *data) {
             data++;
         }
-        data = SkipDigits(data + 1);
+        data = SkipDigits(data);
     }
     // validity check
     if (!str::IsDigit(*(data - 1)) || str::IsDigit(*data)) {
         return nullptr;
     }
 
-    char* number = str::DupN(start, data - start);
+    char* number = str::Dup(start, data - start);
     const char* path = args.path.Get();
     args.canceled = !args.visitor->Visit(path, number, Type::Number);
     free(number);
@@ -236,6 +236,7 @@ static const char* ParseValue(ParseArgs& args, const char* data) {
     }
 }
 
+// return false if invalid JSON
 bool Parse(const char* data, ValueVisitor* visitor) {
     ParseArgs args(visitor);
     if (str::StartsWith(data, UTF8_BOM)) {

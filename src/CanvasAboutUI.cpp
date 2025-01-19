@@ -1,69 +1,45 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 #include "utils/BaseUtil.h"
-#include "utils/WinDynCalls.h"
 #include "utils/Dpi.h"
-#include "utils/FileUtil.h"
 #include "utils/Timer.h"
-#include "utils/UITask.h"
 #include "utils/WinUtil.h"
-#include "AppColors.h"
-#include "utils/ScopedWin.h"
 
-#include "wingui/WinGui.h"
+#include "wingui/UIModels.h"
+
 #include "wingui/Layout.h"
-#include "wingui/Window.h"
-#include "wingui/TreeModel.h"
-#include "wingui/TreeCtrl.h"
 #include "wingui/FrameRateWnd.h"
 
-#include "Annotation.h"
-#include "EngineBase.h"
-#include "EngineCreate.h"
-#include "Doc.h"
-
-#include "DisplayMode.h"
-#include "SettingsStructs.h"
-#include "Controller.h"
-#include "DisplayModel.h"
-#include "EbookController.h"
-#include "Theme.h"
+#include "AppColors.h"
+#include "Settings.h"
+#include "DocController.h"
 #include "GlobalPrefs.h"
-#include "RenderCache.h"
-#include "ProgressUpdateUI.h"
-#include "TextSelection.h"
-#include "TextSearch.h"
-#include "Notifications.h"
 #include "SumatraConfig.h"
+#include "FileHistory.h"
+#include "Annotation.h"
 #include "SumatraPDF.h"
-#include "WindowInfo.h"
-#include "TabInfo.h"
+#include "MainWindow.h"
 #include "resource.h"
 #include "Commands.h"
 #include "Canvas.h"
-#include "Caption.h"
 #include "Menu.h"
-#include "uia/Provider.h"
-#include "SearchAndDDE.h"
-#include "Selection.h"
-#include "SumatraAbout.h"
-#include "Tabs.h"
-#include "Toolbar.h"
+#include "HomePage.h"
 #include "Translations.h"
+#include "Theme.h"
 
-static void OnPaintAbout(WindowInfo* win) {
+static void OnPaintAbout(MainWindow* win) {
     auto t = TimeGet();
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(win->hwndCanvas, &ps);
-
-    auto txtCol = GetAppColor(AppColor::MainWindowText);
-    auto bgCol = GetAppColor(AppColor::MainWindowBg);
-    if (HasPermission(Perm_SavePreferences | Perm_DiskAccess) && gGlobalPrefs->rememberOpenedFiles &&
-        gGlobalPrefs->showStartPage) {
-        DrawStartPage(win, win->buffer->GetDC(), gFileHistory, txtCol, bgCol);
+    HDC bufDC = win->buffer->GetDC();
+    GlobalPrefs* prefs = gGlobalPrefs;
+    bool hasPerms = HasPermission(Perm::SavePreferences | Perm::DiskAccess);
+    bool drawHome = hasPerms && prefs->rememberOpenedFiles && prefs->showStartPage;
+    if (drawHome) {
+        DrawHomePage(win, bufDC);
     } else {
-        DrawAboutPage(win, win->buffer->GetDC());
+        DrawAboutPage(win, bufDC);
     }
     win->buffer->Flush(hdc);
 
@@ -73,86 +49,90 @@ static void OnPaintAbout(WindowInfo* win) {
     }
 }
 
-static void OnMouseLeftButtonDownAbout(WindowInfo* win, int x, int y, [[maybe_unused]] WPARAM key) {
+static void OnMouseLeftButtonDownAbout(MainWindow* win, int x, int y, WPARAM) {
     // lf("Left button clicked on %d %d", x, y);
 
     // remember a link under so that on mouse up we only activate
     // link if mouse up is on the same link as mouse down
-    win->urlOnLastButtonDown = GetStaticLink(win->staticLinks, x, y);
+    win->urlOnLastButtonDown.SetCopy(GetStaticLinkTemp(win->staticLinks, x, y, nullptr));
 }
 
-static bool IsLink(const WCHAR* url) {
-    if (str::StartsWithI(url, L"http:")) {
+static bool IsLink(const char* url) {
+    if (str::StartsWithI(url, "http:")) {
         return true;
     }
-    if (str::StartsWithI(url, L"https:")) {
+    if (str::StartsWithI(url, "https:")) {
         return true;
     }
-    if (str::StartsWithI(url, L"mailto:")) {
+    if (str::StartsWithI(url, "mailto:")) {
         return true;
     }
     return false;
 }
 
-static void OnMouseLeftButtonUpAbout(WindowInfo* win, int x, int y, [[maybe_unused]] WPARAM key) {
-    SetFocus(win->hwndFrame);
-
-    const WCHAR* url = GetStaticLink(win->staticLinks, x, y);
-    const WCHAR* prevUrl = win->urlOnLastButtonDown;
-    win->urlOnLastButtonDown = nullptr;
-    if (!url || url != prevUrl) {
+static void OnMouseLeftButtonUpAbout(MainWindow* win, int x, int y, WPARAM) {
+    char* url = GetStaticLinkTemp(win->staticLinks, x, y, nullptr);
+    char* prevUrl = win->urlOnLastButtonDown;
+    bool clickedURL = url && str::Eq(url, prevUrl);
+    win->urlOnLastButtonDown.Set(nullptr);
+    if (!clickedURL) {
         return;
     }
-    if (str::Eq(url, SLINK_OPEN_FILE)) {
-        HwndSendCommand(win->hwndFrame, CmdOpen);
-    } else if (str::Eq(url, SLINK_LIST_HIDE)) {
+    if (str::Eq(url, kLinkOpenFile)) {
+        HwndSendCommand(win->hwndFrame, CmdOpenFile);
+    } else if (str::Eq(url, kLinkHideList)) {
         gGlobalPrefs->showStartPage = false;
         win->RedrawAll(true);
-    } else if (str::Eq(url, SLINK_LIST_SHOW)) {
+    } else if (str::Eq(url, kLinkShowList)) {
         gGlobalPrefs->showStartPage = true;
         win->RedrawAll(true);
     } else if (IsLink(url)) {
         SumatraLaunchBrowser(url);
     } else {
-        // assume it's a document
-        LoadArgs args(url, win);
-        LoadDocument(args);
+        // assume it's a thumbnail of a document
+        auto path = url;
+        ReportIf(!path);
+        LoadArgs args(path, win);
+        // ctrl forces always opening
+        args.activateExisting = !IsCtrlPressed();
+        StartLoadDocument(&args);
     }
+    // HwndSetFocus(win->hwndFrame);
 }
 
-static void OnMouseRightButtonDownAbout(WindowInfo* win, int x, int y, [[maybe_unused]] WPARAM key) {
+static void OnMouseRightButtonDownAbout(MainWindow* win, int x, int y, WPARAM) {
     // lf("Right button clicked on %d %d", x, y);
-    SetFocus(win->hwndFrame);
+    HwndSetFocus(win->hwndFrame);
     win->dragStart = Point(x, y);
 }
 
-static void OnMouseRightButtonUpAbout(WindowInfo* win, int x, int y, [[maybe_unused]] WPARAM key) {
-    int isDrag = IsDrag(x, win->dragStart.x, y, win->dragStart.y);
+static void OnMouseRightButtonUpAbout(MainWindow* win, int x, int y, WPARAM) {
+    int isDrag = IsDragDistance(x, win->dragStart.x, y, win->dragStart.y);
     if (isDrag) {
         return;
     }
     OnAboutContextMenu(win, x, y);
 }
 
-static LRESULT OnSetCursorAbout(WindowInfo* win, HWND hwnd) {
-    Point pt;
-    if (GetCursorPosInHwnd(hwnd, pt)) {
-        StaticLinkInfo linkInfo;
-        if (GetStaticLink(win->staticLinks, pt.x, pt.y, &linkInfo)) {
-            win->ShowToolTip(linkInfo.infotip, linkInfo.rect);
+static LRESULT OnSetCursorAbout(MainWindow* win, HWND hwnd) {
+    Point pt = HwndGetCursorPos(hwnd);
+    if (!pt.IsEmpty()) {
+        StaticLinkInfo* linkInfo;
+        if (GetStaticLinkTemp(win->staticLinks, pt.x, pt.y, &linkInfo)) {
+            win->ShowToolTip(linkInfo->tooltip, linkInfo->rect);
             SetCursorCached(IDC_HAND);
         } else {
-            win->HideToolTip();
+            win->DeleteToolTip();
             SetCursorCached(IDC_ARROW);
         }
         return TRUE;
     }
 
-    win->HideToolTip();
+    win->DeleteToolTip();
     return FALSE;
 }
 
-LRESULT WndProcCanvasAbout(WindowInfo* win, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     int x = GET_X_LPARAM(lp);
     int y = GET_Y_LPARAM(lp);
     switch (msg) {

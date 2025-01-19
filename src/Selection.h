@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 #define SMOOTHSCROLL_TIMER_ID 2
@@ -7,28 +7,30 @@
 
 /* Represents selected area on given page */
 struct SelectionOnPage {
-    explicit SelectionOnPage(int pageNo = 0, RectF* rect = nullptr);
+    explicit SelectionOnPage(int pageNo = 0, const RectF* const rect = nullptr);
 
     int pageNo; // page this selection is on
     RectF rect; // position of selection rectangle on page (in page coordinates)
 
+    SelectionOnPage(const SelectionOnPage&) = default;
+    SelectionOnPage& operator=(const SelectionOnPage&) = default;
+
     // position of selection rectangle in the view port
-    Rect GetRect(DisplayModel* dm);
+    Rect GetRect(DisplayModel* dm) const;
 
     static Vec<SelectionOnPage>* FromRectangle(DisplayModel* dm, Rect rect);
     static Vec<SelectionOnPage>* FromTextSelect(TextSel* textSel);
 };
 
-void DeleteOldSelectionInfo(WindowInfo* win, bool alsoTextSel = false);
+void DeleteOldSelectionInfo(MainWindow* win, bool alsoTextSel = false);
 void PaintTransparentRectangles(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLORREF selectionColor, u8 alpha = 0x5f,
                                 int margin = 1);
-void PaintSelection(WindowInfo* win, HDC hdc);
-void UpdateTextSelection(WindowInfo* win, bool select = true);
-void ZoomToSelection(WindowInfo* win, float factor, bool scrollToFit = true, bool relative = false);
-void CopySelectionToClipboard(WindowInfo* win);
-void OnSelectAll(WindowInfo* win, bool textOnly = false);
-bool NeedsSelectionEdgeAutoscroll(WindowInfo* win, int x, int y);
-void OnSelectionEdgeAutoscroll(WindowInfo* win, int x, int y);
-void OnSelectionStart(WindowInfo* win, int x, int y, WPARAM key);
-void OnSelectionStop(WindowInfo* win, int x, int y, bool aborted);
-WCHAR* GetSelectedText(WindowInfo* win, const WCHAR* lineSep, bool& isTextOnlySelectionOut);
+void PaintSelection(MainWindow* win, HDC hdc);
+void UpdateTextSelection(MainWindow* win, bool select = true);
+void CopySelectionToClipboard(MainWindow* win);
+void OnSelectAll(MainWindow* win, bool textOnly = false);
+bool NeedsSelectionEdgeAutoscroll(MainWindow* win, int x, int y);
+void OnSelectionEdgeAutoscroll(MainWindow* win, int x, int y);
+void OnSelectionStart(MainWindow* win, int x, int y, WPARAM key);
+void OnSelectionStop(MainWindow* win, int x, int y, bool aborted);
+TempStr GetSelectedTextTemp(WindowTab* tab, const char* lineSep, bool& isTextOnlySelectionOut);

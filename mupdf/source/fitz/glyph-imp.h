@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef FITZ_GLYPH_IMP_H
 #define FITZ_GLYPH_IMP_H
 
@@ -86,6 +108,6 @@ fz_glyph *fz_render_t3_glyph(fz_context *ctx, fz_font *font, int cid, fz_matrix 
 fz_pixmap *fz_render_t3_glyph_pixmap(fz_context *ctx, fz_font *font, int cid, fz_matrix trm, fz_colorspace *model, const fz_irect *scissor, int aa);
 fz_glyph *fz_render_ft_stroked_glyph(fz_context *ctx, fz_font *font, int gid, fz_matrix trm, fz_matrix ctm, const fz_stroke_state *state, int aa);
 fz_glyph *fz_render_glyph(fz_context *ctx, fz_font*, int gid, fz_matrix *, fz_colorspace *model, const fz_irect *scissor, int alpha, int aa);
-fz_glyph *fz_render_stroked_glyph(fz_context *ctx, fz_font*, int, fz_matrix *, fz_matrix, const fz_stroke_state *stroke, const fz_irect *scissor, int aa);
+fz_glyph *fz_render_stroked_glyph(fz_context *ctx, fz_font*, int, fz_matrix *, fz_matrix, fz_colorspace *model, const fz_stroke_state *stroke, const fz_irect *scissor, int aa);
 
 #endif

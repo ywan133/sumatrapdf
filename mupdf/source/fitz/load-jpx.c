@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2023 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include "pixmap-imp.h"
@@ -77,7 +99,10 @@ typedef struct
  * threading systems.
  */
 
-static fz_context *opj_secret = NULL;
+/* SumatraPDF: opening multiple PDF files with jpx imags will crash because different
+ * threads will clobber opj_secret. Locking is not good enough
+*/
+__declspec(thread) static fz_context *opj_secret = NULL;
 
 static void set_opj_context(fz_context *ctx)
 {
@@ -89,38 +114,9 @@ static fz_context *get_opj_context(void)
 	return opj_secret;
 }
 
-/*
-sumatrapdf: need to add a single, global lock
-https://github.com/sumatrapdfreader/sumatrapdf/issues/1306
-*/
-
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-static int isInitialized = 0;
-static CRITICAL_SECTION opj_cs;
-
 void opj_lock(fz_context *ctx)
 {
-	/* this is racy, but should be good enough */
-	if (!isInitialized) {
-		InitializeCriticalSection(&opj_cs);
-		isInitialized = 1;
-	}
-
-	EnterCriticalSection(&opj_cs);
-	set_opj_context(ctx);
-}
-
-void opj_unlock(fz_context *ctx)
-{
-	set_opj_context(NULL);
-	LeaveCriticalSection(&opj_cs);
-}
-#else
-void opj_lock(fz_context *ctx)
-{
-	fz_lock(ctx, FZ_LOCK_FREETYPE);
+	fz_ft_lock(ctx);
 
 	set_opj_context(ctx);
 }
@@ -129,10 +125,8 @@ void opj_unlock(fz_context *ctx)
 {
 	set_opj_context(NULL);
 
-	fz_unlock(ctx, FZ_LOCK_FREETYPE);
+	fz_ft_unlock(ctx);
 }
-#endif
-
 
 void *opj_malloc(size_t size)
 {
@@ -287,7 +281,7 @@ safe_mul32(fz_context *ctx, int32_t a, int32_t b)
 	int32_t res32 = (int32_t)res;
 
 	if ((res32) != res)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Overflow while decoding jpx");
+		fz_throw(ctx, FZ_ERROR_LIMIT, "Overflow while decoding jpx");
 	return res32;
 }
 
@@ -298,7 +292,7 @@ safe_mla32(fz_context *ctx, int32_t a, int32_t b, int32_t c)
 	int32_t res32 = (int32_t)res;
 
 	if ((res32) != res)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Overflow while decoding jpx");
+		fz_throw(ctx, FZ_ERROR_LIMIT, "Overflow while decoding jpx");
 	return res32;
 }
 
@@ -401,18 +395,26 @@ copy_jpx_to_pixmap(fz_context *ctx, fz_pixmap *img, opj_image_t *jpx)
 		int32_t oy = safe_mul32(ctx, comp->y0, cdy) - jpx->y0;
 		int32_t ox = safe_mul32(ctx, comp->x0, cdx) - jpx->x0;
 		unsigned char *dst0 = dst + oy * stride;
+		int prec = comp->prec;
+		int sgnd = comp->sgnd;
 
 		if (comp->data == NULL)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "No data for JP2 image component %d", k);
+			fz_throw(ctx, FZ_ERROR_FORMAT, "No data for JP2 image component %d", k);
+
+		if (fz_colorspace_is_indexed(ctx, img->colorspace))
+		{
+			prec = 8; /* Don't do any scaling! */
+			sgnd = 0;
+		}
 
 		/* Check that none of the following will overflow. */
 		(void)safe_mla32(ctx, ch, cdy, oy);
 		(void)safe_mla32(ctx, cw, cdx, ox);
 
 		if (cdx == 1 && cdy == 1)
-			template_copy_comp(dst0, w, h, stride, comp->data, ox, oy, 1 /*cdx*/, 1 /*cdy*/, cw, ch, comp->sgnd, comp->prec, comps);
+			template_copy_comp(dst0, w, h, stride, comp->data, ox, oy, 1 /*cdx*/, 1 /*cdy*/, cw, ch, sgnd, prec, comps);
 		else
-			template_copy_comp(dst0, w, h, stride, comp->data, ox, oy, cdx, cdy, cw, ch, comp->sgnd, comp->prec, comps);
+			template_copy_comp(dst0, w, h, stride, comp->data, ox, oy, cdx, cdy, cw, ch, sgnd, prec, comps);
 		dst++;
 	}
 }
@@ -434,7 +436,7 @@ jpx_read_image(fz_context *ctx, fz_jpxd *state, const unsigned char *data, size_
 	fz_var(img);
 
 	if (size < 2)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "not enough data to determine image format");
+		fz_throw(ctx, FZ_ERROR_FORMAT, "not enough data to determine image format");
 
 	/* Check for SOC marker -- if found we have a bare J2K stream */
 	if (data[0] == 0xFF && data[1] == 0x4F)
@@ -453,7 +455,7 @@ jpx_read_image(fz_context *ctx, fz_jpxd *state, const unsigned char *data, size_
 	if (!opj_setup_decoder(codec, &params))
 	{
 		opj_destroy_codec(codec);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "j2k decode failed");
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "j2k decode failed");
 	}
 
 	stream = opj_stream_default_create(OPJ_TRUE);
@@ -472,7 +474,7 @@ jpx_read_image(fz_context *ctx, fz_jpxd *state, const unsigned char *data, size_
 	{
 		opj_stream_destroy(stream);
 		opj_destroy_codec(codec);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to read JPX header");
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "Failed to read JPX header");
 	}
 
 	if (!opj_decode(codec, stream, jpx))
@@ -480,7 +482,7 @@ jpx_read_image(fz_context *ctx, fz_jpxd *state, const unsigned char *data, size_
 		opj_stream_destroy(stream);
 		opj_destroy_codec(codec);
 		opj_image_destroy(jpx);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Failed to decode JPX image");
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "Failed to decode JPX image");
 	}
 
 	opj_stream_destroy(stream);
@@ -488,7 +490,7 @@ jpx_read_image(fz_context *ctx, fz_jpxd *state, const unsigned char *data, size_
 
 	/* jpx should never be NULL here, but check anyway */
 	if (!jpx)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "opj_decode failed");
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "opj_decode failed");
 
 	/* Count number of alpha and color channels */
 	n = a = 0;
@@ -505,7 +507,7 @@ jpx_read_image(fz_context *ctx, fz_jpxd *state, const unsigned char *data, size_
 		if (!jpx->comps[k].data)
 		{
 			opj_image_destroy(jpx);
-			fz_throw(ctx, FZ_ERROR_GENERIC, "image components are missing data");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "image components are missing data");
 		}
 	}
 
@@ -517,7 +519,7 @@ jpx_read_image(fz_context *ctx, fz_jpxd *state, const unsigned char *data, size_
 	if (w < 0 || h < 0)
 	{
 		opj_image_destroy(jpx);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Unbelievable size for jpx");
+		fz_throw(ctx, FZ_ERROR_LIMIT, "Unbelievable size for jpx");
 	}
 
 	state->cs = NULL;
@@ -531,7 +533,7 @@ jpx_read_image(fz_context *ctx, fz_jpxd *state, const unsigned char *data, size_
 	}
 
 #if FZ_ENABLE_ICC
-	if (!state->cs && jpx->icc_profile_buf)
+	if (!state->cs && jpx->icc_profile_buf && jpx->icc_profile_len > 0)
 	{
 		fz_buffer *cbuf = NULL;
 		fz_var(cbuf);
@@ -544,7 +546,11 @@ jpx_read_image(fz_context *ctx, fz_jpxd *state, const unsigned char *data, size_
 		fz_always(ctx)
 			fz_drop_buffer(ctx, cbuf);
 		fz_catch(ctx)
+		{
+			fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+			fz_report_error(ctx);
 			fz_warn(ctx, "ignoring embedded ICC profile in JPX");
+		}
 
 		if (state->cs && state->cs->n != n)
 		{
@@ -565,7 +571,7 @@ jpx_read_image(fz_context *ctx, fz_jpxd *state, const unsigned char *data, size_
 		default:
 			{
 				opj_image_destroy(jpx);
-				fz_throw(ctx, FZ_ERROR_GENERIC, "unsupported number of components: %d", n);
+				fz_throw(ctx, FZ_ERROR_FORMAT, "unsupported number of components: %d", n);
 			}
 		}
 	}
@@ -648,13 +654,13 @@ fz_load_jpx_info(fz_context *ctx, const unsigned char *data, size_t size, int *w
 fz_pixmap *
 fz_load_jpx(fz_context *ctx, const unsigned char *data, size_t size, fz_colorspace *defcs)
 {
-	fz_throw(ctx, FZ_ERROR_GENERIC, "JPX support disabled");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "JPX support disabled");
 }
 
 void
 fz_load_jpx_info(fz_context *ctx, const unsigned char *data, size_t size, int *wp, int *hp, int *xresp, int *yresp, fz_colorspace **cspacep)
 {
-	fz_throw(ctx, FZ_ERROR_GENERIC, "JPX support disabled");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "JPX support disabled");
 }
 
 #endif

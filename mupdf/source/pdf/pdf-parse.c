@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
@@ -45,6 +67,15 @@ pdf_to_quad(fz_context *ctx, pdf_obj *array, int offset)
 	return q;
 }
 
+fz_point
+pdf_to_point(fz_context *ctx, pdf_obj *array, int offset)
+{
+	fz_point p;
+	p.x = pdf_array_get_real(ctx, array, offset+0);
+	p.y = pdf_array_get_real(ctx, array, offset+1);
+	return p;
+}
+
 fz_matrix
 pdf_to_matrix(fz_context *ctx, pdf_obj *array)
 {
@@ -63,10 +94,23 @@ pdf_to_matrix(fz_context *ctx, pdf_obj *array)
 	}
 }
 
-int64_t
-pdf_to_date(fz_context *ctx, pdf_obj *time)
+char *
+pdf_format_date(fz_context *ctx, int64_t time, char *s, size_t n)
 {
-	const char *s = pdf_to_str_buf(ctx, time);
+	time_t secs = time;
+#ifdef _POSIX_SOURCE
+	struct tm tmbuf, *tm = gmtime_r(&secs, &tmbuf);
+#else
+	struct tm *tm = gmtime(&secs);
+#endif
+	if (time < 0 || !tm || !strftime(s, n, "D:%Y%m%d%H%M%SZ", tm))
+		return NULL;
+	return s;
+}
+
+int64_t
+pdf_parse_date(fz_context *ctx, const char *s)
+{
 	int tz_sign, tz_hour, tz_min, tz_adj;
 	struct tm tm;
 	time_t utc;
@@ -132,7 +176,20 @@ pdf_to_date(fz_context *ctx, pdf_obj *time)
 
 	if (s[0] == 'Z')
 	{
-		s += 1;
+		if (s[1] == '0' && s[2] == '0')
+		{
+			s += 3;
+			if (s[0] == '\'' && s[1] == '0' && s[2] == '0')
+			{
+				s += 3;
+				if (s[0] == '\'')
+					s += 1;
+			}
+		}
+		else
+		{
+			s += 1;
+		}
 	}
 	else if ((s[0] == '-' || s[0] == '+') && isdigit(s[1]) && isdigit(s[2]))
 	{
@@ -172,6 +229,12 @@ pdf_to_date(fz_context *ctx, pdf_obj *time)
 
 	tz_adj = tz_sign * (tz_hour * 3600 + tz_min * 60);
 	return utc - tz_adj;
+}
+
+int64_t
+pdf_to_date(fz_context *ctx, pdf_obj *time)
+{
+	return pdf_parse_date(ctx, pdf_to_str_buf(ctx, time));
 }
 
 static int
@@ -648,10 +711,7 @@ pdf_parse_dict(fz_context *ctx, pdf_document *doc, fz_stream *file, pdf_lexbuf *
 				if (tok == PDF_TOK_CLOSE_DICT || tok == PDF_TOK_NAME ||
 					(tok == PDF_TOK_KEYWORD && !strcmp(buf->scratch, "ID")))
 				{
-					val = pdf_new_int(ctx, a);
-					pdf_dict_put(ctx, dict, key, val);
-					pdf_drop_obj(ctx, val);
-					val = NULL;
+					pdf_dict_put_int(ctx, dict, key, a);
 					pdf_drop_obj(ctx, key);
 					key = NULL;
 					goto skip;
@@ -717,14 +777,14 @@ pdf_parse_stm_obj(fz_context *ctx, pdf_document *doc, fz_stream *file, pdf_lexbu
 }
 
 pdf_obj *
-pdf_parse_ind_obj(fz_context *ctx, pdf_document *doc,
-	fz_stream *file, pdf_lexbuf *buf,
-	int *onum, int *ogen, int64_t *ostmofs, int *try_repair)
+pdf_parse_ind_obj_or_newobj(fz_context *ctx, pdf_document *doc, fz_stream *file,
+	int *onum, int *ogen, int64_t *ostmofs, int *try_repair, int *newobj)
 {
 	pdf_obj *obj = NULL;
 	int num = 0, gen = 0;
 	int64_t stm_ofs;
 	pdf_token tok;
+	pdf_lexbuf *buf = &doc->lexbuf.base;
 	int64_t a, b;
 	int read_next_token = 1;
 
@@ -757,6 +817,14 @@ pdf_parse_ind_obj(fz_context *ctx, pdf_document *doc,
 	}
 
 	tok = pdf_lex(ctx, file, buf);
+	if (tok == PDF_TOK_NEWOBJ && newobj)
+	{
+		*newobj = 1;
+		if (onum) *onum = num;
+		if (ogen) *ogen = gen;
+		if (ostmofs) *ostmofs = 0;
+		return NULL;
+	}
 	if (tok != PDF_TOK_OBJ)
 	{
 		if (try_repair)
@@ -853,6 +921,59 @@ pdf_parse_ind_obj(fz_context *ctx, pdf_document *doc,
 	if (onum) *onum = num;
 	if (ogen) *ogen = gen;
 	if (ostmofs) *ostmofs = stm_ofs;
+
+	return obj;
+}
+
+pdf_obj *
+pdf_parse_ind_obj(fz_context *ctx, pdf_document *doc, fz_stream *file,
+	int *onum, int *ogen, int64_t *ostmofs, int *try_repair)
+{
+	return pdf_parse_ind_obj_or_newobj(ctx, doc, file, onum, ogen, ostmofs, try_repair, NULL);
+}
+
+pdf_obj *
+pdf_parse_journal_obj(fz_context *ctx, pdf_document *doc, fz_stream *stm,
+	int *onum, fz_buffer **ostm, int *newobj)
+{
+	pdf_obj *obj = NULL;
+	pdf_token tok;
+	pdf_lexbuf *buf = &doc->lexbuf.base;
+	int64_t stmofs;
+
+	*newobj = 0;
+	obj = pdf_parse_ind_obj_or_newobj(ctx, doc, stm, onum, NULL, &stmofs, NULL, newobj);
+	/* This will have consumed either the stream or the endobj keywords. */
+
+	*ostm = NULL;
+	if (stmofs)
+	{
+		fz_stream *stream = NULL;
+
+		fz_var(stream);
+
+		fz_try(ctx)
+		{
+			stream = fz_open_endstream_filter(ctx, stm, 0, stmofs);
+			*ostm = fz_read_all(ctx, stream, 32);
+			fz_drop_stream(ctx, stream);
+			stream = NULL;
+			fz_seek(ctx, stm, stmofs + (*ostm ? (*ostm)->len : 0), SEEK_SET);
+			tok = pdf_lex(ctx, stm, buf);
+			if (tok != PDF_TOK_ENDSTREAM)
+				fz_throw(ctx, FZ_ERROR_SYNTAX, "expected 'endstream' keyword");
+			tok = pdf_lex(ctx, stm, buf);
+			if (tok != PDF_TOK_ENDOBJ)
+				fz_throw(ctx, FZ_ERROR_SYNTAX, "expected 'endobj' keyword");
+		}
+		fz_always(ctx)
+			fz_drop_stream(ctx, stream);
+		fz_catch(ctx)
+		{
+			pdf_drop_obj(ctx, obj);
+			fz_rethrow(ctx);
+		}
+	}
 
 	return obj;
 }

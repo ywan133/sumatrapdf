@@ -1,10 +1,43 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
 
 // must be last due to assert() over-write
 #include "utils/UtAssert.h"
+
+struct TestFn0Data {
+    int n = 0;
+};
+
+static void testFn0(TestFn0Data* d) {
+    d->n++;
+}
+
+static void Func0Test() {
+    TestFn0Data d;
+    auto fn = MkFunc0(testFn0, &d);
+    fn.Call();
+    utassert(d.n == 1);
+}
+
+struct TestFn1Data {
+    int p = 0;
+};
+
+static void testFn1(TestFn0Data* d0, TestFn1Data* d1) {
+    d0->n = 5;
+    d1->p = -8;
+}
+
+static void Func1Test() {
+    TestFn0Data d0;
+    TestFn1Data d1;
+    auto fn = MkFunc1<TestFn0Data, TestFn1Data*>(testFn1, &d0);
+    fn.Call(&d1);
+    utassert(d0.n == 5);
+    utassert(d1.p == -8);
+}
 
 static void GeomTest() {
     PointF ptD(12.4f, -13.6f);
@@ -83,17 +116,14 @@ static void PoolAllocatorStringsTest(PoolAllocator& a, int nRounds) {
     for (int i = 0; i < nRounds; i++) {
         for (int j = 0; j < nStrings; j++) {
             const char* s = strings[j];
-            std::string_view sv = s;
-            std::string_view got = Allocator::AllocString(&a, sv);
-            utassert(str::Eq(sv, got.data()));
+            char* got = str::Dup(&a, s);
+            utassert(str::Eq(s, got));
         }
     }
 
     int nTotal = nStrings * nRounds;
-    int nString = 0;
     for (int i = 0; i < nTotal; i++) {
-        const char* exp = strings[nString];
-        nString = (nString + 1) % nStrings;
+        const char* exp = strings[i % nStrings];
 
         void* d = a.At(i);
         char* got = (char*)d;
@@ -104,15 +134,61 @@ static void PoolAllocatorStringsTest(PoolAllocator& a, int nRounds) {
 static void PoolAllocatorTest() {
     PoolAllocator a;
     PoolAllocatorStringsTest(a, 2048);
-    a.allocAlign = 1;
-    PoolAllocatorStringsTest(a, 2048);
 }
 
 static int roundUpTestCases[] = {
     0, 0, 1, 8, 2, 8, 3, 8, 4, 8, 5, 8, 6, 8, 7, 8, 8, 8, 9, 16,
 };
 
+struct ListNode {
+    struct ListNode* next = nullptr;
+    int n = 0;
+    ListNode() = default;
+};
+
+static void CheckListOrder(ListNode* root, int* seq) {
+    ListNode* el = root;
+    for (int n = *seq; n >= 0; n = *(++seq)) {
+        utassert(el->n == n);
+        el = el->next;
+    }
+    utassert(!el);
+}
+
+static void ListTest() {
+    int n = 5;
+
+    static int orderReverse[] = {5, 4, 3, 2, 1, -1};
+    static int orderNormal[] = {1, 2, 3, 4, 5, -1};
+    {
+        ListNode* root = nullptr;
+        for (int i = 1; i <= n; i++) {
+            auto node = new ListNode();
+            node->n = i;
+            ListInsertFront(&root, node);
+        }
+        CheckListOrder(root, orderReverse);
+        ListReverse(&root);
+        CheckListOrder(root, orderNormal);
+        ListDelete(root);
+    }
+    {
+        ListNode* root = nullptr;
+        for (int i = 1; i <= n; i++) {
+            auto node = new ListNode();
+            node->n = i;
+            ListInsertEnd(&root, node);
+        }
+        CheckListOrder(root, orderNormal);
+        ListDelete(root);
+    }
+}
+
 void BaseUtilTest() {
+    ListTest();
+    Func0Test();
+    Func1Test();
+
     PoolAllocatorTest();
 
     size_t n = dimof(roundUpTestCases) / 2;
@@ -147,5 +223,6 @@ void BaseUtilTest() {
     utassert(!addOverflows<u8>(127, 128));
     utassert(addOverflows<u8>(127, 129));
     utassert(addOverflows<u8>(127, 255));
+
     GeomTest();
 }

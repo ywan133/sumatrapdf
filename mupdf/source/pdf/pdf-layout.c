@@ -1,17 +1,39 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 #include <float.h>
 #include <math.h>
 
 #define LINE_LIMIT (100)
-#define LINE_HEIGHT (1.2)
+#define LINE_HEIGHT (1.2f)
 struct line { const char *a, *b; };
 
 struct font_info
 {
 	fz_context *ctx;
 	fz_font *font;
-	double fontsize;
+	float fontsize;
 };
 
 static float measure_character(struct font_info *info, int c)
@@ -124,7 +146,7 @@ static fz_matrix show_string(fz_context *ctx, fz_text *text, fz_font *user_font,
 		if (wmode == 0)
 			trm = fz_pre_translate(trm, adv, 0);
 		else
-			trm = fz_pre_translate(trm, 0, -adv);
+			trm = fz_pre_translate(trm, 0, adv);
 	}
 
 	return trm;
@@ -148,7 +170,7 @@ fz_text *pdf_layout_fit_text(fz_context *ctx, fz_font *font, fz_text_language la
 		int line_count, l;
 		float line_len;
 		fz_rect tbounds;
-		double xadj, yadj;
+		float xadj, yadj;
 		fz_text_span *span;
 
 		info.ctx = ctx;
@@ -165,18 +187,18 @@ fz_text *pdf_layout_fit_text(fz_context *ctx, fz_font *font, fz_text_language la
 			line_count = break_lines(&info, str, lines, LINE_LIMIT, width, &line_len);
 		} while (line_count > target_line_count++);
 
-		trm = fz_scale(info.fontsize, info.fontsize);
+		trm = fz_scale(info.fontsize, -info.fontsize);
 		trm.e += bounds.x0;
 		trm.f += bounds.y1;
 		text = fz_new_text(ctx);
 		for (l = 0; l < line_count; l++)
 		{
 			show_string(ctx, text, font, trm, lines[l].a, lines[l].b - lines[l].a, 0, 0, FZ_BIDI_LTR, lang);
-			trm = fz_pre_translate(trm, 0.0, (float)-LINE_HEIGHT);
+			trm = fz_pre_translate(trm, 0.0f, -LINE_HEIGHT);
 		}
 		tbounds = fz_bound_text(ctx, text, NULL, fz_identity);
-		xadj = (bounds.x0 + bounds.x1 - tbounds.x0 - tbounds.x1) / 2.0;
-		yadj = (bounds.y0 + bounds.y1 - tbounds.y0 - tbounds.y1) / 2.0;
+		xadj = (bounds.x0 + bounds.x1 - tbounds.x0 - tbounds.x1) / 2.0f;
+		yadj = (bounds.y0 + bounds.y1 - tbounds.y0 - tbounds.y1) / 2.0f;
 		for (span = text->head; span; span = span->next)
 		{
 			int i;
@@ -194,6 +216,7 @@ fz_text *pdf_layout_fit_text(fz_context *ctx, fz_font *font, fz_text_language la
 	fz_catch(ctx)
 	{
 		fz_drop_text(ctx, text);
+		fz_rethrow(ctx);
 	}
 
 	return text;

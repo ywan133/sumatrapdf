@@ -1,9 +1,10 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
 License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
-#include "utils/WinDynCalls.h"
+#include "utils/ScopedWin.h"
 #include "utils/WinUtil.h"
+#include "utils/WinDynCalls.h"
 
 #define API_DECLARATION(name) Sig_##name Dyn##name = nullptr;
 
@@ -21,12 +22,12 @@ DBGHELP_API_LIST(API_DECLARATION)
 
 // Loads a DLL explicitly from the system's library collection
 static HMODULE SafeLoadLibrary(const char* dllNameA) {
-    AutoFreeWstr dllName = strconv::Utf8ToWstr(dllNameA);
     WCHAR dllPath[MAX_PATH];
     uint res = GetSystemDirectoryW(dllPath, dimof(dllPath));
     if (!res || res >= dimof(dllPath)) {
         return nullptr;
     }
+    auto dllName = ToWStrTemp(dllNameA);
     BOOL ok = PathAppendW(dllPath, dllName);
     if (!ok) {
         return nullptr;
@@ -36,15 +37,15 @@ static HMODULE SafeLoadLibrary(const char* dllNameA) {
 
 void InitDynCalls() {
     HMODULE h = SafeLoadLibrary("kernel32.dll");
-    CrashAlwaysIf(!h);
+    ReportIf(!h);
     KERNEL32_API_LIST(API_LOAD);
 
     h = SafeLoadLibrary("ntdll.dll");
-    CrashAlwaysIf(!h);
+    ReportIf(!h);
     NTDLL_API_LIST(API_LOAD);
 
     h = SafeLoadLibrary("user32.dll");
-    CrashAlwaysIf(!h);
+    ReportIf(!h);
     USER32_API_LIST(API_LOAD);
 
     h = SafeLoadLibrary("uxtheme.dll");
@@ -106,10 +107,7 @@ BOOL SetGestureConfig(HWND hwnd, DWORD dwReserved, UINT cIDs, PGESTURECONFIG pGe
 namespace theme {
 
 bool IsAppThemed() {
-    if (DynIsAppThemed && DynIsAppThemed()) {
-        return true;
-    }
-    return false;
+    return DynIsAppThemed && DynIsAppThemed();
 }
 
 HTHEME OpenThemeData(HWND hwnd, LPCWSTR pszClassList) {
@@ -175,7 +173,7 @@ HRESULT ExtendFrameIntoClientArea(HWND hwnd, const MARGINS* pMarInset) {
     return DynDwmExtendFrameIntoClientArea(hwnd, pMarInset);
 }
 
-BOOL DefWindowProc_(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT* plResult) {
+BOOL DefaultWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT* plResult) {
     if (!DynDwmDefWindowProc) {
         return FALSE;
     }
@@ -188,6 +186,19 @@ HRESULT GetWindowAttribute(HWND hwnd, DWORD dwAttribute, void* pvAttribute, DWOR
     }
     return DynDwmGetWindowAttribute(hwnd, dwAttribute, pvAttribute, cbAttribute);
 }
+
+HRESULT SetWindowAttribute(HWND hwnd, DWORD dwAttribute, void* pvAttribute, DWORD cbAttribute) {
+    if (!DynDwmSetWindowAttribute) {
+        return E_NOTIMPL;
+    }
+    return DynDwmSetWindowAttribute(hwnd, dwAttribute, pvAttribute, cbAttribute);
+}
+
+// https://stackoverflow.com/questions/39261826/change-the-color-of-the-title-bar-caption-of-a-win32-application
+HRESULT SetCaptionColor(HWND hwnd, COLORREF col) {
+    return SetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE::DWMWA_CAPTION_COLOR, &col, sizeof(col));
+}
+
 }; // namespace dwm
 
 static const char* dllsToPreload =
@@ -197,9 +208,9 @@ static const char* dllsToPreload =
 // be loaded indirectly
 void NoDllHijacking() {
     const char* dll = dllsToPreload;
-    while (*dll) {
+    while (dll) {
         SafeLoadLibrary(dll);
-        dll = seqstrings::SkipStr(dll);
+        seqstrings::Next(dll);
     }
 }
 
@@ -212,7 +223,7 @@ void PrioritizeSystemDirectoriesForDllLoad() {
         return;
     }
     // Only supported since Win 10
-    PROCESS_MITIGATION_IMAGE_LOAD_POLICY m = {0};
+    PROCESS_MITIGATION_IMAGE_LOAD_POLICY m{};
     m.PreferSystem32Images = 1;
     DynSetProcessMitigationPolicy(ProcessImageLoadPolicy, &m, sizeof(m));
     DbgOutLastError();

@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
@@ -11,10 +11,9 @@ BitReader::BitReader(u8* data, size_t len) : data(data), dataLen(len) {
     bitsCount = len * 8;
 }
 
-BitReader::~BitReader() {
-}
+BitReader::~BitReader() = default;
 
-u8 BitReader::GetByte(size_t pos) {
+u8 BitReader::GetByte(size_t pos) const {
     if (pos >= dataLen) {
         return 0;
     }
@@ -28,7 +27,7 @@ bool BitReader::Eat(size_t bitsCount) {
     return (currBitPos <= bitsCount);
 }
 
-size_t BitReader::BitsLeft() {
+size_t BitReader::BitsLeft() const {
     if (currBitPos < bitsCount) {
         return bitsCount - currBitPos;
     }
@@ -38,7 +37,7 @@ size_t BitReader::BitsLeft() {
 // Read bitsCount (up to 32) bits, without advancing the position in the bit stream
 // If asked for more bits than we have left, the extra bits will be 0
 u32 BitReader::Peek(size_t bitsCount) {
-    CrashIf((bitsCount == 0) || (bitsCount > 32));
+    ReportIf((bitsCount == 0) || (bitsCount > 32));
     size_t currBytePos = currBitPos / 8;
     u8 currByte = GetByte(currBytePos);
     u8 currBit = currBitPos % 8;

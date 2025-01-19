@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
@@ -11,7 +11,7 @@
 namespace webp {
 
 // checks whether this could be data for a WebP image
-bool HasSignature(std::span<u8> d) {
+bool HasSignature(const ByteSlice& d) {
     if (d.size() <= 12) {
         return false;
     }
@@ -19,13 +19,13 @@ bool HasSignature(std::span<u8> d) {
     return str::StartsWith(data, "RIFF") && str::StartsWith(data + 8, "WEBP");
 }
 
-Size SizeFromData(std::span<u8> d) {
+Size SizeFromData(const ByteSlice& d) {
     Size size;
     WebPGetInfo((const u8*)d.data(), d.size(), &size.dx, &size.dy);
     return size;
 }
 
-Gdiplus::Bitmap* ImageFromData(std::span<u8> d) {
+Gdiplus::Bitmap* ImageFromData(const ByteSlice& d) {
     int w, h;
     if (!WebPGetInfo((const u8*)d.data(), d.size(), &w, &h)) {
         return nullptr;
@@ -42,8 +42,6 @@ Gdiplus::Bitmap* ImageFromData(std::span<u8> d) {
         return nullptr;
     }
     bmp.UnlockBits(&bmpData);
-
-    // hack to avoid the use of ::new (because there won't be a corresponding ::delete)
     return bmp.Clone(0, 0, w, h, PixelFormat32bppARGB);
 }
 
@@ -51,13 +49,13 @@ Gdiplus::Bitmap* ImageFromData(std::span<u8> d) {
 
 #else
 namespace webp {
-bool HasSignature(std::span<u8>) {
+bool HasSignature(const ByteSlice&) {
     return false;
 }
-Size SizeFromData(std::span<u8>) {
+Size SizeFromData(const ByteSlice&) {
     return Size();
 }
-Gdiplus::Bitmap* ImageFromData(std::span<u8>) {
+Gdiplus::Bitmap* ImageFromData(const ByteSlice&) {
     return nullptr;
 }
 } // namespace webp

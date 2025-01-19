@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
@@ -64,8 +64,8 @@ size_t ByteWriter::Size() const {
     return d.size();
 }
 
-std::span<u8> ByteWriter::AsSpan() const {
-    return d.AsSpan();
+ByteSlice ByteWriter::AsByteSlice() const {
+    return d.AsByteSlice();
 }
 
 ByteWriterLE::ByteWriterLE(size_t sizeHint) {

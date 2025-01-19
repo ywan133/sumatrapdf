@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_SYSTEM_H
 #define MUPDF_FITZ_SYSTEM_H
 
@@ -16,6 +38,8 @@
 #include <stdarg.h> /* needed for va_list vararg functions */
 #include <setjmp.h> /* needed for the try/catch macros */
 #include <stdio.h> /* useful for debug printfs */
+
+#include "export.h"
 
 #if defined(_MSC_VER) && (_MSC_VER < 1700) /* MSVC older than VS2012 */
 typedef signed char int8_t;
@@ -38,6 +62,10 @@ typedef unsigned __int64 uint64_t;
 
 #define nelem(x) (sizeof(x)/sizeof((x)[0]))
 
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
 #define FZ_PI 3.14159265f
 #define FZ_RADIAN 57.2957795f
 #define FZ_DEGREE 0.017453292f
@@ -48,11 +76,36 @@ typedef unsigned __int64 uint64_t;
 	Spot architectures where we have optimisations.
 */
 
+/* ARCH_ARM is only used for 32bit ARM stuff. */
 #if defined(__arm__) || defined(__thumb__)
 #ifndef ARCH_ARM
 #define ARCH_ARM
 #endif
 #endif
+
+/* Detect NEON */
+#ifndef ARCH_HAS_NEON
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#define ARCH_HAS_NEON 1
+#endif
+#endif
+
+#ifndef ARCH_HAS_NEON
+#define ARCH_HAS_NEON 0
+#endif
+
+
+/* We assume that pretty much any X86 or X64 machine has SSE these days. */
+#ifndef ARCH_HAS_SSE
+#if defined(_M_IX86) || defined(_M_AMD64) || defined(_M_X64)
+#define ARCH_HAS_SSE 1
+#endif
+#endif
+
+#ifndef ARCH_HAS_SSE
+#define ARCH_HAS_SSE 0
+#endif
+
 
 /**
 	Some differences in libc can be smoothed over
@@ -141,9 +194,6 @@ static __inline int signbit(double x)
 
 #ifdef _WIN32
 
-char *fz_utf8_from_wchar(const wchar_t *s);
-wchar_t *fz_wchar_from_utf8(const char *s);
-
 /* really a FILE* but we don't want to include stdio.h here */
 void *fz_fopen_utf8(const char *name, const char *mode);
 int fz_remove_utf8(const char *name);
@@ -158,18 +208,30 @@ void fz_free_argv(int argc, char **argv);
 #define S_ISDIR(mode) ((mode) & S_IFDIR)
 #endif
 
+int64_t fz_stat_ctime(const char *path);
+int64_t fz_stat_mtime(const char *path);
+int fz_mkdir(char *path);
+
+
 /* inline is standard in C++. For some compilers we can enable it within
- * C too. */
+ * C too. Some compilers think they know better than we do about when
+ * to actually honour inline (particularly for large functions); use
+ * fz_forceinline to kick them into really inlining. */
 
 #ifndef __cplusplus
 #if defined (__STDC_VERSION_) && (__STDC_VERSION__ >= 199901L) /* C99 */
 #elif defined(_MSC_VER) && (_MSC_VER >= 1500) /* MSVC 9 or newer */
 #define inline __inline
+#define fz_forceinline __forceinline
 #elif defined(__GNUC__) && (__GNUC__ >= 3) /* GCC 3 or newer */
 #define inline __inline
 #else /* Unknown or ancient */
 #define inline
 #endif
+#endif
+
+#ifndef fz_forceinline
+#define fz_forceinline inline
 #endif
 
 /* restrict is standard in C99, but not in all C++ compilers. */
@@ -375,6 +437,10 @@ static inline float my_sinf(float x)
 	x -= xn;
 	xn *= x2 / 72.0f;
 	x += xn;
+	if (x > 1)
+		x = 1;
+	else if (x < -1)
+		x = -1;
 	return x;
 }
 

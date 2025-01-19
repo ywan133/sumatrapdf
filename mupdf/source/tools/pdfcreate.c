@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /*
  * PDF creation tool: Tool for creating pdf content.
  *
@@ -183,7 +205,7 @@ static void create_page(char *input)
 					char *path = fz_strsep(&p, " ");
 					char *enc = fz_strsep(&p, " ");
 					if (!name || !path)
-						fz_throw(ctx, FZ_ERROR_GENERIC, "Font directive missing arguments");
+						fz_throw(ctx, FZ_ERROR_ARGUMENT, "Font directive missing arguments");
 					add_font_res(resources, name, path, enc);
 				}
 				else if (!strcmp(s, "%%CJKFont"))
@@ -193,7 +215,7 @@ static void create_page(char *input)
 					char *wmode = fz_strsep(&p, " ");
 					char *style = fz_strsep(&p, " ");
 					if (!name || !lang)
-						fz_throw(ctx, FZ_ERROR_GENERIC, "CJKFont directive missing arguments");
+						fz_throw(ctx, FZ_ERROR_ARGUMENT, "CJKFont directive missing arguments");
 					add_cjkfont_res(resources, name, lang, wmode, style);
 				}
 				else if (!strcmp(s, "%%Image"))
@@ -201,7 +223,7 @@ static void create_page(char *input)
 					char *name = fz_strsep(&p, " ");
 					char *path = fz_strsep(&p, " ");
 					if (!name || !path)
-						fz_throw(ctx, FZ_ERROR_GENERIC, "Image directive missing arguments");
+						fz_throw(ctx, FZ_ERROR_ARGUMENT, "Image directive missing arguments");
 					add_image_res(resources, name, path);
 				}
 			}
@@ -270,7 +292,10 @@ int pdfcreate_main(int argc, char **argv)
 	fz_always(ctx)
 		pdf_drop_document(ctx, doc);
 	fz_catch(ctx)
+	{
+		fz_report_error(ctx);
 		error = 1;
+	}
 
 	fz_flush_warnings(ctx);
 	fz_drop_context(ctx);

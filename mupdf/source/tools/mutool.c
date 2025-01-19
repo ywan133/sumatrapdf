@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /*
  * mutool -- swiss army knife of pdf manipulation tools
  */
@@ -25,8 +47,12 @@ int pdfpages_main(int argc, char *argv[]);
 int pdfcreate_main(int argc, char *argv[]);
 int pdfmerge_main(int argc, char *argv[]);
 int pdfsign_main(int argc, char *argv[]);
+int pdfrecolor_main(int argc, char *argv[]);
+int pdftrim_main(int argc, char *argv[]);
+int pdfbake_main(int argc, char *argv[]);
 
 int cmapdump_main(int argc, char *argv[]);
+int pdfaudit_main(int argc, char *argv[]);
 
 static struct {
 	int (*func)(int argc, char *argv[]);
@@ -44,13 +70,14 @@ static struct {
 	{ mutrace_main, "trace", "trace device calls" },
 #if FZ_ENABLE_PDF
 	{ pdfextract_main, "extract", "extract font and image resources" },
-#endif
-#if FZ_ENABLE_PDF
 	{ pdfinfo_main, "info", "show information about pdf resources" },
 	{ pdfmerge_main, "merge", "merge pages from multiple pdf sources into a new pdf" },
 	{ pdfpages_main, "pages", "show information about pdf pages" },
 	{ pdfposter_main, "poster", "split large page into many tiles" },
+	{ pdfrecolor_main, "recolor", "Change colorspace of pdf document" },
 	{ pdfsign_main, "sign", "manipulate PDF digital signatures" },
+	{ pdftrim_main, "trim", "trim PDF page contents" },
+	{ pdfbake_main, "bake", "bake PDF form into static content" },
 #endif
 #if FZ_ENABLE_JS
 	{ murun_main, "run", "run javascript" },
@@ -60,6 +87,7 @@ static struct {
 #ifndef NDEBUG
 	{ cmapdump_main, "cmapdump", "dump CMap resource as C source file" },
 #endif
+	{ pdfaudit_main, "audit", "Produce usage stats from PDF files" },
 #endif
 };
 
@@ -137,6 +165,7 @@ int main(int argc, char **argv)
 
 	/* Print usage */
 
+	fprintf(stderr, "mutool version %s\n", FZ_VERSION);
 	fprintf(stderr, "usage: mutool <command> [options]\n");
 
 	for (i = 0; i < (int)nelem(tools); i++)

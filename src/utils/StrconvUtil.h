@@ -1,39 +1,28 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 namespace strconv {
 
-size_t Utf8ToWcharBuf(const char* s, size_t sLen, WCHAR* bufOut, size_t cchBufOutSize);
-size_t WcharToUtf8Buf(const WCHAR* s, char* bufOut, size_t cbBufOutSize);
-std::string_view ToMultiByte(const char* src, uint CodePageSrc, uint CodePageDest);
-WCHAR* ToWideChar(const char* src, uint CodePage, int cbSrcLen = -1);
+WCHAR* Utf8ToWStr(const char* s, size_t cb = (size_t)-1, Allocator* a = nullptr);
+char* WStrToUtf8(const WCHAR* s, size_t cch = (size_t)-1, Allocator* a = nullptr);
 
-std::string_view UnknownToUtf8(const std::string_view&);
+char* WStrToCodePage(uint codePage, const WCHAR* s, size_t cch = (size_t)-1, Allocator* a = nullptr);
+TempStr ToMultiByteTemp(const char* src, uint codePageSrc, uint codePageDest);
+WCHAR* StrCPToWStr(const char* src, uint codePage, int cbSrc = -1);
+TempWStr StrCPToWStrTemp(const char* src, uint codePage, int cbSrc = -1);
+TempStr StrToUtf8Temp(const char* src, uint codePage);
 
-WCHAR* FromCodePage(const char* src, uint cp);
+char* UnknownToUtf8Temp(const char*);
 
-WCHAR* Utf8ToWstr(std::string_view sv);
+char* WStrToAnsi(const WCHAR*);
+char* Utf8ToAnsi(const char*);
 
-std::string_view WstrToUtf8(const WCHAR* src, size_t cchSrcLen = -1);
-std::string_view WstrToUtf8(std::wstring_view);
-
-std::string_view WstrToCodePage(const WCHAR* txt, uint codePage, int cchTxtLen = -1);
-std::string_view WstrToAnsi(const WCHAR*);
-
-WCHAR* FromAnsi(const char* src, size_t cbSrcLen = (size_t)-1);
-size_t ToCodePageBuf(char* buf, int cbBufSize, const WCHAR* s, uint cp);
-size_t FromCodePageBuf(WCHAR* buf, int cchBufSize, const char* s, uint cp);
-
-struct StackWstrToUtf8 {
-    char buf[128];
-    char* overflow = nullptr;
-
-    StackWstrToUtf8(std::wstring_view);
-    StackWstrToUtf8(const WCHAR*);
-    StackWstrToUtf8& operator=(const StackWstrToUtf8&) = delete;
-    ~StackWstrToUtf8();
-    char* Get() const;
-    operator char*() const;
-};
+TempWStr AnsiToWStrTemp(const char* src, size_t cbLen = (size_t)-1);
+char* AnsiToUtf8(const char* src, size_t cbLen = (size_t)-1);
 
 } // namespace strconv
+
+// shorter names
+// TODO: eventually we want to migrate all strconv:: to them
+char* ToUtf8(const WCHAR* s, size_t cch = (size_t)-1);
+WCHAR* ToWStr(const char* s, size_t cb = (size_t)-1);

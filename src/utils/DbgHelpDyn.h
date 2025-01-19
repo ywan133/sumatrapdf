@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD */
 
 namespace dbghelp {
@@ -12,7 +12,7 @@ bool GetCurrentThreadCallstack(str::Str& s);
 void LogCallstack();
 void RememberCallstackLogs();
 void FreeCallstackLogs();
-std::span<u8> GetCallstacks();
+ByteSlice GetCallstacks();
 void GetAllThreadsCallstacks(str::Str& s);
 void GetExceptionInfo(str::Str& s, EXCEPTION_POINTERS* excPointers);
 

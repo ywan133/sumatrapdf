@@ -1,8 +1,8 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 struct ByteWriter {
-    bool isLE{false};
+    bool isLE = false;
     str::Str d;
 
     ByteWriter(size_t sizeHint = 0);
@@ -16,7 +16,7 @@ struct ByteWriter {
     void Write64(u64 val);
 
     size_t Size() const;
-    std::span<u8> AsSpan() const;
+    ByteSlice AsByteSlice() const;
 };
 
 struct ByteWriterLE : ByteWriter {

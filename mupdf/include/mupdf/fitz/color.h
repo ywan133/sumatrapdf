@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_COLOR_H
 #define MUPDF_FITZ_COLOR_H
 
@@ -46,7 +68,7 @@ typedef struct
 	uint8_t opm;	/* overprint mode */
 }  fz_color_params;
 
-extern const fz_color_params fz_default_color_params;
+FZ_DATA extern const fz_color_params fz_default_color_params;
 
 /**
 	Map from (case sensitive) rendering intent string to enumeration
@@ -231,6 +253,18 @@ int fz_colorspace_is_lab_icc(fz_context *ctx, fz_colorspace *cs);
 	a blending space (i.e. only grey, rgb or cmyk).
 */
 int fz_is_valid_blend_colorspace(fz_context *ctx, fz_colorspace *cs);
+
+/**
+	Get the 'base' colorspace for a colorspace.
+
+	For indexed colorspaces, this is the colorspace the index
+	decodes into. For all other colorspaces, it is the colorspace
+	itself.
+
+	The returned colorspace is 'borrowed' (i.e. no additional
+	references are taken or dropped).
+*/
+fz_colorspace *fz_base_colorspace(fz_context *ctx, fz_colorspace *cs);
 
 /**
 	Retrieve global default colorspaces.

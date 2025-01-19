@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 #include "utils/BaseUtil.h"
@@ -6,17 +6,18 @@
 #include "utils/GdiPlusUtil.h"
 #include "utils/WinUtil.h"
 #include "utils/Archive.h"
-#include "utils/PalmDbReader.h"
 #include "utils/HtmlParserLookup.h"
 #include "utils/HtmlPullParser.h"
 #include "mui/Mui.h"
 
-#include "wingui/TreeModel.h"
+#include "wingui/UIModels.h"
 
-#include "Annotation.h"
+#include "DocProperties.h"
+#include "DocController.h"
 #include "EngineBase.h"
 #include "EbookBase.h"
 #include "EbookDoc.h"
+#include "PalmDbReader.h"
 #include "MobiDoc.h"
 #include "HtmlFormatter.h"
 #include "EbookFormatter.h"
@@ -29,7 +30,7 @@ MobiFormatter::MobiFormatter(HtmlFormatterArgs* args, MobiDoc* doc) : HtmlFormat
         return;
     }
 
-    ImageData* img = doc->GetCoverImage();
+    ByteSlice* img = doc->GetCoverImage();
     if (!img) {
         return;
     }
@@ -102,7 +103,7 @@ void MobiFormatter::HandleTagImg(HtmlToken* t) {
     if (attr) {
         int n;
         if (str::Parse(attr->val, attr->valLen, "%d", &n)) {
-            ImageData* img = doc->GetImage(n);
+            ByteSlice* img = doc->GetImage(n);
             needAlt = !img || !EmitImage(img);
         }
     }
@@ -112,7 +113,7 @@ void MobiFormatter::HandleTagImg(HtmlToken* t) {
 }
 
 void MobiFormatter::HandleHtmlTag(HtmlToken* t) {
-    CrashIf(!t->IsTag());
+    ReportIf(!t->IsTag());
 
     if (Tag_P == t->tag || Tag_Blockquote == t->tag) {
         HtmlFormatter::HandleHtmlTag(t);
@@ -138,16 +139,16 @@ void MobiFormatter::HandleHtmlTag(HtmlToken* t) {
 /* EPUB-specific formatting methods */
 
 void EpubFormatter::HandleTagImg(HtmlToken* t) {
-    CrashIf(!epubDoc);
+    ReportIf(!epubDoc);
     if (t->IsEndTag()) {
         return;
     }
     bool needAlt = true;
     AttrInfo* attr = t->GetAttrByName("src");
     if (attr) {
-        AutoFree src(str::DupN(attr->val, attr->valLen));
+        TempStr src = str::DupTemp(attr->val, attr->valLen);
         url::DecodeInPlace(src);
-        ImageData* img = epubDoc->GetImageData(src, pagePath);
+        ByteSlice* img = epubDoc->GetImageData(src, pagePath);
         needAlt = !img || !EmitImage(img);
     }
     if (needAlt && (attr = t->GetAttrByName("alt")) != nullptr) {
@@ -163,14 +164,14 @@ void EpubFormatter::HandleTagPagebreak(HtmlToken* t) {
     if (attr) {
         Gdiplus::RectF bbox(0, currY, pageDx, 0);
         currPage->instructions.Append(DrawInstr::Anchor(attr->val, attr->valLen, bbox));
-        pagePath.Set(str::DupN(attr->val, attr->valLen));
+        pagePath.Set(str::Dup(attr->val, attr->valLen));
         // reset CSS style rules for the new document
         styleRules.Reset();
     }
 }
 
 void EpubFormatter::HandleTagLink(HtmlToken* t) {
-    CrashIf(!epubDoc);
+    ReportIf(!epubDoc);
     if (t->IsEndTag()) {
         return;
     }
@@ -187,16 +188,17 @@ void EpubFormatter::HandleTagLink(HtmlToken* t) {
         return;
     }
 
-    AutoFree src(str::DupN(attr->val, attr->valLen));
+    char* src = str::DupTemp(attr->val, attr->valLen);
     url::DecodeInPlace(src);
-    AutoFree data(epubDoc->GetFileData(src, pagePath));
-    if (data.data) {
-        ParseStyleSheet(data.data, data.size());
+    ByteSlice data = epubDoc->GetFileData(src, pagePath);
+    if (data) {
+        ParseStyleSheet(data, data.size());
+        data.Free();
     }
 }
 
 void EpubFormatter::HandleTagSvgImage(HtmlToken* t) {
-    CrashIf(!epubDoc);
+    ReportIf(!epubDoc);
     if (t->IsEndTag()) {
         return;
     }
@@ -207,16 +209,16 @@ void EpubFormatter::HandleTagSvgImage(HtmlToken* t) {
     if (!attr) {
         return;
     }
-    AutoFree src(str::DupN(attr->val, attr->valLen));
+    TempStr src = str::DupTemp(attr->val, attr->valLen);
     url::DecodeInPlace(src);
-    ImageData* img = epubDoc->GetImageData(src, pagePath);
+    ByteSlice* img = epubDoc->GetImageData(src, pagePath);
     if (img) {
         EmitImage(img);
     }
 }
 
 void EpubFormatter::HandleHtmlTag(HtmlToken* t) {
-    CrashIf(!t->IsTag());
+    ReportIf(!t->IsTag());
     if (hiddenDepth && t->IsEndTag() && tagNesting.size() == hiddenDepth && t->tag == tagNesting.Last()) {
         hiddenDepth = 0;
         UpdateTagNesting(t);
@@ -241,11 +243,11 @@ bool EpubFormatter::IgnoreText() {
 /* FictionBook-specific formatting methods */
 
 Fb2Formatter::Fb2Formatter(HtmlFormatterArgs* args, Fb2Doc* doc)
-    : HtmlFormatter(args), fb2Doc(doc), section(1), titleCount(0) {
+    : HtmlFormatter(args), section(1), fb2Doc(doc), titleCount(0) {
     if (args->reparseIdx != 0) {
         return;
     }
-    ImageData* cover = doc->GetCoverImage();
+    ByteSlice* cover = doc->GetCoverImage();
     if (!cover) {
         return;
     }
@@ -262,14 +264,14 @@ Fb2Formatter::Fb2Formatter(HtmlFormatterArgs* args, Fb2Doc* doc)
 }
 
 void Fb2Formatter::HandleTagImg(HtmlToken* t) {
-    CrashIf(!fb2Doc);
+    ReportIf(!fb2Doc);
     if (t->IsEndTag()) {
         return;
     }
-    ImageData* img = nullptr;
+    ByteSlice* img = nullptr;
     AttrInfo* attr = t->GetAttrByNameNS("href", "http://www.w3.org/1999/xlink");
     if (attr) {
-        AutoFree src(str::DupN(attr->val, attr->valLen));
+        TempStr src = str::DupTemp(attr->val, attr->valLen);
         url::DecodeInPlace(src);
         img = fb2Doc->GetImageData(src);
     }
@@ -288,7 +290,7 @@ void Fb2Formatter::HandleTagAsHtml(HtmlToken* t, const char* name) {
 void Fb2Formatter::HandleHtmlTag(HtmlToken* t) {
     if (Tag_Title == t->tag || Tag_Subtitle == t->tag) {
         bool isSubtitle = Tag_Subtitle == t->tag;
-        AutoFree name(str::Format("h%d", section + (isSubtitle ? 1 : 0)));
+        TempStr name = str::FormatTemp("h%d", section + (isSubtitle ? 1 : 0));
         HtmlToken tok;
         tok.SetTag(t->type, name, name + str::Len(name));
         HandleTagHx(&tok);
@@ -336,16 +338,16 @@ void Fb2Formatter::HandleHtmlTag(HtmlToken* t) {
 /* standalone HTML-specific formatting methods */
 
 void HtmlFileFormatter::HandleTagImg(HtmlToken* t) {
-    CrashIf(!htmlDoc);
+    ReportIf(!htmlDoc);
     if (t->IsEndTag()) {
         return;
     }
     bool needAlt = true;
     AttrInfo* attr = t->GetAttrByName("src");
     if (attr) {
-        AutoFree src(str::DupN(attr->val, attr->valLen));
+        TempStr src = str::DupTemp(attr->val, attr->valLen);
         url::DecodeInPlace(src);
-        ImageData* img = htmlDoc->GetImageData(src);
+        ByteSlice* img = htmlDoc->GetImageData(src);
         needAlt = !img || !EmitImage(img);
     }
     if (needAlt && (attr = t->GetAttrByName("alt")) != nullptr) {
@@ -354,7 +356,7 @@ void HtmlFileFormatter::HandleTagImg(HtmlToken* t) {
 }
 
 void HtmlFileFormatter::HandleTagLink(HtmlToken* t) {
-    CrashIf(!htmlDoc);
+    ReportIf(!htmlDoc);
     if (t->IsEndTag()) {
         return;
     }
@@ -371,10 +373,11 @@ void HtmlFileFormatter::HandleTagLink(HtmlToken* t) {
         return;
     }
 
-    AutoFree src(str::DupN(attr->val, attr->valLen));
+    char* src = str::DupTemp(attr->val, attr->valLen);
     url::DecodeInPlace(src);
-    AutoFree data(htmlDoc->GetFileData(src));
-    if (data.data) {
-        ParseStyleSheet(data.data, data.size());
+    ByteSlice data = htmlDoc->GetFileData(src);
+    if (data) {
+        ParseStyleSheet(data, data.size());
     }
+    data.Free();
 }

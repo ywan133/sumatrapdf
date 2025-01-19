@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef FZ_CONFIG_H
 
 #define FZ_CONFIG_H
@@ -30,7 +52,29 @@
 /* #define FZ_ENABLE_CBZ 1 */
 /* #define FZ_ENABLE_IMG 1 */
 /* #define FZ_ENABLE_HTML 1 */
+/* #define FZ_ENABLE_FB2 1 */
+/* #define FZ_ENABLE_MOBI 1 */
 /* #define FZ_ENABLE_EPUB 1 */
+/* #define FZ_ENABLE_OFFICE 1 */
+/* #define FZ_ENABLE_TXT 1 */
+
+/**
+	Some of those document agents rely on the HTML
+	engine. This will be enabled if required based upon
+	those engines, but can be enabled independently of
+	them so that other features (such as the fz_story
+	mechanism or PDF Annotation rich content) can work.
+*/
+/* #define FZ_ENABLE_HTML_ENGINE 1 */
+
+/**
+	Choose which document writers to include.
+	By default all are enabled. To avoid building unwanted
+	ones, define FZ_ENABLE_..._OUTPUT to 0.
+*/
+/* #define FZ_ENABLE_OCR_OUTPUT 1 */
+/* #define FZ_ENABLE_DOCX_OUTPUT 1 */
+/* #define FZ_ENABLE_ODT_OUTPUT 1 */
 
 /**
 	Choose whether to enable ICC color profiles.
@@ -152,6 +196,34 @@
 #define FZ_ENABLE_EPUB 1
 #endif /* FZ_ENABLE_EPUB */
 
+#ifndef FZ_ENABLE_FB2
+#define FZ_ENABLE_FB2 1
+#endif /* FZ_ENABLE_FB2 */
+
+#ifndef FZ_ENABLE_MOBI
+#define FZ_ENABLE_MOBI 1
+#endif /* FZ_ENABLE_MOBI */
+
+#ifndef FZ_ENABLE_TXT
+#define FZ_ENABLE_TXT 1
+#endif /* FZ_ENABLE_TXT */
+
+#ifndef FZ_ENABLE_OFFICE
+#define FZ_ENABLE_OFFICE 1
+#endif /* FZ_ENABLE_OFFICE */
+
+#ifndef FZ_ENABLE_OCR_OUTPUT
+#define FZ_ENABLE_OCR_OUTPUT 1
+#endif /* FZ_ENABLE_OCR_OUTPUT */
+
+#ifndef FZ_ENABLE_ODT_OUTPUT
+#define FZ_ENABLE_ODT_OUTPUT 1
+#endif /* FZ_ENABLE_ODT_OUTPUT */
+
+#ifndef FZ_ENABLE_DOCX_OUTPUT
+#define FZ_ENABLE_DOCX_OUTPUT 1
+#endif /* FZ_ENABLE_DOCX_OUTPUT */
+
 #ifndef FZ_ENABLE_JPX
 #define FZ_ENABLE_JPX 1
 #endif /* FZ_ENABLE_JPX */
@@ -164,10 +236,45 @@
 #define FZ_ENABLE_ICC 1
 #endif /* FZ_ENABLE_ICC */
 
+#ifdef FZ_ENABLE_HTML_ENGINE
+#if FZ_ENABLE_HTML_ENGINE == 0
+#if FZ_ENABLE_HTML == 1
+#error FZ_ENABLE_HTML cannot work without FZ_ENABLE_HTML_ENGINE
+#endif
+#if FZ_ENABLE_EPUB == 1
+#error FZ_ENABLE_EPUB cannot work without FZ_ENABLE_HTML_ENGINE
+#endif
+#if FZ_ENABLE_MOBI == 1
+#error FZ_ENABLE_MOBI cannot work without FZ_ENABLE_HTML_ENGINE
+#endif
+#if FZ_ENABLE_FB2 == 1
+#error FZ_ENABLE_FB2 cannot work without FZ_ENABLE_HTML_ENGINE
+#endif
+#if FZ_ENABLE_TXT == 1
+#error FZ_ENABLE_TXT cannot work without FZ_ENABLE_HTML_ENGINE
+#endif
+#if FZ_ENABLE_OFFICE == 1
+#error FZ_ENABLE_OFFICE cannot work without FZ_ENABLE_HTML_ENGINE
+#endif
+#endif
+#else
+#if FZ_ENABLE_HTML || FZ_ENABLE_EPUB || FZ_ENABLE_MOBI || FZ_ENABLE_FB2 || FZ_ENABLE_TXT || FZ_ENABLE_OFFICE
+#define FZ_ENABLE_HTML_ENGINE 1
+#else
+#define FZ_ENABLE_HTML_ENGINE 0
+#endif
+#endif
+
 /* If Epub and HTML are both disabled, disable SIL fonts */
 #if FZ_ENABLE_HTML == 0 && FZ_ENABLE_EPUB == 0
 #undef TOFU_SIL
 #define TOFU_SIL
+#endif
+
+#if !defined(HAVE_LEPTONICA) || !defined(HAVE_TESSERACT)
+#ifndef OCR_DISABLED
+#define OCR_DISABLED
+#endif
 #endif
 
 #endif /* FZ_CONFIG_H */

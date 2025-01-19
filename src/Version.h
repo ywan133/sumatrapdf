@@ -1,13 +1,16 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 // CURR_VERSION can be over-written externally
 #ifndef CURR_VERSION
-#define CURR_VERSION 3.3
+#define CURR_VERSION 3.6
 #endif
 #ifndef CURR_VERSION_COMMA
-#define CURR_VERSION_COMMA 3,3,0
+#define CURR_VERSION_COMMA 3,6,0
 #endif
+
+// this is sth. like "3.5"
+#define CURR_VERSION_MAJOR_STRA QM(CURR_VERSION)
 
 // VER_QUALIFIER allows people who recompile SumatraPDF to add
 // a distinguishing string at the end of the version number
@@ -23,6 +26,7 @@
 #define QM4(x, y, z, u) _QUOTEME4(x, y, z, u)
 
 // version as displayed in UI and included in resources
+// CURR_VERSION is 3.6.16105 for pre-release builds
 #ifndef PRE_RELEASE_VER
  #ifndef VER_QUALIFIER
   #define CURR_VERSION_STRA QM(CURR_VERSION)
@@ -32,6 +36,7 @@
  #define VER_RESOURCE_STR  CURR_VERSION_STRA
  #define VER_RESOURCE      CURR_VERSION_COMMA,0
  #define UPDATE_CHECK_VER  TEXT(QM(CURR_VERSION))
+ #define UPDATE_CHECK_VERA QM(CURR_VERSION)
 #else
  #ifndef VER_QUALIFIER
    #define CURR_VERSION_STRA QM3(CURR_VERSION, ., PRE_RELEASE_VER)
@@ -42,18 +47,11 @@
  #endif
  #define VER_RESOURCE      CURR_VERSION_COMMA,PRE_RELEASE_VER
  #define UPDATE_CHECK_VER  TEXT(QM(PRE_RELEASE_VER))
+ #define UPDATE_CHECK_VERA QM(PRE_RELEASE_VER)
 #endif
 #define CURR_VERSION_STR TEXT(CURR_VERSION_STRA)
 
-#define COPYRIGHT_STR      "Copyright 2006-2021 all authors (GPLv3)"
-#if defined(RAMICRO)
-#define PUBLISHER_STR      "RA-MICRO"
-#else
-#define PUBLISHER_STR      "Krzysztof Kowalczyk"
-#endif
+#define kCopyrightStr      "Copyright 2006-2024 all authors (GPLv3)"
+#define kPublisherStr      "Krzysztof Kowalczyk"
 
-#if defined(RAMICRO)
-#define APP_NAME_STR        "RA-MICRO PDF Viewer"
-#else
-#define APP_NAME_STR        "SumatraPDF"
-#endif
+#define kAppName        "SumatraPDF"

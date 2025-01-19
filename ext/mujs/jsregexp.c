@@ -1,9 +1,26 @@
 #include "jsi.h"
-#include "jsvalue.h"
-#include "jsbuiltin.h"
 #include "regexp.h"
 
-void js_newregexp(js_State *J, const char *pattern, int flags)
+static char *escaperegexp(js_State *J, const char *pattern) {
+	char *copy, *p;
+	const char *s;
+	int n = 0;
+	for (s = pattern; *s; ++s) {
+		if (*s == '/')
+			++n;
+		++n;
+	}
+	copy = p = js_malloc(J, n+1);
+	for (s = pattern; *s; ++s) {
+		if (*s == '/')
+			*p++ = '\\';
+		*p++ = *s;
+	}
+	*p = 0;
+	return copy;
+}
+
+static void js_newregexpx(js_State *J, const char *pattern, int flags, int is_clone)
 {
 	const char *error;
 	js_Object *obj;
@@ -21,33 +38,40 @@ void js_newregexp(js_State *J, const char *pattern, int flags)
 		js_syntaxerror(J, "regular expression: %s", error);
 
 	obj->u.r.prog = prog;
-	obj->u.r.source = js_strdup(J, pattern);
+	obj->u.r.source = is_clone ? js_strdup(J, pattern) : escaperegexp(J, pattern);
 	obj->u.r.flags = flags;
 	obj->u.r.last = 0;
 	js_pushobject(J, obj);
 }
 
+void js_newregexp(js_State *J, const char *pattern, int flags)
+{
+	js_newregexpx(J, pattern, flags, 0);
+}
+
 void js_RegExp_prototype_exec(js_State *J, js_Regexp *re, const char *text)
 {
+	const char *haystack;
 	int result;
 	int i;
 	int opts;
 	Resub m;
 
+	haystack = text;
 	opts = 0;
 	if (re->flags & JS_REGEXP_G) {
-		if (re->last > strlen(text)) {
+		if (re->last > strlen(haystack)) {
 			re->last = 0;
 			js_pushnull(J);
 			return;
 		}
 		if (re->last > 0) {
-			text += re->last;
+			haystack = text + re->last;
 			opts |= REG_NOTBOL;
 		}
 	}
 
-	result = js_regexec(re->prog, text, &m, opts);
+	result = js_regexec(re->prog, haystack, &m, opts);
 	if (result < 0)
 		js_error(J, "regexec failed");
 	if (result == 0) {
@@ -61,7 +85,7 @@ void js_RegExp_prototype_exec(js_State *J, js_Regexp *re, const char *text)
 			js_setindex(J, -2, i);
 		}
 		if (re->flags & JS_REGEXP_G)
-			re->last = re->last + (m.sub[0].ep - text);
+			re->last = m.sub[0].ep - text;
 		return;
 	}
 
@@ -116,6 +140,7 @@ static void jsB_new_RegExp(js_State *J)
 	js_Regexp *old;
 	const char *pattern;
 	int flags;
+	int is_clone = 0;
 
 	if (js_isregexp(J, 1)) {
 		if (js_isdefined(J, 2))
@@ -123,6 +148,7 @@ static void jsB_new_RegExp(js_State *J)
 		old = js_toregexp(J, 1);
 		pattern = old->source;
 		flags = old->flags;
+		is_clone = 1;
 	} else if (js_isundefined(J, 1)) {
 		pattern = "(?:)";
 		flags = 0;
@@ -152,7 +178,7 @@ static void jsB_new_RegExp(js_State *J)
 		if (m) flags |= JS_REGEXP_M;
 	}
 
-	js_newregexp(J, pattern, flags);
+	js_newregexpx(J, pattern, flags, is_clone);
 }
 
 static void jsB_RegExp(js_State *J)
@@ -165,9 +191,14 @@ static void jsB_RegExp(js_State *J)
 static void Rp_toString(js_State *J)
 {
 	js_Regexp *re;
-	char *out;
+	char * volatile out = NULL;
 
 	re = js_toregexp(J, 0);
+
+	if (js_try(J)) {
+		js_free(J, out);
+		js_throw(J);
+	}
 
 	out = js_malloc(J, strlen(re->source) + 6); /* extra space for //gim */
 	strcpy(out, "/");
@@ -177,10 +208,6 @@ static void Rp_toString(js_State *J)
 	if (re->flags & JS_REGEXP_I) strcat(out, "i");
 	if (re->flags & JS_REGEXP_M) strcat(out, "m");
 
-	if (js_try(J)) {
-		js_free(J, out);
-		js_throw(J);
-	}
 	js_pop(J, 0);
 	js_pushstring(J, out);
 	js_endtry(J);

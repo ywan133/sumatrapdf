@@ -1,10 +1,40 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_PDF_RESOURCE_H
 #define MUPDF_PDF_RESOURCE_H
+
+#include "mupdf/fitz/font.h"
+#include "mupdf/fitz/image.h"
+#include "mupdf/fitz/shade.h"
+#include "mupdf/fitz/store.h"
+#include "mupdf/pdf/object.h"
 
 void pdf_store_item(fz_context *ctx, pdf_obj *key, void *val, size_t itemsize);
 void *pdf_find_item(fz_context *ctx, fz_store_drop_fn *drop, pdf_obj *key);
 void pdf_remove_item(fz_context *ctx, fz_store_drop_fn *drop, pdf_obj *key);
 void pdf_empty_store(fz_context *ctx, pdf_document *doc);
+void pdf_purge_locals_from_store(fz_context *ctx, pdf_document *doc);
+void pdf_purge_object_from_store(fz_context *ctx, pdf_document *doc, int num);
 
 /*
  * Structures used for managing resource locations and avoiding multiple
@@ -45,6 +75,25 @@ fz_colorspace *pdf_load_colorspace(fz_context *ctx, pdf_obj *obj);
 int pdf_is_tint_colorspace(fz_context *ctx, fz_colorspace *cs);
 
 fz_shade *pdf_load_shading(fz_context *ctx, pdf_document *doc, pdf_obj *obj);
+void pdf_sample_shade_function(fz_context *ctx, float *samples, int n, int funcs, pdf_function **func, float t0, float t1);
+
+/**
+	Function to recolor a single color from a shade.
+*/
+typedef void (pdf_recolor_vertex)(fz_context *ctx, void *opaque, fz_colorspace *dst_cs, float *d, fz_colorspace *src_cs, const float *src);
+
+/**
+	Function to handle recoloring a shade.
+
+	Called with src_cs from the shade. If no recoloring is required, return NULL. Otherwise
+	fill in *dst_cs, and return a vertex recolorer.
+*/
+typedef pdf_recolor_vertex *(pdf_shade_recolorer)(fz_context *ctx, void *opaque, fz_colorspace *src_cs, fz_colorspace **dst_cs);
+
+/**
+	Recolor a shade.
+*/
+pdf_obj *pdf_recolor_shade(fz_context *ctx, pdf_obj *shade, pdf_shade_recolorer *reshade, void *opaque);
 
 fz_image *pdf_load_inline_image(fz_context *ctx, pdf_document *doc, pdf_obj *rdb, pdf_obj *dict, fz_stream *file);
 int pdf_is_jpx_image(fz_context *ctx, pdf_obj *dict);

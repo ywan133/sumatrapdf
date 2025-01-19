@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <jbig2.h>
@@ -76,15 +98,15 @@ next_jbig2d(fz_context *ctx, fz_stream *stm, size_t len)
 				break;
 
 			if (jbig2_data_in(state->ctx, tmp, n) < 0)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "cannot decode jbig2 image");
+				fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot decode jbig2 image");
 		}
 
 		if (jbig2_complete_page(state->ctx) < 0)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cannot complete jbig2 image");
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot complete jbig2 image");
 
 		state->page = jbig2_page_out(state->ctx);
 		if (!state->page)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "no jbig2 image decoded");
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "no jbig2 image decoded");
 	}
 
 	s = state->page->data;
@@ -146,8 +168,13 @@ static void *fz_jbig2_realloc(Jbig2Allocator *allocator, void *p, size_t size)
 fz_jbig2_globals *
 fz_load_jbig2_globals(fz_context *ctx, fz_buffer *buf)
 {
-	fz_jbig2_globals *globals = fz_malloc_struct(ctx, fz_jbig2_globals);
+	fz_jbig2_globals *globals;
 	Jbig2Ctx *jctx;
+
+	if (buf == NULL || buf->data == NULL || buf->len == 0)
+		return NULL;
+
+	globals = fz_malloc_struct(ctx, fz_jbig2_globals);
 
 	globals->alloc.ctx = ctx;
 	globals->alloc.alloc.alloc = fz_jbig2_alloc;
@@ -158,14 +185,14 @@ fz_load_jbig2_globals(fz_context *ctx, fz_buffer *buf)
 	if (!jctx)
 	{
 		fz_free(ctx, globals);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot allocate jbig2 globals context");
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot allocate jbig2 globals context");
 	}
 
 	if (jbig2_data_in(jctx, buf->data, buf->len) < 0)
 	{
 		jbig2_global_ctx_free(jbig2_make_global_ctx(jctx));
 		fz_free(ctx, globals);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot decode jbig2 globals");
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot decode jbig2 globals");
 	}
 
 	FZ_INIT_STORABLE(globals, 1, fz_drop_jbig2_globals_imp);
@@ -210,7 +237,7 @@ fz_open_jbig2d(fz_context *ctx, fz_stream *chain, fz_jbig2_globals *globals, int
 	{
 		fz_drop_jbig2_globals(ctx, state->gctx);
 		fz_free(ctx, state);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot allocate jbig2 context");
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot allocate jbig2 context");
 	}
 
 	state->page = NULL;

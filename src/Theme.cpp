@@ -1,361 +1,316 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
 License: GPLv3 */
-
-/* Adding themes instructions:
-Add one to THEME_COUNT (Theme.h)
-If THEME_COUNT > 20, you will have to update IDM_CHANGE_THEME_LAST (resource.h)
-Copy one of the theme declarations below
-Rename it to whatever and change all of the properties as desired
-Add a pointer to your new struct to the g_themes array below
-
-Try not to enter a color code twice. If you use it more than once in a theme,
-reference it through the theme struct the second time. See g_themeDark.document for example.
-You can also use methods like AdjustLightness2 to modify existing colors. If you use a
-color in multiple themes, you may want to define it in the color definitions section.This
-makes themes easier to modify and update.
-
-Note: Colors are in format 0xBBGGRR, recommended to use RgbToCOLORREF
-*/
-
-// temporarily (?) disabled
-#if defined(ENABLE_THEME)
 
 #include "utils/BaseUtil.h"
 #include "utils/WinUtil.h"
+
+#include "Settings.h"
+#include "AppSettings.h"
+#include "Commands.h"
 #include "DisplayMode.h"
-#include "SettingsStructs.h"
 #include "Theme.h"
 #include "GlobalPrefs.h"
 #include "Translations.h"
+#include "Toolbar.h"
 
-// Color definitions
-#define COL_BLACK 0x000000
-#define COL_WHITE 0xFFFFFF
-#define COL_WHITEISH 0xEBEBF9
+#include "utils/Log.h"
 
-// Theme definition helper functions
-static COLORREF RgbToCOLORREF(COLORREF rgb) {
-    return ((rgb & 0x0000FF) << 16) | (rgb & 0x00FF00) | ((rgb & 0xFF0000) >> 16);
+/*
+preserve those translations:
+_TRN("Dark")
+_TRN("Darker")
+_TRN("Light")
+*/
+
+constexpr COLORREF kColBlack = 0x000000;
+constexpr COLORREF kColWhite = 0xFFFFFF;
+constexpr COLORREF kRedColor = RgbToCOLORREF(0xff0000);
+
+static const char* themesTxt = R"(Themes [
+    [
+        Name = Light
+        TextColor = #000000
+        BackgroundColor = #f2f2f2
+        ControlBackgroundColor = #ffffff
+        LinkColor = #0020a0
+        ColorizeControls = false
+    ]
+    [
+        Name = Dark from 3.5
+        TextColor = #bac9d0
+        BackgroundColor = #263238
+        ControlBackgroundColor = #263238
+        LinkColor = #8aa3b0
+        ColorizeControls = true
+    ]
+    [
+        Name = Darker
+        TextColor = #c3c3c6
+        BackgroundColor = #2d2d30
+        ControlBackgroundColor = #2d2d30
+        LinkColor = #9999a0
+        ColorizeControls = true
+    ]
+    [
+        Name = Dark
+        TextColor = #F9FAFB
+        BackgroundColor = #000000
+        ControlBackgroundColor = #000000
+        LinkColor = #6B7280
+        ColorizeControls = true
+    ]
+]
+)";
+
+extern void UpdateAfterThemeChange();
+
+int gFirstSetThemeCmdId;
+int gLastSetThemeCmdId;
+int gCurrSetThemeCmdId;
+
+static Vec<Theme*>* gThemes = nullptr;
+static int gThemeCount;
+static int gCurrThemeIndex = 0;
+static Theme* gCurrentTheme = nullptr;
+static Theme* gThemeLight = nullptr;
+
+bool IsCurrentThemeDefault() {
+    return gCurrThemeIndex == 0;
 }
 
-// clang-format off
-// Themes
-Theme g_themeLight = {
-    // Theme Name
-    _TRN("Light"),
-    // Main window theme
-    {
-        // Main Background Color
-        RgbToCOLORREF(0xF2F2F2),
-        // Main Text Color
-        COL_BLACK,
-        // Main Link Color
-        RgbToCOLORREF(0x0020A0)
-    },
-    // Document style
-    {
-        // Canvas Color
-        RgbToCOLORREF(0x999999),
-        // Background Color
-        COL_WHITE,
-        // Text color
-        COL_BLACK
-    },
-    // Tabs
-    {
-        // Height
-        24,
-        // Current style
-        {
-            // Background color
-            RgbToCOLORREF(0xFfFfFf),
-            // Text color
-            COL_BLACK,
-            // Default close style
-            {
-                // X color
-                AdjustLightness2(g_themeLight.tab.current.backgroundColor, -60),
-                // Circle color
-                RgbToCOLORREF(0xC13535)
-            }
-        },
-        // Background style
-        {
-            // Background color
-            AdjustLightness2(g_themeLight.tab.current.backgroundColor, -25),
-            // Text color
-            COL_BLACK,
-            // Default close style
-            g_themeLight.tab.current.close
-        },
-        // Highlighted style
-        {
-            // Background color
-            AdjustLightness2(g_themeLight.tab.current.backgroundColor, 15),
-            // Text color
-            COL_BLACK,
-            // Default close style
-            g_themeLight.tab.current.close
-        },
-        // Tab Close Circle Enabled
-        true,
-        // Tab Close Pen Width
-        2.0f,
-        // Hovered close style
-        {
-            // X color
-            COL_WHITEISH,
-            // Circle color
-            g_themeLight.tab.current.close.circleColor
-        },
-        // Clicked close style
-        {
-            // X color
-            g_themeLight.tab.hoveredClose.xColor,
-            // Circle color
-            AdjustLightness2(g_themeLight.tab.current.close.circleColor, -10)
-        }
-    },
-    // Notifications
-    {
-        // Background color
-        g_themeLight.mainWindow.backgroundColor,
-        // Text color
-        g_themeLight.mainWindow.textColor,
-        // Highlight color
-        RgbToCOLORREF(0x3399FF),
-        // Highlight text color
-        COL_WHITE,
-        // Progress bar color
-        g_themeLight.mainWindow.linkColor
+void CreateThemeCommands() {
+    delete gThemes;
+    gThemes = new Vec<Theme*>();
+    auto themes = ParseThemes(themesTxt);
+    for (Theme* theme : *themes->themes) {
+        gThemes->Append(theme);
     }
-};
 
-Theme g_themeDark = {
-    // Theme Name
-    _TRN("Dark"),
-    // Main window theme
-    {
-        // Main Background Color
-        RgbToCOLORREF(0x263238),
-        // Main Text Color
-        COL_WHITE,
-        // Main Link Color
-        RgbToCOLORREF(0x80CBAD)
-    },
-    // Document style
-    {
-        // Canvas Color
-        RgbToCOLORREF(0x1E272C),
-        // Background Color
-        g_themeDark.mainWindow.backgroundColor,
-        // Text color
-        g_themeDark.mainWindow.textColor
-    },
-    // Tabs
-    {
-        // Height
-        24,
-        // Current style
-        {
-            // Background color
-            RgbToCOLORREF(0x009688),
-            // Text color
-            COL_WHITE,
-            // Default close style
-            {
-                // X color
-                RgbToCOLORREF(0x99D5CF)
-            }
-        },
-        // Background style
-        {
-            // Background color
-            AdjustLightness2(g_themeDark.tab.current.backgroundColor, -10),
-            // Text color
-            COL_WHITE,
-            // Default close style
-            g_themeDark.tab.current.close
-        },
-        // Highlighted style
-        {
-            // Background color
-            AdjustLightness2(g_themeDark.tab.current.backgroundColor, 10),
-            // Text color
-            COL_WHITE,
-            // Default close style
-            g_themeDark.tab.current.close
-        },
-        // Tab Close Circle Enabled
-        false,
-        // Tab Close Pen Width
-        1.0f,
-        // Hovered close style
-        {
-            // X color
-            COL_WHITEISH
-        },
-        // Clicked close style
-        g_themeDark.tab.hoveredClose
-    },
-    // Notifications
-    {
-        // Background color
-        AdjustLightness2(g_themeDark.mainWindow.backgroundColor, 10),
-        // Text color
-        g_themeDark.mainWindow.textColor,
-        // Highlight color
-        AdjustLightness2(RgbToCOLORREF(0x33434B), 10),
-        // Highlight text color
-        g_themeDark.mainWindow.textColor,
-        // Progress bar color
-        g_themeDark.mainWindow.linkColor
+    for (Theme* theme : *gGlobalPrefs->themes) {
+        gThemes->Append(theme);
     }
-};
 
-Theme g_themeDarker = {
-    // Theme Name
-    _TRN("Darker"),
-    // Main window theme
-    {
-        // Main Background Color
-        RgbToCOLORREF(0x2D2D30),
-        // Main Text Color
-        COL_WHITE,
-        // Main Link Color
-        RgbToCOLORREF(0x3081D4)
-    },
-    // Document style
-    {
-        // Canvas Color
-        RgbToCOLORREF(0x1E1E1E),
-        // Background Color
-        g_themeDarker.mainWindow.backgroundColor,
-        // Text color
-        g_themeDarker.mainWindow.textColor
-    },
-    // Tabs
-    {
-        // Height
-        24,
-        // Current style
-        {
-            // Background color
-            RgbToCOLORREF(0x007ACC),
-            // Text color
-            COL_WHITE,
-            // Default close style
-            {
-                // X color
-                RgbToCOLORREF(0xD0E6F5),
-                // Circle color
-                COL_BLACK
-            }
-        },
-        // Background style
-        {
-            // Background color
-            RgbToCOLORREF(0xEAEAEA),
-            // Text color
-            COL_BLACK,
-            // Default close style
-            {
-                // X color
-                COL_BLACK,
-                // Circle color
-                COL_BLACK
-            }
-        },
-        // Highlighted style
-        {
-            // Background color
-            RgbToCOLORREF(0x1C97EA),
-            // Text color
-            COL_WHITE,
-            // Default close style
-            g_themeDarker.tab.current.close
-        },
-        // Tab Close Circle Enabled
-        false,
-        // Tab Close Pen Width
-        2.0f,
-        // Hovered close style
-        {
-            // X color
-            COL_WHITE,
-            // Circle color
-            COL_BLACK
-        },
-        // Clicked close style
-        g_themeDarker.tab.hoveredClose
-    },
-    // Notifications
-    {
-        // Background color
-        AdjustLightness2(g_themeDarker.mainWindow.backgroundColor, 10),
-        // Text color
-        g_themeDarker.mainWindow.textColor,
-        // Highlight color
-        AdjustLightness2(RgbToCOLORREF(0x3E3E42), 10),
-        // Highlight text color
-        g_themeDarker.mainWindow.textColor,
-        // Progress bar color
-        g_themeDarker.mainWindow.linkColor
+    gThemeCount = gThemes->Size();
+    if (gCurrThemeIndex >= gThemeCount) {
+        gCurrThemeIndex = 0;
     }
-};
-// clang-format on
+    gCurrentTheme = gThemes->At(gCurrThemeIndex);
+    gThemeLight = gThemes->At(0);
 
-// Master themes list
-Theme* g_themes[THEME_COUNT] = {
-    &g_themeLight,
-    &g_themeDark,
-    &g_themeDarker,
-};
-
-// Current theme caching
-Theme* currentTheme = NULL;
-int currentThemeIndex;
-
-Theme* GetThemeByName(char* name) {
-    for (int i = 0; i < THEME_COUNT; i++) {
-        if (str::Eq(g_themes[i]->name, name)) {
-            return g_themes[i];
+    CustomCommand* cmd;
+    for (int i = 0; i < gThemeCount; i++) {
+        Theme* theme = gThemes->At(i);
+        const char* themeName = theme->name;
+        auto args = NewStringArg(kCmdArgTheme, themeName);
+        cmd = CreateCustomCommand(themeName, CmdSetTheme, args);
+        cmd->name = str::Format("Set theme '%s'", themeName);
+        if (i == 0) {
+            gFirstSetThemeCmdId = cmd->id;
+        } else if (i == gThemeCount - 1) {
+            gLastSetThemeCmdId = cmd->id;
         }
     }
-    return NULL;
+    gCurrSetThemeCmdId = gFirstSetThemeCmdId + gCurrThemeIndex;
 }
 
-Theme* GetThemeByIndex(int index) {
-    CrashIf(index < 0 || index >= THEME_COUNT);
-    return g_themes[index];
-}
-
-Theme* GetCurrentTheme() {
-    if (currentTheme == NULL || !str::Eq(currentTheme->name, gGlobalPrefs->themeName)) {
-        currentTheme = GetThemeByName(gGlobalPrefs->themeName);
-        if (currentTheme == NULL) {
-            str::ReplacePtr(&gGlobalPrefs->themeName, g_themeLight.name);
-            currentTheme = &g_themeLight;
-        }
-        currentThemeIndex = GetThemeIndex(currentTheme);
+void SetThemeByIndex(int themeIdx) {
+    ReportIf((themeIdx < 0) || (themeIdx >= gThemeCount));
+    if (themeIdx >= gThemeCount) {
+        themeIdx = 0;
     }
-    return currentTheme;
+    gCurrThemeIndex = themeIdx;
+    gCurrSetThemeCmdId = gFirstSetThemeCmdId + themeIdx;
+    gCurrentTheme = gThemes->At(gCurrThemeIndex);
+    str::ReplaceWithCopy(&gGlobalPrefs->theme, gCurrentTheme->name);
+    UpdateAfterThemeChange();
+};
+
+void SelectNextTheme() {
+    int newIdx = (gCurrThemeIndex + 1) % gThemeCount;
+    SetThemeByIndex(newIdx);
 }
 
-int GetThemeIndex(Theme* theme) {
-    for (int i = 0; i < THEME_COUNT; i++) {
-        if (g_themes[i] == theme) {
+// not case sensitive
+static int GetThemeByName(const char* name) {
+    for (int i = 0; i < gThemeCount; i++) {
+        Theme* theme = gThemes->At(i);
+        if (str::EqI(theme->name, name)) {
             return i;
         }
     }
     return -1;
 }
 
-int GetCurrentThemeIndex() {
-    if (currentTheme == NULL || !str::Eq(currentTheme->name, gGlobalPrefs->themeName)) {
-        GetCurrentTheme();
-    }
-    return currentThemeIndex;
+// this is the default aggressive yellow that we suppress
+constexpr COLORREF kMainWinBgColDefault = (RGB(0xff, 0xf2, 0) - 0x80000000);
+
+static bool IsDefaultMainWinColor(ParsedColor* col) {
+    return col->parsedOk && col->col == kMainWinBgColDefault;
 }
 
+void SetTheme(const char* name) {
+    int idx = GetThemeByName(name);
+    if (idx < 0) {
+        // invalid name, reset to light theme
+        str::ReplaceWithCopy(&gGlobalPrefs->theme, gThemeLight->name);
+        idx = 0;
+    }
+    SetThemeByIndex(idx);
+}
+
+// call after loading settings
+void SetCurrentThemeFromSettings() {
+    SetTheme(gGlobalPrefs->theme);
+    ParsedColor* bgParsed = GetPrefsColor(gGlobalPrefs->mainWindowBackground);
+    bool isDefault = IsDefaultMainWinColor(bgParsed);
+    if (isDefault) {
+        gThemeLight->colorizeControls = false;
+        gThemeLight->controlBackgroundColorParsed.col = kColWhite;
+    } else {
+        gThemeLight->colorizeControls = true;
+        gThemeLight->controlBackgroundColorParsed.col = bgParsed->col;
+    }
+}
+
+// if is dark, makes lighter, if light, makes darker
+static COLORREF AdjustLightOrDark(COLORREF col, float n) {
+    if (IsLightColor(col)) {
+        col = AdjustLightness2(col, -n);
+    } else {
+        col = AdjustLightness2(col, n);
+    }
+    return col;
+}
+
+#define GetThemeCol(name, def) GetParsedCOLORREF(name, name##Parsed, def)
+
+COLORREF ThemeDocumentColors(COLORREF& bg) {
+    COLORREF text = kColBlack;
+    bg = kColWhite;
+
+    ParsedColor* parsedCol;
+    parsedCol = GetPrefsColor(gGlobalPrefs->fixedPageUI.textColor);
+    if (parsedCol->parsedOk) {
+        text = parsedCol->col;
+    }
+
+    parsedCol = GetPrefsColor(gGlobalPrefs->fixedPageUI.backgroundColor);
+    if (parsedCol->parsedOk) {
+        bg = parsedCol->col;
+    }
+
+    if (!gGlobalPrefs->fixedPageUI.invertColors) {
+        return text;
+    }
+
+    // default colors
+    if (gCurrentTheme == gThemeLight) {
+        std::swap(text, bg);
+        return text;
+    }
+
+    // if we're inverting in non-default themes, the colors
+    // should match the colors of the window
+    text = ThemeWindowTextColor();
+    bg = ThemeMainWindowBackgroundColor();
+
+    if (gCurrThemeIndex < 3) {
+        // https://github.com/sumatrapdfreader/sumatrapdf/issues/4465
+        // this is probably not expected for custom colors but we used to do
+        // it for built-in themes
+        // so do it for legacy themes but not for custom themes or new Dark theme
+        bg = AdjustLightOrDark(bg, 8);
+    }
+    return text;
+}
+
+COLORREF ThemeControlBackgroundColor() {
+    // note: we can change it in ThemeUpdateAfterLoadSettings()
+    auto col = GetThemeCol(gCurrentTheme->controlBackgroundColor, kRedColor);
+    return col;
+}
+
+COLORREF ThemeMainWindowBackgroundColor() {
+    COLORREF bgColor = GetThemeCol(gCurrentTheme->backgroundColor, kRedColor);
+    if (gCurrThemeIndex == 0) {
+        // Special behavior for light theme.
+        ParsedColor* bgParsed = GetPrefsColor(gGlobalPrefs->mainWindowBackground);
+        if (!IsDefaultMainWinColor(bgParsed)) {
+            bgColor = bgParsed->col;
+        }
+    }
+    return bgColor;
+}
+
+COLORREF ThemeWindowBackgroundColor() {
+    auto col = GetThemeCol(gCurrentTheme->backgroundColor, kRedColor);
+    return col;
+}
+
+COLORREF ThemeWindowTextColor() {
+    auto col = GetThemeCol(gCurrentTheme->textColor, kRedColor);
+    return col;
+}
+
+COLORREF ThemeWindowTextDisabledColor() {
+    auto col = ThemeWindowTextColor();
+    // TODO: probably add textDisabledColor
+    auto col2 = AdjustLightOrDark(col, 0x7f);
+    return col2;
+}
+
+COLORREF ThemeWindowControlBackgroundColor() {
+    auto col = GetThemeCol(gCurrentTheme->controlBackgroundColor, kRedColor);
+    return col;
+}
+
+COLORREF ThemeWindowLinkColor() {
+    auto col = GetThemeCol(gCurrentTheme->linkColor, kRedColor);
+    return col;
+}
+
+COLORREF ThemeNotificationsBackgroundColor() {
+    auto col = ThemeWindowBackgroundColor();
+    return AdjustLightness2(col, 10);
+}
+
+COLORREF ThemeNotificationsTextColor() {
+    return ThemeWindowTextColor();
+}
+
+COLORREF ThemeNotificationsHighlightColor() {
+    return RgbToCOLORREF(0xFFEE70); // yellowish
+}
+
+COLORREF ThemeNotificationsHighlightTextColor() {
+    return RgbToCOLORREF(0x8d0801); // reddish
+}
+
+COLORREF ThemeNotificationsProgressColor() {
+    return ThemeWindowLinkColor();
+}
+
+bool ThemeColorizeControls() {
+    if (gCurrentTheme->colorizeControls) {
+        return true;
+    }
+    return !IsMenuFontSizeDefault();
+}
+
+#if 0
+void dumpThemes() {
+    logf("Themes [\n");
+    for (ThemeOld* theme : gThemes) {
+        auto w = *theme;
+        logf("    [\n");
+        logf("        Name = %s\n", w.name);
+        logf("        TextColor = %s\n", SerializeColorTemp(w.textColor));
+        logf("        BackgroundColor = %s\n", SerializeColorTemp(w.backgroundColor));
+        logf("        ControlBackgroundColor = %s\n", SerializeColorTemp(w.controlBackgroundColor));
+        logf("        LinkColor = %s\n", SerializeColorTemp(w.linkColor));
+        logf("        ColorizeControls = %s\n", w.colorizeControls ? "true" : "false");
+        logf("    ]\n");
+    }
+    logf("]\n");
+}
 #endif

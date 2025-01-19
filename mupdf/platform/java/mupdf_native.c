@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /*
 NOTE!
 	The JNI specification states that New<PrimitiveType>Array() do not
@@ -65,37 +87,58 @@ static JavaVM *jvm = NULL;
 
 /* All the cached classes/mids/fids we need. */
 
+static jclass cls_AbortException;
+static jclass cls_AlertResult;
+static jclass cls_Archive;
+static jclass cls_ArrayList;
+static jclass cls_ArrayOfQuad;
 static jclass cls_Buffer;
 static jclass cls_ColorSpace;
+static jclass cls_Context;
+static jclass cls_Context_Log;
 static jclass cls_Context_Version;
 static jclass cls_Cookie;
+static jclass cls_DefaultAppearance;
+static jclass cls_DefaultColorSpaces;
 static jclass cls_Device;
 static jclass cls_DisplayList;
 static jclass cls_Document;
 static jclass cls_DocumentWriter;
 static jclass cls_DocumentWriter_OCRListener;
+static jclass cls_DOM;
+static jclass cls_DOMAttribute;
 static jclass cls_FitzInputStream;
 static jclass cls_FloatArray;
 static jclass cls_Font;
+static jclass cls_Story;
 static jclass cls_IOException;
 static jclass cls_IllegalArgumentException;
 static jclass cls_Image;
 static jclass cls_IndexOutOfBoundsException;
 static jclass cls_IntegerArray;
 static jclass cls_Link;
+static jclass cls_LinkDestination;
 static jclass cls_Location;
 static jclass cls_Matrix;
+static jclass cls_MultiArchive;
 static jclass cls_NativeDevice;
 static jclass cls_NullPointerException;
 static jclass cls_Object;
 static jclass cls_OutOfMemoryError;
 static jclass cls_Outline;
+static jclass cls_OutlineItem;
+static jclass cls_OutlineIterator;
 static jclass cls_PDFAnnotation;
 static jclass cls_PDFDocument;
 static jclass cls_PDFDocument_JsEventListener;
+static jclass cls_PDFDocument_PDFEmbeddedFileParams;
 static jclass cls_PDFGraftMap;
 static jclass cls_PDFObject;
 static jclass cls_PDFPage;
+static jclass cls_PDFWidget;
+static jclass cls_PKCS7DistinguishedName;
+static jclass cls_PKCS7Signer;
+static jclass cls_PKCS7Verifier;
 static jclass cls_Page;
 static jclass cls_Path;
 static jclass cls_PathWalker;
@@ -117,58 +160,94 @@ static jclass cls_TextBlock;
 static jclass cls_TextChar;
 static jclass cls_TextLine;
 static jclass cls_TextWalker;
+static jclass cls_TextWidgetCharLayout;
+static jclass cls_TextWidgetLayout;
+static jclass cls_TextWidgetLineLayout;
+static jclass cls_TreeArchive;
 static jclass cls_TryLaterException;
 static jclass cls_UnsupportedOperationException;
-static jclass cls_PDFWidget;
-static jclass cls_PKCS7Signer;
-static jclass cls_PKCS7Verifier;
-static jclass cls_PKCS7DesignatedName;
-static jclass cls_UnsupportedOperationException;
 
+static jfieldID fid_AlertResult_buttonPressed;
+static jfieldID fid_AlertResult_checkboxChecked;
+static jfieldID fid_Archive_pointer;
 static jfieldID fid_Buffer_pointer;
 static jfieldID fid_ColorSpace_pointer;
 static jfieldID fid_Context_Version_major;
 static jfieldID fid_Context_Version_minor;
 static jfieldID fid_Context_Version_patch;
 static jfieldID fid_Context_Version_version;
+static jfieldID fid_Context_lock;
+static jfieldID fid_Context_log;
 static jfieldID fid_Cookie_pointer;
+static jfieldID fid_DefaultAppearance_color;
+static jfieldID fid_DefaultAppearance_font;
+static jfieldID fid_DefaultAppearance_size;
+static jfieldID fid_DefaultColorSpaces_pointer;
 static jfieldID fid_Device_pointer;
 static jfieldID fid_DisplayList_pointer;
-static jfieldID fid_DocumentWriter_pointer;
 static jfieldID fid_DocumentWriter_ocrlistener;
+static jfieldID fid_DocumentWriter_pointer;
 static jfieldID fid_Document_pointer;
-static jfieldID fid_FitzInputStream_pointer;
-static jfieldID fid_FitzInputStream_markpos;
+static jfieldID fid_DOM_pointer;
+static jfieldID fid_DOMAttribute_attribute;
+static jfieldID fid_DOMAttribute_value;
 static jfieldID fid_FitzInputStream_closed;
+static jfieldID fid_FitzInputStream_markpos;
+static jfieldID fid_FitzInputStream_pointer;
 static jfieldID fid_Font_pointer;
+static jfieldID fid_Story_pointer;
 static jfieldID fid_Image_pointer;
+static jfieldID fid_Link_pointer;
+static jfieldID fid_LinkDestination_chapter;
+static jfieldID fid_LinkDestination_height;
+static jfieldID fid_LinkDestination_page;
+static jfieldID fid_LinkDestination_type;
+static jfieldID fid_LinkDestination_width;
+static jfieldID fid_LinkDestination_x;
+static jfieldID fid_LinkDestination_y;
+static jfieldID fid_LinkDestination_zoom;
 static jfieldID fid_Matrix_a;
 static jfieldID fid_Matrix_b;
 static jfieldID fid_Matrix_c;
 static jfieldID fid_Matrix_d;
 static jfieldID fid_Matrix_e;
 static jfieldID fid_Matrix_f;
+static jfieldID fid_MultiArchive_pointer;
 static jfieldID fid_NativeDevice_nativeInfo;
 static jfieldID fid_NativeDevice_nativeResource;
+static jfieldID fid_OutlineIterator_pointer;
 static jfieldID fid_PDFAnnotation_pointer;
 static jfieldID fid_PDFDocument_pointer;
 static jfieldID fid_PDFGraftMap_pointer;
 static jfieldID fid_PDFObject_Null;
 static jfieldID fid_PDFObject_pointer;
 static jfieldID fid_PDFPage_pointer;
+static jfieldID fid_PDFWidget_fieldFlags;
+static jfieldID fid_PDFWidget_fieldType;
+static jfieldID fid_PDFWidget_maxLen;
+static jfieldID fid_PDFWidget_options;
+static jfieldID fid_PDFWidget_pointer;
+static jfieldID fid_PDFWidget_textFormat;
+static jfieldID fid_PKCS7DistinguishedName_c;
+static jfieldID fid_PKCS7DistinguishedName_cn;
+static jfieldID fid_PKCS7DistinguishedName_email;
+static jfieldID fid_PKCS7DistinguishedName_o;
+static jfieldID fid_PKCS7DistinguishedName_ou;
+static jfieldID fid_PKCS7Signer_pointer;
+static jfieldID fid_PKCS7Verifier_pointer;
 static jfieldID fid_Page_pointer;
 static jfieldID fid_Path_pointer;
 static jfieldID fid_Pixmap_pointer;
 static jfieldID fid_Point_x;
 static jfieldID fid_Point_y;
-static jfieldID fid_Quad_ul_x;
-static jfieldID fid_Quad_ul_y;
-static jfieldID fid_Quad_ur_x;
-static jfieldID fid_Quad_ur_y;
 static jfieldID fid_Quad_ll_x;
 static jfieldID fid_Quad_ll_y;
 static jfieldID fid_Quad_lr_x;
 static jfieldID fid_Quad_lr_y;
+static jfieldID fid_Quad_ul_x;
+static jfieldID fid_Quad_ul_y;
+static jfieldID fid_Quad_ur_x;
+static jfieldID fid_Quad_ur_y;
 static jfieldID fid_Rect_x0;
 static jfieldID fid_Rect_x1;
 static jfieldID fid_Rect_y0;
@@ -178,31 +257,51 @@ static jfieldID fid_StrokeState_pointer;
 static jfieldID fid_StructuredText_pointer;
 static jfieldID fid_TextBlock_bbox;
 static jfieldID fid_TextBlock_lines;
-static jfieldID fid_TextChar_quad;
 static jfieldID fid_TextChar_c;
+static jfieldID fid_TextChar_quad;
 static jfieldID fid_TextLine_bbox;
 static jfieldID fid_TextLine_chars;
+static jfieldID fid_TextWidgetCharLayout_advance;
+static jfieldID fid_TextWidgetCharLayout_index;
+static jfieldID fid_TextWidgetCharLayout_rect;
+static jfieldID fid_TextWidgetCharLayout_x;
+static jfieldID fid_TextWidgetLayout_invMatrix;
+static jfieldID fid_TextWidgetLayout_lines;
+static jfieldID fid_TextWidgetLayout_matrix;
+static jfieldID fid_TextWidgetLineLayout_chars;
+static jfieldID fid_TextWidgetLineLayout_fontSize;
+static jfieldID fid_TextWidgetLineLayout_index;
+static jfieldID fid_TextWidgetLineLayout_rect;
+static jfieldID fid_TextWidgetLineLayout_x;
+static jfieldID fid_TextWidgetLineLayout_y;
 static jfieldID fid_Text_pointer;
-static jfieldID fid_PDFWidget_fieldFlags;
-static jfieldID fid_PDFWidget_fieldType;
-static jfieldID fid_PDFWidget_maxLen;
-static jfieldID fid_PDFWidget_options;
-static jfieldID fid_PDFWidget_pointer;
-static jfieldID fid_PDFWidget_textFormat;
-static jfieldID fid_PKCS7DesignatedName_cn;
-static jfieldID fid_PKCS7DesignatedName_c;
-static jfieldID fid_PKCS7DesignatedName_o;
-static jfieldID fid_PKCS7DesignatedName_ou;
-static jfieldID fid_PKCS7DesignatedName_email;
-static jfieldID fid_PKCS7Signer_pointer;
-static jfieldID fid_PKCS7Verifier_pointer;
+static jfieldID fid_TreeArchive_pointer;
 
+static jmethodID mid_Archive_init;
+static jmethodID mid_ArrayList_add;
+static jmethodID mid_ArrayList_toArray;
+static jmethodID mid_ArrayList_init;
+static jmethodID mid_Buffer_init;
 static jmethodID mid_ColorSpace_fromPointer;
 static jmethodID mid_ColorSpace_init;
 static jmethodID mid_Context_Version_init;
+static jmethodID mid_Context_Log_error;
+static jmethodID mid_Context_Log_warning;
+static jmethodID mid_DefaultAppearance_init;
+static jmethodID mid_DefaultColorSpaces_init;
+static jmethodID mid_DefaultColorSpaces_getDefaultGray;
+static jmethodID mid_DefaultColorSpaces_getDefaultRGB;
+static jmethodID mid_DefaultColorSpaces_getDefaultCMYK;
+static jmethodID mid_DefaultColorSpaces_getOutputIntent;
+static jmethodID mid_DefaultColorSpaces_setDefaultGray;
+static jmethodID mid_DefaultColorSpaces_setDefaultRGB;
+static jmethodID mid_DefaultColorSpaces_setDefaultCMYK;
+static jmethodID mid_DefaultColorSpaces_setOutputIntent;
 static jmethodID mid_Device_beginGroup;
 static jmethodID mid_Device_beginLayer;
 static jmethodID mid_Device_beginMask;
+static jmethodID mid_Device_beginMetatext;
+static jmethodID mid_Device_beginStructure;
 static jmethodID mid_Device_beginTile;
 static jmethodID mid_Device_clipImageMask;
 static jmethodID mid_Device_clipPath;
@@ -212,6 +311,8 @@ static jmethodID mid_Device_clipText;
 static jmethodID mid_Device_endGroup;
 static jmethodID mid_Device_endLayer;
 static jmethodID mid_Device_endMask;
+static jmethodID mid_Device_endMetatext;
+static jmethodID mid_Device_endStructure;
 static jmethodID mid_Device_endTile;
 static jmethodID mid_Device_fillImage;
 static jmethodID mid_Device_fillImageMask;
@@ -221,26 +322,42 @@ static jmethodID mid_Device_fillText;
 static jmethodID mid_Device_ignoreText;
 static jmethodID mid_Device_init;
 static jmethodID mid_Device_popClip;
+static jmethodID mid_Device_renderFlags;
+static jmethodID mid_Device_setDefaultColorSpaces;
 static jmethodID mid_Device_strokePath;
 static jmethodID mid_Device_strokeText;
-static jmethodID mid_DocumentWriter_OCRListener_progress;
 static jmethodID mid_DisplayList_init;
-static jmethodID mid_FitzInputStream_init;
+static jmethodID mid_DocumentWriter_OCRListener_progress;
 static jmethodID mid_Document_init;
+static jmethodID mid_DOM_init;
+static jmethodID mid_DOMAttribute_init;
+static jmethodID mid_FitzInputStream_init;
 static jmethodID mid_Font_init;
 static jmethodID mid_Image_init;
 static jmethodID mid_Link_init;
 static jmethodID mid_Location_init;
 static jmethodID mid_Matrix_init;
+static jmethodID mid_MultiArchive_init;
 static jmethodID mid_NativeDevice_init;
 static jmethodID mid_Object_toString;
 static jmethodID mid_Outline_init;
+static jmethodID mid_OutlineItem_init;
+static jmethodID mid_OutlineIterator_init;
 static jmethodID mid_PDFAnnotation_init;
-static jmethodID mid_PDFDocument_init;
+static jmethodID mid_LinkDestination_init;
 static jmethodID mid_PDFDocument_JsEventListener_onAlert;
+static jmethodID mid_PDFDocument_PDFEmbeddedFileParams_init;
+static jmethodID mid_PDFDocument_init;
 static jmethodID mid_PDFGraftMap_init;
 static jmethodID mid_PDFObject_init;
 static jmethodID mid_PDFPage_init;
+static jmethodID mid_PDFWidget_init;
+static jmethodID mid_PKCS7DistinguishedName_init;
+static jmethodID mid_PKCS7Signer_maxDigest;
+static jmethodID mid_PKCS7Signer_name;
+static jmethodID mid_PKCS7Signer_sign;
+static jmethodID mid_PKCS7Verifier_checkCertificate;
+static jmethodID mid_PKCS7Verifier_checkDigest;
 static jmethodID mid_Page_init;
 static jmethodID mid_PathWalker_closePath;
 static jmethodID mid_PathWalker_curveTo;
@@ -252,30 +369,28 @@ static jmethodID mid_Point_init;
 static jmethodID mid_Quad_init;
 static jmethodID mid_Rect_init;
 static jmethodID mid_SeekableInputStream_read;
+static jmethodID mid_SeekableOutputStream_truncate;
 static jmethodID mid_SeekableOutputStream_write;
 static jmethodID mid_SeekableStream_position;
 static jmethodID mid_SeekableStream_seek;
 static jmethodID mid_Shade_init;
 static jmethodID mid_StrokeState_init;
-static jmethodID mid_StructuredText_init;
-static jmethodID mid_StructuredTextWalker_onImageBlock;
-static jmethodID mid_StructuredTextWalker_beginTextBlock;
-static jmethodID mid_StructuredTextWalker_endTextBlock;
 static jmethodID mid_StructuredTextWalker_beginLine;
+static jmethodID mid_StructuredTextWalker_beginTextBlock;
 static jmethodID mid_StructuredTextWalker_endLine;
+static jmethodID mid_StructuredTextWalker_endTextBlock;
 static jmethodID mid_StructuredTextWalker_onChar;
+static jmethodID mid_StructuredTextWalker_onImageBlock;
+static jmethodID mid_StructuredText_init;
 static jmethodID mid_TextBlock_init;
 static jmethodID mid_TextChar_init;
 static jmethodID mid_TextLine_init;
 static jmethodID mid_TextWalker_showGlyph;
+static jmethodID mid_TextWidgetCharLayout_init;
+static jmethodID mid_TextWidgetLayout_init;
+static jmethodID mid_TextWidgetLineLayout_init;
 static jmethodID mid_Text_init;
-static jmethodID mid_PDFWidget_init;
-static jmethodID mid_PKCS7Signer_maxDigest;
-static jmethodID mid_PKCS7Signer_name;
-static jmethodID mid_PKCS7Signer_sign;
-static jmethodID mid_PKCS7Verifier_checkCertificate;
-static jmethodID mid_PKCS7Verifier_checkDigest;
-static jmethodID mid_PKCS7DesignatedName_init;
+static jmethodID mid_TreeArchive_init;
 
 #ifdef _WIN32
 static DWORD context_key;
@@ -305,14 +420,99 @@ static int check_enums()
 	valid &= com_artifex_mupdf_fitz_Device_BLEND_COLOR == FZ_BLEND_COLOR;
 	valid &= com_artifex_mupdf_fitz_Device_BLEND_LUMINOSITY == FZ_BLEND_LUMINOSITY;
 
-	valid &= com_artifex_mupdf_fitz_Font_LATIN == PDF_SIMPLE_ENCODING_LATIN;
-	valid &= com_artifex_mupdf_fitz_Font_GREEK == PDF_SIMPLE_ENCODING_GREEK;
-	valid &= com_artifex_mupdf_fitz_Font_CYRILLIC == PDF_SIMPLE_ENCODING_CYRILLIC;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_MASK == FZ_DEVFLAG_MASK;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_COLOR == FZ_DEVFLAG_COLOR;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_UNCACHEABLE == FZ_DEVFLAG_UNCACHEABLE;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_FILLCOLOR_UNDEFINED == FZ_DEVFLAG_FILLCOLOR_UNDEFINED;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_STROKECOLOR_UNDEFINED == FZ_DEVFLAG_STROKECOLOR_UNDEFINED;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_STARTCAP_UNDEFINED == FZ_DEVFLAG_STARTCAP_UNDEFINED;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_DASHCAP_UNDEFINED == FZ_DEVFLAG_DASHCAP_UNDEFINED;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_ENDCAP_UNDEFINED == FZ_DEVFLAG_ENDCAP_UNDEFINED;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_LINEJOIN_UNDEFINED == FZ_DEVFLAG_LINEJOIN_UNDEFINED;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_MITERLIMIT_UNDEFINED == FZ_DEVFLAG_MITERLIMIT_UNDEFINED;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_LINEWIDTH_UNDEFINED == FZ_DEVFLAG_LINEWIDTH_UNDEFINED;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_BBOX_DEFINED == FZ_DEVFLAG_BBOX_DEFINED;
+	valid &= com_artifex_mupdf_fitz_Device_DEVICE_FLAG_GRIDFIT_AS_TILED == FZ_DEVFLAG_GRIDFIT_AS_TILED;
+
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_INVALID == FZ_STRUCTURE_INVALID;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_DOCUMENT == FZ_STRUCTURE_DOCUMENT;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_PART == FZ_STRUCTURE_PART;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_ART == FZ_STRUCTURE_ART;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_SECT == FZ_STRUCTURE_SECT;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_DIV == FZ_STRUCTURE_DIV;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_BLOCKQUOTE == FZ_STRUCTURE_BLOCKQUOTE;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_CAPTION == FZ_STRUCTURE_CAPTION;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_TOC == FZ_STRUCTURE_TOC;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_TOCI == FZ_STRUCTURE_TOCI;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_INDEX == FZ_STRUCTURE_INDEX;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_NONSTRUCT == FZ_STRUCTURE_NONSTRUCT;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_PRIVATE == FZ_STRUCTURE_PRIVATE;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_DOCUMENTFRAGMENT == FZ_STRUCTURE_DOCUMENTFRAGMENT;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_ASIDE == FZ_STRUCTURE_ASIDE;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_TITLE == FZ_STRUCTURE_TITLE;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_FENOTE == FZ_STRUCTURE_FENOTE;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_SUB == FZ_STRUCTURE_SUB;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_P == FZ_STRUCTURE_P;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_H == FZ_STRUCTURE_H;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_H1 == FZ_STRUCTURE_H1;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_H2 == FZ_STRUCTURE_H2;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_H3 == FZ_STRUCTURE_H3;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_H4 == FZ_STRUCTURE_H4;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_H5 == FZ_STRUCTURE_H5;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_H6 == FZ_STRUCTURE_H6;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_LIST == FZ_STRUCTURE_LIST;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_LISTITEM == FZ_STRUCTURE_LISTITEM;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_LABEL == FZ_STRUCTURE_LABEL;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_LISTBODY == FZ_STRUCTURE_LISTBODY;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_TABLE == FZ_STRUCTURE_TABLE;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_TR == FZ_STRUCTURE_TR;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_TH == FZ_STRUCTURE_TH;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_TD == FZ_STRUCTURE_TD;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_THEAD == FZ_STRUCTURE_THEAD;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_TBODY == FZ_STRUCTURE_TBODY;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_TFOOT == FZ_STRUCTURE_TFOOT;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_SPAN == FZ_STRUCTURE_SPAN;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_QUOTE == FZ_STRUCTURE_QUOTE;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_NOTE == FZ_STRUCTURE_NOTE;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_REFERENCE == FZ_STRUCTURE_REFERENCE;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_BIBENTRY == FZ_STRUCTURE_BIBENTRY;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_CODE == FZ_STRUCTURE_CODE;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_LINK == FZ_STRUCTURE_LINK;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_ANNOT == FZ_STRUCTURE_ANNOT;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_EM == FZ_STRUCTURE_EM;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_STRONG == FZ_STRUCTURE_STRONG;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_RUBY == FZ_STRUCTURE_RUBY;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_RB == FZ_STRUCTURE_RB;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_RT == FZ_STRUCTURE_RT;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_RP == FZ_STRUCTURE_RP;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_WARICHU == FZ_STRUCTURE_WARICHU;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_WT == FZ_STRUCTURE_WT;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_WP == FZ_STRUCTURE_WP;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_FIGURE == FZ_STRUCTURE_FIGURE;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_FORMULA == FZ_STRUCTURE_FORMULA;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_FORM == FZ_STRUCTURE_FORM;
+	valid &= com_artifex_mupdf_fitz_Device_STRUCTURE_ARTIFACT == FZ_STRUCTURE_ARTIFACT;
+
+	valid &= com_artifex_mupdf_fitz_Device_METATEXT_ACTUALTEXT == FZ_METATEXT_ACTUALTEXT;
+	valid &= com_artifex_mupdf_fitz_Device_METATEXT_ALT == FZ_METATEXT_ALT;
+	valid &= com_artifex_mupdf_fitz_Device_METATEXT_ABBREVIATION == FZ_METATEXT_ABBREVIATION;
+	valid &= com_artifex_mupdf_fitz_Device_METATEXT_TITLE == FZ_METATEXT_TITLE;
+
+	valid &= com_artifex_mupdf_fitz_Font_SIMPLE_ENCODING_LATIN == PDF_SIMPLE_ENCODING_LATIN;
+	valid &= com_artifex_mupdf_fitz_Font_SIMPLE_ENCODING_GREEK == PDF_SIMPLE_ENCODING_GREEK;
+	valid &= com_artifex_mupdf_fitz_Font_SIMPLE_ENCODING_CYRILLIC == PDF_SIMPLE_ENCODING_CYRILLIC;
 
 	valid &= com_artifex_mupdf_fitz_Font_ADOBE_CNS == FZ_ADOBE_CNS;
 	valid &= com_artifex_mupdf_fitz_Font_ADOBE_GB == FZ_ADOBE_GB;
 	valid &= com_artifex_mupdf_fitz_Font_ADOBE_JAPAN == FZ_ADOBE_JAPAN;
 	valid &= com_artifex_mupdf_fitz_Font_ADOBE_KOREA == FZ_ADOBE_KOREA;
+
+	valid &= com_artifex_mupdf_fitz_Page_MEDIA_BOX == FZ_MEDIA_BOX;
+	valid &= com_artifex_mupdf_fitz_Page_CROP_BOX == FZ_CROP_BOX;
+	valid &= com_artifex_mupdf_fitz_Page_ART_BOX == FZ_ART_BOX;
+	valid &= com_artifex_mupdf_fitz_Page_TRIM_BOX == FZ_TRIM_BOX;
+	valid &= com_artifex_mupdf_fitz_Page_BLEED_BOX == FZ_BLEED_BOX;
+	valid &= com_artifex_mupdf_fitz_Page_UNKNOWN_BOX == FZ_UNKNOWN_BOX;
 
 	valid &= com_artifex_mupdf_fitz_PDFAnnotation_LINE_ENDING_NONE == PDF_ANNOT_LE_NONE;
 	valid &= com_artifex_mupdf_fitz_PDFAnnotation_LINE_ENDING_SQUARE == PDF_ANNOT_LE_SQUARE;
@@ -324,6 +524,15 @@ static int check_enums()
 	valid &= com_artifex_mupdf_fitz_PDFAnnotation_LINE_ENDING_R_OPEN_ARROW == PDF_ANNOT_LE_R_OPEN_ARROW;
 	valid &= com_artifex_mupdf_fitz_PDFAnnotation_LINE_ENDING_R_CLOSED_ARROW == PDF_ANNOT_LE_R_CLOSED_ARROW;
 	valid &= com_artifex_mupdf_fitz_PDFAnnotation_LINE_ENDING_SLASH == PDF_ANNOT_LE_SLASH;
+
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_BORDER_STYLE_SOLID == PDF_BORDER_STYLE_SOLID;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_BORDER_STYLE_DASHED == PDF_BORDER_STYLE_DASHED;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_BORDER_STYLE_BEVELED == PDF_BORDER_STYLE_BEVELED;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_BORDER_STYLE_INSET == PDF_BORDER_STYLE_INSET;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_BORDER_STYLE_UNDERLINE == PDF_BORDER_STYLE_UNDERLINE;
+
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_BORDER_EFFECT_NONE == PDF_BORDER_EFFECT_NONE;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_BORDER_EFFECT_CLOUDY == PDF_BORDER_EFFECT_CLOUDY;
 
 	valid &= com_artifex_mupdf_fitz_PDFAnnotation_TYPE_TEXT == PDF_ANNOT_TEXT;
 	valid &= com_artifex_mupdf_fitz_PDFAnnotation_TYPE_LINK == PDF_ANNOT_LINK;
@@ -366,6 +575,47 @@ static int check_enums()
 	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IS_TOGGLE_NO_VIEW == PDF_ANNOT_IS_TOGGLE_NO_VIEW;
 	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IS_LOCKED_CONTENTS == PDF_ANNOT_IS_LOCKED_CONTENTS;
 
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IT_DEFAULT == PDF_ANNOT_IT_DEFAULT;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IT_FREETEXT_CALLOUT == PDF_ANNOT_IT_FREETEXT_CALLOUT;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IT_FREETEXT_TYPEWRITER == PDF_ANNOT_IT_FREETEXT_TYPEWRITER;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IT_LINE_ARROW == PDF_ANNOT_IT_LINE_ARROW;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IT_LINE_DIMENSION == PDF_ANNOT_IT_LINE_DIMENSION;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IT_POLYLINE_DIMENSION == PDF_ANNOT_IT_POLYLINE_DIMENSION;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IT_POLYGON_CLOUD == PDF_ANNOT_IT_POLYGON_CLOUD;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IT_POLYGON_DIMENSION == PDF_ANNOT_IT_POLYGON_DIMENSION;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IT_STAMP_IMAGE == PDF_ANNOT_IT_STAMP_IMAGE;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IT_STAMP_SNAPSHOT == PDF_ANNOT_IT_STAMP_SNAPSHOT;
+	valid &= com_artifex_mupdf_fitz_PDFAnnotation_IT_UNKNOWN == PDF_ANNOT_IT_UNKNOWN;
+
+	valid &= com_artifex_mupdf_fitz_PDFDocument_LANGUAGE_UNSET == FZ_LANG_UNSET;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_LANGUAGE_ur == FZ_LANG_ur;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_LANGUAGE_urd == FZ_LANG_urd;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_LANGUAGE_ko == FZ_LANG_ko;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_LANGUAGE_ja == FZ_LANG_ja;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_LANGUAGE_zh == FZ_LANG_zh;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_LANGUAGE_zh_Hans == FZ_LANG_zh_Hans;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_LANGUAGE_zh_Hant == FZ_LANG_zh_Hant;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_NOT_ZUGFERD == PDF_NOT_ZUGFERD;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_ZUGFERD_COMFORT == PDF_ZUGFERD_COMFORT;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_ZUGFERD_BASIC == PDF_ZUGFERD_BASIC;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_ZUGFERD_EXTENDED == PDF_ZUGFERD_EXTENDED;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_ZUGFERD_BASIC_WL == PDF_ZUGFERD_BASIC_WL;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_ZUGFERD_MINIMUM == PDF_ZUGFERD_MINIMUM;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_ZUGFERD_XRECHNUNG == PDF_ZUGFERD_XRECHNUNG;
+	valid &= com_artifex_mupdf_fitz_PDFDocument_ZUGFERD_UNKNOWN == PDF_ZUGFERD_UNKNOWN;
+
+	valid &= com_artifex_mupdf_fitz_Rect_MIN_INF_RECT == FZ_MIN_INF_RECT;
+	valid &= com_artifex_mupdf_fitz_Rect_MAX_INF_RECT == FZ_MAX_INF_RECT;
+
+	valid &= com_artifex_mupdf_fitz_LinkDestination_LINK_DEST_FIT == FZ_LINK_DEST_FIT;
+	valid &= com_artifex_mupdf_fitz_LinkDestination_LINK_DEST_FIT_B == FZ_LINK_DEST_FIT_B;
+	valid &= com_artifex_mupdf_fitz_LinkDestination_LINK_DEST_FIT_H == FZ_LINK_DEST_FIT_H;
+	valid &= com_artifex_mupdf_fitz_LinkDestination_LINK_DEST_FIT_BH == FZ_LINK_DEST_FIT_BH;
+	valid &= com_artifex_mupdf_fitz_LinkDestination_LINK_DEST_FIT_V == FZ_LINK_DEST_FIT_V;
+	valid &= com_artifex_mupdf_fitz_LinkDestination_LINK_DEST_FIT_BV == FZ_LINK_DEST_FIT_BV;
+	valid &= com_artifex_mupdf_fitz_LinkDestination_LINK_DEST_FIT_R == FZ_LINK_DEST_FIT_R;
+	valid &= com_artifex_mupdf_fitz_LinkDestination_LINK_DEST_XYZ == FZ_LINK_DEST_XYZ;
+
 	valid &= com_artifex_mupdf_fitz_StrokeState_LINE_CAP_BUTT == FZ_LINECAP_BUTT;
 	valid &= com_artifex_mupdf_fitz_StrokeState_LINE_CAP_ROUND == FZ_LINECAP_ROUND;
 	valid &= com_artifex_mupdf_fitz_StrokeState_LINE_CAP_SQUARE == FZ_LINECAP_SQUARE;
@@ -395,9 +645,56 @@ static int check_enums()
 	valid &= com_artifex_mupdf_fitz_PDFWidget_TX_FORMAT_DATE == PDF_WIDGET_TX_FORMAT_DATE;
 	valid &= com_artifex_mupdf_fitz_PDFWidget_TX_FORMAT_TIME == PDF_WIDGET_TX_FORMAT_TIME;
 
+	valid &= com_artifex_mupdf_fitz_PDFWidget_FIELD_IS_READ_ONLY == PDF_FIELD_IS_READ_ONLY;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_FIELD_IS_REQUIRED == PDF_FIELD_IS_REQUIRED;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_FIELD_IS_NO_EXPORT == PDF_FIELD_IS_NO_EXPORT;
+
+	valid &= com_artifex_mupdf_fitz_PDFWidget_TX_FIELD_IS_MULTILINE == PDF_TX_FIELD_IS_MULTILINE;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_TX_FIELD_IS_PASSWORD == PDF_TX_FIELD_IS_PASSWORD;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_TX_FIELD_IS_COMB == PDF_TX_FIELD_IS_COMB;
+
+	valid &= com_artifex_mupdf_fitz_PDFWidget_BTN_FIELD_IS_NO_TOGGLE_TO_OFF == PDF_BTN_FIELD_IS_NO_TOGGLE_TO_OFF;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_BTN_FIELD_IS_RADIO == PDF_BTN_FIELD_IS_RADIO;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_BTN_FIELD_IS_PUSHBUTTON == PDF_BTN_FIELD_IS_PUSHBUTTON;
+
+	valid &= com_artifex_mupdf_fitz_PDFWidget_CH_FIELD_IS_COMBO == PDF_CH_FIELD_IS_COMBO;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_CH_FIELD_IS_EDIT == PDF_CH_FIELD_IS_EDIT;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_CH_FIELD_IS_SORT == PDF_CH_FIELD_IS_SORT;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_CH_FIELD_IS_MULTI_SELECT == PDF_CH_FIELD_IS_MULTI_SELECT;
+
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_SHOW_LABELS == PDF_SIGNATURE_SHOW_LABELS;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_SHOW_DN == PDF_SIGNATURE_SHOW_DN;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_SHOW_DATE == PDF_SIGNATURE_SHOW_DATE;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_SHOW_TEXT_NAME == PDF_SIGNATURE_SHOW_TEXT_NAME;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_SHOW_GRAPHIC_NAME == PDF_SIGNATURE_SHOW_GRAPHIC_NAME;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_SHOW_LOGO == PDF_SIGNATURE_SHOW_LOGO;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_DEFAULT_APPEARANCE == PDF_SIGNATURE_DEFAULT_APPEARANCE;
+
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_ERROR_OKAY == PDF_SIGNATURE_ERROR_OKAY;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_ERROR_NO_SIGNATURES == PDF_SIGNATURE_ERROR_NO_SIGNATURES;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_ERROR_NO_CERTIFICATE == PDF_SIGNATURE_ERROR_NO_CERTIFICATE;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_ERROR_DIGEST_FAILURE == PDF_SIGNATURE_ERROR_DIGEST_FAILURE;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_ERROR_SELF_SIGNED == PDF_SIGNATURE_ERROR_SELF_SIGNED;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_ERROR_SELF_SIGNED_IN_CHAIN == PDF_SIGNATURE_ERROR_SELF_SIGNED_IN_CHAIN;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_ERROR_NOT_TRUSTED == PDF_SIGNATURE_ERROR_NOT_TRUSTED;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_ERROR_NOT_SIGNED == PDF_SIGNATURE_ERROR_NOT_SIGNED;
+	valid &= com_artifex_mupdf_fitz_PDFWidget_SIGNATURE_ERROR_UNKNOWN == PDF_SIGNATURE_ERROR_UNKNOWN;
+
 	valid &= com_artifex_mupdf_fitz_PDFPage_REDACT_IMAGE_NONE == PDF_REDACT_IMAGE_NONE;
 	valid &= com_artifex_mupdf_fitz_PDFPage_REDACT_IMAGE_REMOVE == PDF_REDACT_IMAGE_REMOVE;
 	valid &= com_artifex_mupdf_fitz_PDFPage_REDACT_IMAGE_PIXELS == PDF_REDACT_IMAGE_PIXELS;
+	valid &= com_artifex_mupdf_fitz_PDFPage_REDACT_IMAGE_REMOVE_UNLESS_INVISIBLE == PDF_REDACT_IMAGE_REMOVE_UNLESS_INVISIBLE;
+
+	valid &= com_artifex_mupdf_fitz_PDFPage_REDACT_LINE_ART_NONE == PDF_REDACT_LINE_ART_NONE;
+	valid &= com_artifex_mupdf_fitz_PDFPage_REDACT_LINE_ART_REMOVE_IF_TOUCHED == PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED;
+	valid &= com_artifex_mupdf_fitz_PDFPage_REDACT_LINE_ART_REMOVE_IF_COVERED == PDF_REDACT_LINE_ART_REMOVE_IF_COVERED;
+
+	valid &= com_artifex_mupdf_fitz_PDFPage_REDACT_TEXT_REMOVE == PDF_REDACT_TEXT_REMOVE;
+	valid &= com_artifex_mupdf_fitz_PDFPage_REDACT_TEXT_NONE == PDF_REDACT_TEXT_NONE;
+
+	valid &= com_artifex_mupdf_fitz_Pixmap_DESKEW_BORDER_INCREASE == FZ_DESKEW_BORDER_INCREASE;
+	valid &= com_artifex_mupdf_fitz_Pixmap_DESKEW_BORDER_MAINTAIN == FZ_DESKEW_BORDER_MAINTAIN;
+	valid &= com_artifex_mupdf_fitz_Pixmap_DESKEW_BORDER_DECREASE == FZ_DESKEW_BORDER_DECREASE;
 
 	return valid ? 1 : 0;
 }
@@ -414,10 +711,14 @@ static void jni_throw_imp(JNIEnv *env, jclass cls, const char *mess)
 
 static void jni_rethrow_imp(JNIEnv *env, fz_context *ctx)
 {
-	if (fz_caught(ctx) == FZ_ERROR_TRYLATER)
-		jni_throw_imp(env, cls_TryLaterException, fz_caught_message(ctx));
+	int code;
+	const char *message = fz_convert_error(ctx, &code);
+	if (code == FZ_ERROR_TRYLATER)
+		jni_throw_imp(env, cls_TryLaterException, message);
+	else if (code == FZ_ERROR_ABORT)
+		jni_throw_imp(env, cls_AbortException, message);
 	else
-		jni_throw_imp(env, cls_RuntimeException, fz_caught_message(ctx));
+		jni_throw_imp(env, cls_RuntimeException, message);
 }
 
 #define jni_rethrow_void(env, ctx) do { jni_rethrow_imp(env, ctx); return; } while (0);
@@ -635,7 +936,43 @@ static int find_fids(JNIEnv *env)
 	int err = 0;
 	int getvmErr;
 
+	/* Get and store the main JVM pointer. We need this in order to get
+	 * JNIEnv pointers on callback threads. This is specifically
+	 * guaranteed to be safe to store in a static var. */
+
+	getvmErr = (*env)->GetJavaVM(env, &jvm);
+	if (getvmErr < 0)
+	{
+		LOGE("cannot get JVM interface (error %d)", getvmErr);
+		return -1;
+	}
+
+	/* Look up Context first as it is required for logging. E.g. when
+	 * classes' statics are being executed which may cause logging. */
+
+	cls_Context = get_class(&err, env, PKG"Context");
+	fid_Context_log = get_static_field(&err, env, "log", "L"PKG"Context$Log;");
+	fid_Context_lock = get_static_field(&err, env, "lock", "Ljava/lang/Object;");
+
+	cls_Context_Log = get_class(&err, env, PKG"Context$Log");
+	mid_Context_Log_error = get_method(&err, env, "error", "(Ljava/lang/String;)V");
+	mid_Context_Log_warning = get_method(&err, env, "warning", "(Ljava/lang/String;)V");
+
+	cls_Context_Version = get_class(&err, env, PKG"Context$Version");
+	fid_Context_Version_major = get_field(&err, env, "major", "I");
+	fid_Context_Version_minor = get_field(&err, env, "minor", "I");
+	fid_Context_Version_patch = get_field(&err, env, "patch", "I");
+	fid_Context_Version_version = get_field(&err, env, "version", "Ljava/lang/String;");
+	mid_Context_Version_init = get_method(&err, env, "<init>", "()V");
+
+	/* MuPDF classes */
+
+	cls_Archive = get_class(&err, env, PKG"Archive");
+	mid_Archive_init = get_method(&err, env, "<init>", "(J)V");
+	fid_Archive_pointer = get_field(&err, env, "pointer", "J");
+
 	cls_Buffer = get_class(&err, env, PKG"Buffer");
+	mid_Buffer_init = get_method(&err, env, "<init>", "(J)V");
 	fid_Buffer_pointer = get_field(&err, env, "pointer", "J");
 
 	cls_ColorSpace = get_class(&err, env, PKG"ColorSpace");
@@ -643,15 +980,26 @@ static int find_fids(JNIEnv *env)
 	mid_ColorSpace_init = get_method(&err, env, "<init>", "(J)V");
 	mid_ColorSpace_fromPointer = get_static_method(&err, env, "fromPointer", "(J)L"PKG"ColorSpace;");
 
-	cls_Context_Version = get_class(&err, env, PKG"Context$Version");
-	fid_Context_Version_major = get_field(&err, env, "major", "I");
-	fid_Context_Version_minor = get_field(&err, env, "minor", "I");
-	fid_Context_Version_patch = get_field(&err, env, "patch", "I");
-	fid_Context_Version_version = get_field(&err, env, "version", "Ljava/lang/String;");
-	mid_Context_Version_init = get_method(&err, env, "<init>", "(L"PKG"Context;)V");
-
 	cls_Cookie = get_class(&err, env, PKG"Cookie");
 	fid_Cookie_pointer = get_field(&err, env, "pointer", "J");
+
+	cls_DefaultAppearance = get_class(&err, env, PKG"DefaultAppearance");
+	fid_DefaultAppearance_color = get_field(&err, env, "color", "[F");
+	fid_DefaultAppearance_font = get_field(&err, env, "font", "Ljava/lang/String;");
+	fid_DefaultAppearance_size = get_field(&err, env, "size", "F");
+	mid_DefaultAppearance_init = get_method(&err, env, "<init>", "()V");
+
+	cls_DefaultColorSpaces = get_class(&err, env, PKG"DefaultColorSpaces");
+	fid_DefaultColorSpaces_pointer = get_field(&err, env, "pointer", "J");
+	mid_DefaultColorSpaces_init = get_method(&err, env, "<init>", "(J)V");
+	mid_DefaultColorSpaces_setDefaultGray = get_method(&err, env, "setDefaultGray", "(L"PKG"ColorSpace;)V");
+	mid_DefaultColorSpaces_setDefaultRGB = get_method(&err, env, "setDefaultRGB", "(L"PKG"ColorSpace;)V");
+	mid_DefaultColorSpaces_setDefaultCMYK = get_method(&err, env, "setDefaultCMYK", "(L"PKG"ColorSpace;)V");
+	mid_DefaultColorSpaces_setOutputIntent = get_method(&err, env, "setOutputIntent", "(L"PKG"ColorSpace;)V");
+	mid_DefaultColorSpaces_getDefaultGray = get_method(&err, env, "getDefaultGray", "()L"PKG"ColorSpace;");
+	mid_DefaultColorSpaces_getDefaultRGB = get_method(&err, env, "getDefaultRGB", "()L"PKG"ColorSpace;");
+	mid_DefaultColorSpaces_getDefaultCMYK = get_method(&err, env, "getDefaultCMYK", "()L"PKG"ColorSpace;");
+	mid_DefaultColorSpaces_getOutputIntent = get_method(&err, env, "getOutputIntent", "()L"PKG"ColorSpace;");
 
 	cls_Device = get_class(&err, env, PKG"Device");
 	fid_Device_pointer = get_field(&err, env, "pointer", "J");
@@ -678,6 +1026,12 @@ static int find_fids(JNIEnv *env)
 	mid_Device_endGroup = get_method(&err, env, "endGroup", "()V");
 	mid_Device_beginTile = get_method(&err, env, "beginTile", "(L"PKG"Rect;L"PKG"Rect;FFL"PKG"Matrix;I)I");
 	mid_Device_endTile = get_method(&err, env, "endTile", "()V");
+	mid_Device_renderFlags = get_method(&err, env, "renderFlags", "(II)V");
+	mid_Device_setDefaultColorSpaces = get_method(&err, env, "setDefaultColorSpaces", "(L"PKG"DefaultColorSpaces;)V");
+	mid_Device_beginStructure = get_method(&err, env, "beginStructure", "(ILjava/lang/String;I)V");
+	mid_Device_endStructure = get_method(&err, env, "endStructure", "()V");
+	mid_Device_beginMetatext = get_method(&err, env, "beginMetatext", "(ILjava/lang/String;)V");
+	mid_Device_endMetatext = get_method(&err, env, "endMetatext", "()V");
 
 	cls_DisplayList = get_class(&err, env, PKG"DisplayList");
 	fid_DisplayList_pointer = get_field(&err, env, "pointer", "J");
@@ -692,7 +1046,16 @@ static int find_fids(JNIEnv *env)
 	fid_DocumentWriter_ocrlistener = get_field(&err, env, "ocrlistener", "J");
 
 	cls_DocumentWriter_OCRListener = get_class(&err, env, PKG"DocumentWriter$OCRListener");
-	mid_DocumentWriter_OCRListener_progress = get_method(&err, env, "progress", "(I)Z");
+	mid_DocumentWriter_OCRListener_progress = get_method(&err, env, "progress", "(II)Z");
+
+	cls_DOM = get_class(&err, env, PKG"DOM");
+	fid_DOM_pointer = get_field(&err, env, "pointer", "J");
+	mid_DOM_init = get_method(&err, env, "<init>", "(J)V");
+
+	cls_DOMAttribute = get_class(&err, env, PKG"DOM$DOMAttribute");
+	fid_DOMAttribute_attribute = get_field(&err, env, "attribute", "Ljava/lang/String;");
+	fid_DOMAttribute_value = get_field(&err, env, "value", "Ljava/lang/String;");
+	mid_DOMAttribute_init = get_method(&err, env, "<init>", "()V");
 
 	cls_FitzInputStream = get_class(&err, env, PKG"FitzInputStream");
 	fid_FitzInputStream_pointer = get_field(&err, env, "pointer", "J");
@@ -704,15 +1067,19 @@ static int find_fids(JNIEnv *env)
 	fid_Font_pointer = get_field(&err, env, "pointer", "J");
 	mid_Font_init = get_method(&err, env, "<init>", "(J)V");
 
+	cls_Story = get_class(&err, env, PKG"Story");
+	fid_Story_pointer = get_field(&err, env, "pointer", "J");
+
 	cls_Image = get_class(&err, env, PKG"Image");
 	fid_Image_pointer = get_field(&err, env, "pointer", "J");
 	mid_Image_init = get_method(&err, env, "<init>", "(J)V");
 
 	cls_Link = get_class(&err, env, PKG"Link");
-	mid_Link_init = get_method(&err, env, "<init>", "(L"PKG"Rect;Ljava/lang/String;)V");
+	fid_Link_pointer = get_field(&err, env, "pointer", "J");
+	mid_Link_init = get_method(&err, env, "<init>", "(J)V");
 
 	cls_Location = get_class(&err, env, PKG"Location");
-	mid_Location_init = get_method(&err, env, "<init>", "(IIFF)V");
+	mid_Location_init = get_method(&err, env, "<init>", "(II)V");
 
 	cls_Matrix = get_class(&err, env, PKG"Matrix");
 	fid_Matrix_a = get_field(&err, env, "a", "F");
@@ -723,6 +1090,10 @@ static int find_fids(JNIEnv *env)
 	fid_Matrix_f = get_field(&err, env, "f", "F");
 	mid_Matrix_init = get_method(&err, env, "<init>", "(FFFFFF)V");
 
+	cls_MultiArchive = get_class(&err, env, PKG"MultiArchive");
+	mid_MultiArchive_init = get_method(&err, env, "<init>", "(J)V");
+	fid_MultiArchive_pointer = get_field(&err, env, "pointer", "J");
+
 	cls_NativeDevice = get_class(&err, env, PKG"NativeDevice");
 	fid_NativeDevice_nativeResource = get_field(&err, env, "nativeResource", "Ljava/lang/Object;");
 	fid_NativeDevice_nativeInfo = get_field(&err, env, "nativeInfo", "J");
@@ -730,6 +1101,13 @@ static int find_fids(JNIEnv *env)
 
 	cls_Outline = get_class(&err, env, PKG"Outline");
 	mid_Outline_init = get_method(&err, env, "<init>", "(Ljava/lang/String;Ljava/lang/String;[L"PKG"Outline;)V");
+
+	cls_OutlineItem = get_class(&err, env, PKG"OutlineIterator$OutlineItem");
+	mid_OutlineItem_init = get_method(&err, env, "<init>", "(Ljava/lang/String;Ljava/lang/String;Z)V");
+
+	cls_OutlineIterator = get_class(&err, env, PKG"OutlineIterator");
+	fid_OutlineIterator_pointer = get_field(&err, env, "pointer", "J");
+	mid_OutlineIterator_init = get_method(&err, env, "<init>", "(J)V");
 
 	cls_Page = get_class(&err, env, PKG"Page");
 	fid_Page_pointer = get_field(&err, env, "pointer", "J");
@@ -753,8 +1131,26 @@ static int find_fids(JNIEnv *env)
 	fid_PDFDocument_pointer = get_field(&err, env, "pointer", "J");
 	mid_PDFDocument_init = get_method(&err, env, "<init>", "(J)V");
 
+	cls_LinkDestination = get_class(&err, env, PKG"LinkDestination");
+	mid_LinkDestination_init = get_method(&err, env, "<init>", "(IIIFFFFF)V");
+	fid_LinkDestination_chapter = get_field(&err, env, "chapter", "I");
+	fid_LinkDestination_page = get_field(&err, env, "page", "I");
+	fid_LinkDestination_type = get_field(&err, env, "type", "I");
+	fid_LinkDestination_x = get_field(&err, env, "x", "F");
+	fid_LinkDestination_y = get_field(&err, env, "y", "F");
+	fid_LinkDestination_width = get_field(&err, env, "width", "F");
+	fid_LinkDestination_height = get_field(&err, env, "height", "F");
+	fid_LinkDestination_zoom = get_field(&err, env, "zoom", "F");
+
 	cls_PDFDocument_JsEventListener = get_class(&err, env, PKG"PDFDocument$JsEventListener");
-	mid_PDFDocument_JsEventListener_onAlert = get_method(&err, env, "onAlert", "(Ljava/lang/String;)V");
+	mid_PDFDocument_JsEventListener_onAlert = get_method(&err, env, "onAlert", "(L"PKG"PDFDocument;Ljava/lang/String;Ljava/lang/String;IIZLjava/lang/String;Z)L"PKG"PDFDocument$JsEventListener$AlertResult;");
+
+	cls_PDFDocument_PDFEmbeddedFileParams = get_class(&err, env, PKG"PDFDocument$PDFEmbeddedFileParams");
+	mid_PDFDocument_PDFEmbeddedFileParams_init = get_method(&err, env, "<init>", "(Ljava/lang/String;Ljava/lang/String;IJJ)V");
+
+	cls_AlertResult = get_class(&err, env, PKG"PDFDocument$JsEventListener$AlertResult");
+	fid_AlertResult_buttonPressed = get_field(&err, env, "buttonPressed", "I");
+	fid_AlertResult_checkboxChecked = get_field(&err, env, "checkboxChecked", "Z");
 
 	cls_PDFGraftMap = get_class(&err, env, PKG"PDFGraftMap");
 	fid_PDFGraftMap_pointer = get_field(&err, env, "pointer", "J");
@@ -768,6 +1164,34 @@ static int find_fids(JNIEnv *env)
 	cls_PDFPage = get_class(&err, env, PKG"PDFPage");
 	fid_PDFPage_pointer = get_field(&err, env, "pointer", "J");
 	mid_PDFPage_init = get_method(&err, env, "<init>", "(J)V");
+
+	cls_PDFWidget = get_class(&err, env, PKG"PDFWidget");
+	fid_PDFWidget_pointer = get_field(&err, env, "pointer", "J");
+	fid_PDFWidget_fieldType = get_field(&err, env, "fieldType", "I");
+	fid_PDFWidget_textFormat = get_field(&err, env, "textFormat", "I");
+	fid_PDFWidget_maxLen = get_field(&err, env, "maxLen", "I");
+	fid_PDFWidget_fieldFlags = get_field(&err, env, "fieldFlags", "I");
+	fid_PDFWidget_options = get_field(&err, env, "options", "[Ljava/lang/String;");
+	mid_PDFWidget_init = get_method(&err, env, "<init>", "(J)V");
+
+	cls_PKCS7Signer = get_class(&err, env, PKG"PKCS7Signer");
+	fid_PKCS7Signer_pointer = get_field(&err, env, "pointer", "J");
+	mid_PKCS7Signer_name = get_method(&err, env, "name", "()L"PKG"PKCS7DistinguishedName;");
+	mid_PKCS7Signer_sign = get_method(&err, env, "sign", "(L"PKG"FitzInputStream;)[B");
+	mid_PKCS7Signer_maxDigest = get_method(&err, env, "maxDigest", "()I");
+
+	cls_PKCS7Verifier = get_class(&err, env, PKG"PKCS7Verifier");
+	fid_PKCS7Verifier_pointer = get_field(&err, env, "pointer", "J");
+	mid_PKCS7Verifier_checkCertificate = get_method(&err, env, "checkCertificate", "([B)I");
+	mid_PKCS7Verifier_checkDigest = get_method(&err, env, "checkDigest", "(L"PKG"FitzInputStream;[B)I");
+
+	cls_PKCS7DistinguishedName = get_class(&err, env, PKG"PKCS7DistinguishedName");
+	fid_PKCS7DistinguishedName_cn = get_field(&err, env, "cn", "Ljava/lang/String;");
+	fid_PKCS7DistinguishedName_c = get_field(&err, env, "c", "Ljava/lang/String;");
+	fid_PKCS7DistinguishedName_o = get_field(&err, env, "o", "Ljava/lang/String;");
+	fid_PKCS7DistinguishedName_ou = get_field(&err, env, "ou", "Ljava/lang/String;");
+	fid_PKCS7DistinguishedName_email = get_field(&err, env, "email", "Ljava/lang/String;");
+	mid_PKCS7DistinguishedName_init = get_method(&err, env, "<init>", "()V");
 
 	cls_Pixmap = get_class(&err, env, PKG"Pixmap");
 	fid_Pixmap_pointer = get_field(&err, env, "pointer", "J");
@@ -789,6 +1213,8 @@ static int find_fids(JNIEnv *env)
 	fid_Quad_lr_y = get_field(&err, env, "lr_y", "F");
 	mid_Quad_init = get_method(&err, env, "<init>", "(FFFFFFFF)V");
 
+	cls_ArrayOfQuad = get_class(&err, env, "[L"PKG"Quad;");
+
 	cls_Rect = get_class(&err, env, PKG"Rect");
 	fid_Rect_x0 = get_field(&err, env, "x0", "F");
 	fid_Rect_x1 = get_field(&err, env, "x1", "F");
@@ -800,6 +1226,7 @@ static int find_fids(JNIEnv *env)
 	mid_SeekableInputStream_read = get_method(&err, env, "read", "([B)I");
 
 	cls_SeekableOutputStream = get_class(&err, env, PKG"SeekableOutputStream");
+	mid_SeekableOutputStream_truncate = get_method(&err, env, "truncate", "()V");
 	mid_SeekableOutputStream_write = get_method(&err, env, "write", "([BII)V");
 
 	cls_SeekableStream = get_class(&err, env, PKG"SeekableStream");
@@ -824,7 +1251,7 @@ static int find_fids(JNIEnv *env)
 	mid_StructuredTextWalker_onImageBlock = get_method(&err, env, "onImageBlock", "(L"PKG"Rect;L"PKG"Matrix;L"PKG"Image;)V");
 	mid_StructuredTextWalker_beginTextBlock = get_method(&err, env, "beginTextBlock", "(L"PKG"Rect;)V");
 	mid_StructuredTextWalker_endTextBlock = get_method(&err, env, "endTextBlock", "()V");
-	mid_StructuredTextWalker_beginLine = get_method(&err, env, "beginLine", "(L"PKG"Rect;I)V");
+	mid_StructuredTextWalker_beginLine = get_method(&err, env, "beginLine", "(L"PKG"Rect;IL"PKG"Point;)V");
 	mid_StructuredTextWalker_endLine = get_method(&err, env, "endLine", "()V");
 	mid_StructuredTextWalker_onChar = get_method(&err, env, "onChar", "(IL"PKG"Point;L"PKG"Font;FL"PKG"Quad;)V");
 
@@ -835,49 +1262,48 @@ static int find_fids(JNIEnv *env)
 	cls_TextBlock = get_class(&err, env, PKG"StructuredText$TextBlock");
 	fid_TextBlock_bbox = get_field(&err, env, "bbox", "L"PKG"Rect;");
 	fid_TextBlock_lines = get_field(&err, env, "lines", "[L"PKG"StructuredText$TextLine;");
-	mid_TextBlock_init = get_method(&err, env, "<init>", "(L"PKG"StructuredText;)V");
+	mid_TextBlock_init = get_method(&err, env, "<init>", "()V");
 
 	cls_TextChar = get_class(&err, env, PKG"StructuredText$TextChar");
 	fid_TextChar_quad = get_field(&err, env, "quad", "L"PKG"Quad;");
 	fid_TextChar_c = get_field(&err, env, "c", "I");
-	mid_TextChar_init = get_method(&err, env, "<init>", "(L"PKG"StructuredText;)V");
+	mid_TextChar_init = get_method(&err, env, "<init>", "()V");
 
 	cls_TextLine = get_class(&err, env, PKG"StructuredText$TextLine");
 	fid_TextLine_bbox = get_field(&err, env, "bbox", "L"PKG"Rect;");
 	fid_TextLine_chars = get_field(&err, env, "chars", "[L"PKG"StructuredText$TextChar;");
-	mid_TextLine_init = get_method(&err, env, "<init>", "(L"PKG"StructuredText;)V");
+	mid_TextLine_init = get_method(&err, env, "<init>", "()V");
 
 	cls_TextWalker = get_class(&err, env, PKG"TextWalker");
 	mid_TextWalker_showGlyph = get_method(&err, env, "showGlyph", "(L"PKG"Font;L"PKG"Matrix;IIZ)V");
 
-	cls_PDFWidget = get_class(&err, env, PKG"PDFWidget");
-	fid_PDFWidget_pointer = get_field(&err, env, "pointer", "J");
-	fid_PDFWidget_fieldType = get_field(&err, env, "fieldType", "I");
-	fid_PDFWidget_textFormat = get_field(&err, env, "textFormat", "I");
-	fid_PDFWidget_maxLen = get_field(&err, env, "maxLen", "I");
-	fid_PDFWidget_fieldFlags = get_field(&err, env, "fieldFlags", "I");
-	fid_PDFWidget_options = get_field(&err, env, "options", "[Ljava/lang/String;");
-	mid_PDFWidget_init = get_method(&err, env, "<init>", "(J)V");
+	cls_TextWidgetLayout = get_class(&err, env, PKG"PDFWidget$TextWidgetLayout");
+	fid_TextWidgetLayout_matrix = get_field(&err, env, "matrix", "L"PKG"Matrix;");
+	fid_TextWidgetLayout_invMatrix = get_field(&err, env, "invMatrix", "L"PKG"Matrix;");
+	fid_TextWidgetLayout_lines = get_field(&err, env, "lines", "[L"PKG"PDFWidget$TextWidgetLineLayout;");
+	mid_TextWidgetLayout_init = get_method(&err, env, "<init>", "()V");
 
-	cls_PKCS7Signer = get_class(&err, env, PKG"PKCS7Signer");
-	fid_PKCS7Signer_pointer = get_field(&err, env, "pointer", "J");
-	mid_PKCS7Signer_name = get_method(&err, env, "name", "()L"PKG"PKCS7DesignatedName;");
-	mid_PKCS7Signer_sign = get_method(&err, env, "sign", "(L"PKG"FitzInputStream;)[B");
-	mid_PKCS7Signer_maxDigest = get_method(&err, env, "maxDigest", "()I");
+	cls_TextWidgetLineLayout = get_class(&err, env, PKG"PDFWidget$TextWidgetLineLayout");
+	fid_TextWidgetLineLayout_x = get_field(&err, env, "x", "F");
+	fid_TextWidgetLineLayout_y = get_field(&err, env, "y", "F");
+	fid_TextWidgetLineLayout_fontSize = get_field(&err, env, "fontSize", "F");
+	fid_TextWidgetLineLayout_index = get_field(&err, env, "index", "I");
+	fid_TextWidgetLineLayout_rect = get_field(&err, env, "rect", "L"PKG"Rect;");
+	fid_TextWidgetLineLayout_chars = get_field(&err, env, "chars", "[L"PKG"PDFWidget$TextWidgetCharLayout;");
+	mid_TextWidgetLineLayout_init = get_method(&err, env, "<init>", "()V");
 
-	cls_PKCS7Verifier = get_class(&err, env, PKG"PKCS7Verifier");
-	fid_PKCS7Verifier_pointer = get_field(&err, env, "pointer", "J");
-	mid_PKCS7Verifier_checkCertificate = get_method(&err, env, "checkCertificate", "([B)I");
-	mid_PKCS7Verifier_checkDigest = get_method(&err, env, "checkDigest", "(L"PKG"FitzInputStream;[B)I");
+	cls_TextWidgetCharLayout = get_class(&err, env, PKG"PDFWidget$TextWidgetCharLayout");
+	fid_TextWidgetCharLayout_x = get_field(&err, env, "x", "F");
+	fid_TextWidgetCharLayout_advance = get_field(&err, env, "advance", "F");
+	fid_TextWidgetCharLayout_index = get_field(&err, env, "index", "I");
+	fid_TextWidgetCharLayout_rect = get_field(&err, env, "rect", "L"PKG"Rect;");
+	mid_TextWidgetCharLayout_init = get_method(&err, env, "<init>", "()V");
 
-	cls_PKCS7DesignatedName = get_class(&err, env, PKG"PKCS7DesignatedName");
-	fid_PKCS7DesignatedName_cn = get_field(&err, env, "cn", "Ljava/lang/String;");
-	fid_PKCS7DesignatedName_c = get_field(&err, env, "c", "Ljava/lang/String;");
-	fid_PKCS7DesignatedName_o = get_field(&err, env, "o", "Ljava/lang/String;");
-	fid_PKCS7DesignatedName_ou = get_field(&err, env, "ou", "Ljava/lang/String;");
-	fid_PKCS7DesignatedName_email = get_field(&err, env, "email", "Ljava/lang/String;");
-	mid_PKCS7DesignatedName_init = get_method(&err, env, "<init>", "()V");
+	cls_TreeArchive = get_class(&err, env, PKG"TreeArchive");
+	mid_TreeArchive_init = get_method(&err, env, "<init>", "(J)V");
+	fid_TreeArchive_pointer = get_field(&err, env, "pointer", "J");
 
+	cls_AbortException = get_class(&err, env, PKG"AbortException");
 	cls_TryLaterException = get_class(&err, env, PKG"TryLaterException");
 
 	/* Standard Java classes */
@@ -897,20 +1323,14 @@ static int find_fids(JNIEnv *env)
 
 	cls_OutOfMemoryError = get_class(&err, env, "java/lang/OutOfMemoryError");
 
+	cls_ArrayList = get_class(&err, env, "java/util/ArrayList");
+	mid_ArrayList_init = get_method(&err, env, "<init>", "()V");
+	mid_ArrayList_add = get_method(&err, env, "add", "(Ljava/lang/Object;)Z");
+	mid_ArrayList_toArray = get_method(&err, env, "toArray", "()[Ljava/lang/Object;");
+
 	if (err)
 	{
 		LOGE("one or more class, member or field IDs could not be found");
-		return -1;
-	}
-
-	/* Get and store the main JVM pointer. We need this in order to get
-	 * JNIEnv pointers on callback threads. This is specifically
-	 * guaranteed to be safe to store in a static var. */
-
-	getvmErr = (*env)->GetJavaVM(env, &jvm);
-	if (getvmErr < 0)
-	{
-		LOGE("cannot get JVM interface (error %d)", getvmErr);
 		return -1;
 	}
 
@@ -920,7 +1340,7 @@ static int find_fids(JNIEnv *env)
 /* When making callbacks from C to java, we may be called on threads
  * other than the foreground. As such, we have no JNIEnv. This function
  * handles getting us the required environment */
-static JNIEnv *jni_attach_thread(fz_context *ctx, jboolean *detach)
+static JNIEnv *jni_attach_thread(jboolean *detach)
 {
 	JNIEnv *env = NULL;
 	int state;
@@ -946,47 +1366,68 @@ static void jni_detach_thread(jboolean detach)
 
 static void lose_fids(JNIEnv *env)
 {
+	(*env)->DeleteGlobalRef(env, cls_AbortException);
+	(*env)->DeleteGlobalRef(env, cls_AlertResult);
+	(*env)->DeleteGlobalRef(env, cls_Archive);
+	(*env)->DeleteGlobalRef(env, cls_ArrayList);
+	(*env)->DeleteGlobalRef(env, cls_ArrayOfQuad);
 	(*env)->DeleteGlobalRef(env, cls_Buffer);
 	(*env)->DeleteGlobalRef(env, cls_ColorSpace);
+	(*env)->DeleteGlobalRef(env, cls_Context);
+	(*env)->DeleteGlobalRef(env, cls_Context_Log);
 	(*env)->DeleteGlobalRef(env, cls_Context_Version);
 	(*env)->DeleteGlobalRef(env, cls_Cookie);
+	(*env)->DeleteGlobalRef(env, cls_DefaultAppearance);
+	(*env)->DeleteGlobalRef(env, cls_DefaultColorSpaces);
 	(*env)->DeleteGlobalRef(env, cls_Device);
 	(*env)->DeleteGlobalRef(env, cls_DisplayList);
 	(*env)->DeleteGlobalRef(env, cls_Document);
 	(*env)->DeleteGlobalRef(env, cls_DocumentWriter);
+	(*env)->DeleteGlobalRef(env, cls_DOM);
+	(*env)->DeleteGlobalRef(env, cls_DOMAttribute);
 	(*env)->DeleteGlobalRef(env, cls_FitzInputStream);
 	(*env)->DeleteGlobalRef(env, cls_FloatArray);
 	(*env)->DeleteGlobalRef(env, cls_Font);
+	(*env)->DeleteGlobalRef(env, cls_Story);
+	(*env)->DeleteGlobalRef(env, cls_IOException);
 	(*env)->DeleteGlobalRef(env, cls_IllegalArgumentException);
 	(*env)->DeleteGlobalRef(env, cls_Image);
 	(*env)->DeleteGlobalRef(env, cls_IndexOutOfBoundsException);
 	(*env)->DeleteGlobalRef(env, cls_IntegerArray);
-	(*env)->DeleteGlobalRef(env, cls_IOException);
 	(*env)->DeleteGlobalRef(env, cls_Link);
+	(*env)->DeleteGlobalRef(env, cls_LinkDestination);
 	(*env)->DeleteGlobalRef(env, cls_Location);
 	(*env)->DeleteGlobalRef(env, cls_Matrix);
+	(*env)->DeleteGlobalRef(env, cls_MultiArchive);
 	(*env)->DeleteGlobalRef(env, cls_NativeDevice);
 	(*env)->DeleteGlobalRef(env, cls_NullPointerException);
 	(*env)->DeleteGlobalRef(env, cls_Object);
-	(*env)->DeleteGlobalRef(env, cls_Outline);
 	(*env)->DeleteGlobalRef(env, cls_OutOfMemoryError);
-	(*env)->DeleteGlobalRef(env, cls_Page);
-	(*env)->DeleteGlobalRef(env, cls_Path);
-	(*env)->DeleteGlobalRef(env, cls_PathWalker);
+	(*env)->DeleteGlobalRef(env, cls_Outline);
+	(*env)->DeleteGlobalRef(env, cls_OutlineItem);
+	(*env)->DeleteGlobalRef(env, cls_OutlineIterator);
 	(*env)->DeleteGlobalRef(env, cls_PDFAnnotation);
 	(*env)->DeleteGlobalRef(env, cls_PDFDocument);
 	(*env)->DeleteGlobalRef(env, cls_PDFDocument_JsEventListener);
-	(*env)->DeleteGlobalRef(env, cls_PDFPage);
+	(*env)->DeleteGlobalRef(env, cls_PDFDocument_PDFEmbeddedFileParams);
 	(*env)->DeleteGlobalRef(env, cls_PDFGraftMap);
 	(*env)->DeleteGlobalRef(env, cls_PDFObject);
+	(*env)->DeleteGlobalRef(env, cls_PDFPage);
+	(*env)->DeleteGlobalRef(env, cls_PDFWidget);
+	(*env)->DeleteGlobalRef(env, cls_PKCS7DistinguishedName);
+	(*env)->DeleteGlobalRef(env, cls_PKCS7Signer);
+	(*env)->DeleteGlobalRef(env, cls_PKCS7Verifier);
+	(*env)->DeleteGlobalRef(env, cls_Page);
+	(*env)->DeleteGlobalRef(env, cls_Path);
+	(*env)->DeleteGlobalRef(env, cls_PathWalker);
 	(*env)->DeleteGlobalRef(env, cls_Pixmap);
 	(*env)->DeleteGlobalRef(env, cls_Point);
 	(*env)->DeleteGlobalRef(env, cls_Quad);
 	(*env)->DeleteGlobalRef(env, cls_Rect);
 	(*env)->DeleteGlobalRef(env, cls_RuntimeException);
-	(*env)->DeleteGlobalRef(env, cls_SeekableStream);
 	(*env)->DeleteGlobalRef(env, cls_SeekableInputStream);
 	(*env)->DeleteGlobalRef(env, cls_SeekableOutputStream);
+	(*env)->DeleteGlobalRef(env, cls_SeekableStream);
 	(*env)->DeleteGlobalRef(env, cls_Shade);
 	(*env)->DeleteGlobalRef(env, cls_String);
 	(*env)->DeleteGlobalRef(env, cls_StrokeState);
@@ -997,14 +1438,13 @@ static void lose_fids(JNIEnv *env)
 	(*env)->DeleteGlobalRef(env, cls_TextChar);
 	(*env)->DeleteGlobalRef(env, cls_TextLine);
 	(*env)->DeleteGlobalRef(env, cls_TextWalker);
+	(*env)->DeleteGlobalRef(env, cls_TextWidgetCharLayout);
+	(*env)->DeleteGlobalRef(env, cls_TextWidgetLayout);
+	(*env)->DeleteGlobalRef(env, cls_TextWidgetLineLayout);
+	(*env)->DeleteGlobalRef(env, cls_TreeArchive);
 	(*env)->DeleteGlobalRef(env, cls_TryLaterException);
 	(*env)->DeleteGlobalRef(env, cls_UnsupportedOperationException);
-	(*env)->DeleteGlobalRef(env, cls_PDFWidget);
-	(*env)->DeleteGlobalRef(env, cls_PKCS7Signer);
-	(*env)->DeleteGlobalRef(env, cls_PKCS7Verifier);
-	(*env)->DeleteGlobalRef(env, cls_PKCS7DesignatedName);
 }
-
 
 JNIEXPORT jint JNICALL
 JNI_OnLoad(JavaVM *vm, void *reserved)
@@ -1045,22 +1485,29 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved)
 #endif
 
 #include "jni/wrap.c"
+#include "jni/helpers.c"
 
 #include "jni/context.c"
 #include "jni/device.c"
 #include "jni/nativedevice.c"
 
+#include "jni/archive.c"
 #include "jni/buffer.c"
 #include "jni/colorspace.c"
 #include "jni/cookie.c"
+#include "jni/defaultcolorspaces.c"
 #include "jni/displaylist.c"
 #include "jni/displaylistdevice.c"
 #include "jni/document.c"
 #include "jni/documentwriter.c"
+#include "jni/dom.c"
 #include "jni/drawdevice.c"
 #include "jni/fitzinputstream.c"
 #include "jni/font.c"
 #include "jni/image.c"
+#include "jni/link.c"
+#include "jni/multiarchive.c"
+#include "jni/outlineiterator.c"
 #include "jni/page.c"
 #include "jni/path.c"
 #include "jni/pdfannotation.c"
@@ -1074,9 +1521,11 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved)
 #include "jni/pkcs7verifier.c"
 #include "jni/rect.c"
 #include "jni/shade.c"
+#include "jni/story.c"
 #include "jni/strokestate.c"
 #include "jni/structuredtext.c"
 #include "jni/text.c"
+#include "jni/treearchive.c"
 
 #ifdef HAVE_ANDROID
 #include "jni/android/androiddrawdevice.c"

@@ -1,7 +1,30 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_STRING_H
 #define MUPDF_FITZ_STRING_H
 
 #include "mupdf/fitz/system.h"
+#include "mupdf/fitz/context.h"
 
 /* The Unicode character used to incoming character whose value is
  * unknown or unrepresentable. */
@@ -76,9 +99,44 @@ void *fz_memmem(const void *haystack, size_t haystacklen, const void *needle, si
 void fz_dirname(char *dir, const char *path, size_t dirsize);
 
 /**
-	decode url escapes.
+	Find the filename component in a path.
+*/
+const char *fz_basename(const char *path);
+
+/**
+	Like fz_decode_uri_component but in-place.
 */
 char *fz_urldecode(char *url);
+
+/**
+ * Return a new string representing the unencoded version of the given URI.
+ * This decodes all escape sequences except those that would result in a reserved
+ * character that are part of the URI syntax (; / ? : @ & = + $ , #).
+ */
+char *fz_decode_uri(fz_context *ctx, const char *s);
+
+/**
+ * Return a new string representing the unencoded version of the given URI component.
+ * This decodes all escape sequences!
+ */
+char *fz_decode_uri_component(fz_context *ctx, const char *s);
+
+/**
+ * Return a new string representing the provided string encoded as a URI.
+ */
+char *fz_encode_uri(fz_context *ctx, const char *s);
+
+/**
+ * Return a new string representing the provided string encoded as an URI component.
+ * This also encodes the special reserved characters (; / ? : @ & = + $ , #).
+ */
+char *fz_encode_uri_component(fz_context *ctx, const char *s);
+
+/**
+ * Return a new string representing the provided string encoded as an URI path name.
+ * This also encodes the special reserved characters except /.
+ */
+char *fz_encode_uri_pathname(fz_context *ctx, const char *s);
 
 /**
 	create output file name using a template.
@@ -98,6 +156,14 @@ void fz_format_output_path(fz_context *ctx, char *path, size_t size, const char 
 	"..". Overwrites the string in place.
 */
 char *fz_cleanname(char *name);
+
+/**
+	rewrite path to the shortest string that names the same path.
+
+	Eliminates multiple and trailing slashes, interprets "." and
+	"..". Allocates a new string that the caller must free.
+*/
+char *fz_cleanname_strdup(fz_context *ctx, const char *name);
 
 /**
 	Resolve a path to an absolute file name.
@@ -150,6 +216,30 @@ int fz_runetochar(char *str, int rune);
 int fz_runelen(int rune);
 
 /**
+	Compute the index of a rune in a string.
+
+	str: Pointer to beginning of a string.
+
+	p: Pointer to a char in str.
+
+	Returns the index of the rune pointed to by p in str.
+*/
+int fz_runeidx(const char *str, const char *p);
+
+/**
+	Obtain a pointer to the char representing the rune
+	at a given index.
+
+	str: Pointer to beginning of a string.
+
+	idx: Index of a rune to return a char pointer to.
+
+	Returns a pointer to the char where the desired rune starts,
+	or NULL if the string ends before the index is reached.
+*/
+const char *fz_runeptr(const char *str, int idx);
+
+/**
 	Count how many runes the UTF-8 encoded string
 	consists of.
 
@@ -158,6 +248,17 @@ int fz_runelen(int rune);
 	Returns the number of runes in the string.
 */
 int fz_utflen(const char *s);
+
+/*
+	Convert a wchar string into a new heap allocated utf8 one.
+*/
+char *fz_utf8_from_wchar(fz_context *ctx, const wchar_t *s);
+
+/*
+	Convert a utf8 string into a new heap allocated wchar one.
+*/
+wchar_t *fz_wchar_from_utf8(fz_context *ctx, const char *path);
+
 
 /**
 	Locale-independent decimal to binary conversion. On overflow
@@ -171,9 +272,15 @@ int fz_grisu(float f, char *s, int *exp);
 
 /**
 	Check and parse string into page ranges:
-		( ','? ([0-9]+|'N') ( '-' ([0-9]+|N) )? )+
+		/,?(-?\d+|N)(-(-?\d+|N))?/
 */
 int fz_is_page_range(fz_context *ctx, const char *s);
 const char *fz_parse_page_range(fz_context *ctx, const char *s, int *a, int *b, int n);
+
+/**
+	Unicode aware tolower and toupper functions.
+*/
+int fz_tolower(int c);
+int fz_toupper(int c);
 
 #endif

@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* DocumentWriter interface */
 
 JNIEXPORT void JNICALL
@@ -81,8 +103,6 @@ FUN(DocumentWriter_newNativeDocumentWriterWithSeekableOutputStream)(JNIEnv *env,
 	jbyteArray array = NULL;
 	fz_output *out;
 
-	printf("DocumentWriter.newNativeDocumentWriterWithOutput()\n"); fflush(0);
-
 	if (!ctx) return 0;
 	if (!jstream) jni_throw_arg(env, "output stream must not be null");
 
@@ -123,6 +143,7 @@ FUN(DocumentWriter_newNativeDocumentWriterWithSeekableOutputStream)(JNIEnv *env,
 
 	fz_try(ctx)
 	{
+		fz_output *out_temp;
 		state = Memento_label(fz_malloc(ctx, sizeof(SeekableStreamState)), "SeekableStreamState_newNativeDocumentWriterWithSeekableOutputStream");
 		state->stream = stream;
 		state->array = array;
@@ -136,10 +157,10 @@ FUN(DocumentWriter_newNativeDocumentWriterWithSeekableOutputStream)(JNIEnv *env,
 		stream = NULL;
 		array = NULL;
 
-		wri = fz_new_document_writer_with_output(ctx, out, format, options);
-
-		/* this is now owned by 'wri' */
+		/* out becomes owned by 'wri' as soon as we call, even if it throws. */
+		out_temp = out;
 		out = NULL;
+		wri = fz_new_document_writer_with_output(ctx, out_temp, format, options);
 	}
 	fz_always(ctx)
 	{
@@ -202,18 +223,21 @@ FUN(DocumentWriter_close)(JNIEnv *env, jobject self)
 }
 
 static int
-jni_ocr_progress(fz_context *ctx, void *arg, int percent)
+jni_ocr_progress(fz_context *ctx, void *arg, int page, int percent)
 {
 	jobject ref = (jobject)arg;
 	jboolean cancel;
 	JNIEnv *env = NULL;
 	jboolean detach = JNI_FALSE;
 
-	env = jni_attach_thread(ctx, &detach);
+	if (ref == NULL)
+		return JNI_FALSE;
+
+	env = jni_attach_thread(&detach);
 	if (env == NULL)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot attach to JVM in jni_ocr_progress");
 
-	cancel = (*env)->CallBooleanMethod(env, ref, mid_DocumentWriter_OCRListener_progress, percent);
+	cancel = (*env)->CallBooleanMethod(env, ref, mid_DocumentWriter_OCRListener_progress, page, percent);
 	if ((*env)->ExceptionCheck(env))
 		cancel = 1;
 

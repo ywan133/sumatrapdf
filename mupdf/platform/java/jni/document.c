@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* Document interface */
 
 /* Callbacks to implement fz_stream and fz_output using Java classes */
@@ -17,7 +39,7 @@ static int SeekableInputStream_next(fz_context *ctx, fz_stream *stm, size_t max)
 	JNIEnv *env;
 	int n, ch;
 
-	env = jni_attach_thread(ctx, &detach);
+	env = jni_attach_thread(&detach);
 	if (env == NULL)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot attach to JVM in SeekableInputStream_next");
 
@@ -56,7 +78,7 @@ static void SeekableInputStream_seek(fz_context *ctx, fz_stream *stm, int64_t of
 	JNIEnv *env;
 	int64_t pos;
 
-	env = jni_attach_thread(ctx, &detach);
+	env = jni_attach_thread(&detach);
 	if (env == NULL)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot attach to JVM in SeekableInputStream_seek");
 
@@ -76,7 +98,7 @@ static void SeekableInputStream_drop(fz_context *ctx, void *streamState_)
 	jboolean detach = JNI_FALSE;
 	JNIEnv *env;
 
-	env = jni_attach_thread(ctx, &detach);
+	env = jni_attach_thread(&detach);
 	if (env == NULL)
 	{
 		fz_warn(ctx, "cannot attach to JVM in SeekableInputStream_drop; leaking input stream");
@@ -98,7 +120,7 @@ static void SeekableOutputStream_write(fz_context *ctx, void *streamState_, cons
 	jboolean detach = JNI_FALSE;
 	JNIEnv *env;
 
-	env = jni_attach_thread(ctx, &detach);
+	env = jni_attach_thread(&detach);
 	if (env == NULL)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot attach to JVM in SeekableOutputStream_write");
 
@@ -121,7 +143,6 @@ static void SeekableOutputStream_write(fz_context *ctx, void *streamState_, cons
 	jni_detach_thread(detach);
 }
 
-
 static int64_t SeekableOutputStream_tell(fz_context *ctx, void *streamState_)
 {
 	SeekableStreamState *state = streamState_;
@@ -129,7 +150,7 @@ static int64_t SeekableOutputStream_tell(fz_context *ctx, void *streamState_)
 	int64_t pos = 0;
 	JNIEnv *env;
 
-	env = jni_attach_thread(ctx, &detach);
+	env = jni_attach_thread(&detach);
 	if (env == NULL)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot attach to JVM in SeekableOutputStream_tell");
 
@@ -142,13 +163,30 @@ static int64_t SeekableOutputStream_tell(fz_context *ctx, void *streamState_)
 	return pos;
 }
 
+static void SeekableOutputStream_truncate(fz_context *ctx, void *streamState_)
+{
+	SeekableStreamState *state = streamState_;
+	jboolean detach = JNI_FALSE;
+	JNIEnv *env;
+
+	env = jni_attach_thread(&detach);
+	if (env == NULL)
+		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot attach to JVM in SeekableOutputStream_truncate");
+
+	(*env)->CallVoidMethod(env, state->stream, mid_SeekableOutputStream_truncate);
+	if ((*env)->ExceptionCheck(env))
+		fz_throw_java_and_detach_thread(ctx, env, detach);
+
+	jni_detach_thread(detach);
+}
+
 static void SeekableOutputStream_seek(fz_context *ctx, void *streamState_, int64_t offset, int whence)
 {
 	SeekableStreamState *state = streamState_;
 	jboolean detach = JNI_FALSE;
 	JNIEnv *env;
 
-	env = jni_attach_thread(ctx, &detach);
+	env = jni_attach_thread(&detach);
 	if (env == NULL)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot attach to JVM in SeekableOutputStream_seek");
 
@@ -165,7 +203,7 @@ static void SeekableOutputStream_drop(fz_context *ctx, void *streamState_)
 	jboolean detach = JNI_FALSE;
 	JNIEnv *env;
 
-	env = jni_attach_thread(ctx, &detach);
+	env = jni_attach_thread(&detach);
 	if (env == NULL)
 	{
 		fz_warn(ctx, "cannot attach to JVM in SeekableOutputStream_drop; leaking output stream");
@@ -251,16 +289,19 @@ FUN(Document_openNativeWithStream)(JNIEnv *env, jclass cls, jstring jmagic, jobj
 		jni_throw_run(env, "cannot create internal buffer for document stream");
 	}
 
-	accarray = (*env)->NewByteArray(env, sizeof accstate->buffer);
-	if (accarray)
-		accarray = (*env)->NewGlobalRef(env, accarray);
-	if (!accarray)
+	if (jacc)
 	{
-		(*env)->DeleteGlobalRef(env, docarray);
-		(*env)->DeleteGlobalRef(env, jacc);
-		(*env)->DeleteGlobalRef(env, jdoc);
-		if (magic) (*env)->ReleaseStringUTFChars(env, jmagic, magic);
-		jni_throw_run(env, "cannot create internal buffer for accelerator stream");
+		accarray = (*env)->NewByteArray(env, sizeof accstate->buffer);
+		if (accarray)
+			accarray = (*env)->NewGlobalRef(env, accarray);
+		if (!accarray)
+		{
+			(*env)->DeleteGlobalRef(env, docarray);
+			(*env)->DeleteGlobalRef(env, jacc);
+			(*env)->DeleteGlobalRef(env, jdoc);
+			if (magic) (*env)->ReleaseStringUTFChars(env, jmagic, magic);
+			jni_throw_run(env, "cannot create internal buffer for accelerator stream");
+		}
 	}
 
 	fz_try(ctx)
@@ -546,6 +587,21 @@ FUN(Document_recognize)(JNIEnv *env, jclass cls, jstring jmagic)
 	return recognized;
 }
 
+JNIEXPORT jboolean JNICALL
+FUN(Document_supportsAccelerator)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	fz_document *doc = from_Document(env, self);
+	jboolean support = JNI_FALSE;
+
+	fz_try(ctx)
+		support = fz_document_supports_accelerator(ctx, doc);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return support;
+}
+
 JNIEXPORT void JNICALL
 FUN(Document_saveAccelerator)(JNIEnv *env, jobject self, jstring jfilename)
 {
@@ -776,6 +832,38 @@ FUN(Document_getMetaData)(JNIEnv *env, jobject self, jstring jkey)
 	return (*env)->NewStringUTF(env, info);
 }
 
+JNIEXPORT void JNICALL
+FUN(Document_setMetaData)(JNIEnv *env, jobject self, jstring jkey, jstring jvalue)
+{
+	fz_context *ctx = get_context(env);
+	fz_document *doc = from_Document(env, self);
+	const char *key = NULL;
+	const char *value = NULL;
+
+	if (!ctx || !doc) return;
+	if (!jkey) jni_throw_arg_void(env, "key must not be null");
+	if (!jvalue) jni_throw_arg_void(env, "value must not be null");
+
+	key = (*env)->GetStringUTFChars(env, jkey, NULL);
+	value = (*env)->GetStringUTFChars(env, jvalue, NULL);
+	if (!key || !value)
+	{
+		if (key)
+			(*env)->ReleaseStringUTFChars(env, jkey, key);
+		return;
+	}
+
+	fz_try(ctx)
+		fz_set_metadata(ctx, doc, key, value);
+	fz_always(ctx)
+	{
+		(*env)->ReleaseStringUTFChars(env, jkey, key);
+		(*env)->ReleaseStringUTFChars(env, jvalue, value);
+	}
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
 JNIEXPORT jboolean JNICALL
 FUN(Document_isUnencryptedPDF)(JNIEnv *env, jobject self)
 {
@@ -823,6 +911,40 @@ FUN(Document_loadOutline)(JNIEnv *env, jobject self)
 		return NULL;
 
 	return joutline;
+}
+
+JNIEXPORT jobject JNICALL
+FUN(Document_outlineIterator)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	fz_document *doc = from_Document(env, self);
+	fz_outline_iterator *iterator = NULL;
+	jobject jiterator = NULL;
+
+	if (!ctx || !doc) return NULL;
+
+	fz_var(iterator);
+
+	fz_try(ctx)
+	{
+		iterator = fz_new_outline_iterator(ctx, doc);
+		if (iterator)
+		{
+			jiterator = to_OutlineIterator_safe(ctx, env, iterator);
+			if (!jiterator || (*env)->ExceptionCheck(env))
+				fz_throw(ctx, FZ_ERROR_GENERIC, "outlineIterator failed");
+			iterator = NULL;
+		}
+	}
+	fz_always(ctx)
+		fz_drop_outline_iterator(ctx, iterator);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	if ((*env)->ExceptionCheck(env))
+		return NULL;
+
+	return jiterator;
 }
 
 JNIEXPORT jlong JNICALL
@@ -902,22 +1024,103 @@ FUN(Document_search)(JNIEnv *env, jobject self, jint chapter, jint page, jstring
 {
 	fz_context *ctx = get_context(env);
 	fz_document *doc = from_Document(env, self);
-	fz_quad hits[256];
 	const char *needle = NULL;
-	int n = 0;
+	search_state state = { env, NULL, 0 };
 
-	if (!ctx || !page) return NULL;
+	if (!ctx || !doc) return NULL;
 	if (!jneedle) jni_throw_arg(env, "needle must not be null");
 
 	needle = (*env)->GetStringUTFChars(env, jneedle, NULL);
-	if (!needle) return 0;
+	if (!needle) return NULL;
+
+	state.hits = (*env)->NewObject(env, cls_ArrayList, mid_ArrayList_init);
+	if (!state.hits || (*env)->ExceptionCheck(env)) return NULL;
 
 	fz_try(ctx)
-		n = fz_search_chapter_page_number(ctx, doc, chapter, page, needle, hits, nelem(hits));
+		fz_search_chapter_page_number_cb(ctx, doc, chapter, page, needle, hit_callback, &state);
 	fz_always(ctx)
+	{
 		(*env)->ReleaseStringUTFChars(env, jneedle, needle);
+	}
 	fz_catch(ctx)
 		jni_rethrow(env, ctx);
 
-	return to_QuadArray_safe(ctx, env, hits, n);
+	if (state.error)
+		return NULL;
+
+	return (*env)->CallObjectMethod(env, state.hits, mid_ArrayList_toArray);
+}
+
+JNIEXPORT jobject JNICALL
+FUN(Document_resolveLinkDestination)(JNIEnv *env, jobject self, jstring juri)
+{
+	fz_context *ctx = get_context(env);
+	fz_document *doc = from_Document(env, self);
+	const char *uri = "";
+	fz_link_dest dest;
+	jobject jdestination;
+
+	if (!ctx || !doc) return NULL;
+
+	if (juri)
+	{
+		uri = (*env)->GetStringUTFChars(env, juri, NULL);
+		if (!uri)
+			return NULL;
+	}
+
+	fz_try(ctx)
+		dest = fz_resolve_link_dest(ctx, doc, uri);
+	fz_always(ctx)
+		if (juri)
+			(*env)->ReleaseStringUTFChars(env, juri, uri);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	jdestination = (*env)->NewObject(env, cls_LinkDestination, mid_LinkDestination_init,
+		dest.loc.chapter, dest.loc.page, dest.type, dest.x, dest.y, dest.w, dest.h, dest.zoom);
+	if (!jdestination || (*env)->ExceptionCheck(env))
+		return NULL;
+
+	return jdestination;
+}
+
+JNIEXPORT jstring JNICALL
+FUN(Document_formatLinkURI)(JNIEnv *env, jobject self, jobject jdest)
+{
+	fz_context *ctx = get_context(env);
+	fz_document *doc = from_Document(env, self);
+	fz_link_dest dest = from_LinkDestination(env, jdest);
+	char *uri = NULL;
+	jobject juri;
+
+	fz_try(ctx)
+		uri = fz_format_link_uri(ctx, doc, dest);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	juri = (*env)->NewStringUTF(env, uri);
+	fz_free(ctx, uri);
+	if (juri == NULL || (*env)->ExceptionCheck(env))
+		return NULL;
+
+	return juri;
+}
+
+JNIEXPORT jobject JNICALL
+FUN(Document_asPDF)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	fz_document *doc = from_Document(env, self);
+	pdf_document *pdf;
+
+	fz_try(ctx)
+		pdf = fz_new_pdf_document_from_fz_document(ctx, doc);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	if (!pdf)
+		return NULL;
+
+	return to_PDFDocument_safe_own(ctx, env, pdf);
 }

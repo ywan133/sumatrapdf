@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "html-imp.h"
 
@@ -9,6 +31,7 @@ struct lexbuf
 {
 	fz_context *ctx;
 	fz_pool *pool;
+	const unsigned char *start;
 	const unsigned char *s;
 	const char *file;
 	int line;
@@ -23,7 +46,87 @@ static fz_css_selector *parse_selector(struct lexbuf *buf);
 
 FZ_NORETURN static void fz_css_error(struct lexbuf *buf, const char *msg)
 {
-	fz_throw(buf->ctx, FZ_ERROR_SYNTAX, "css syntax error: %s (%s:%d)", msg, buf->file, buf->line);
+#define PRE_POST_SIZE 30
+	unsigned char text[PRE_POST_SIZE * 2 + 4];
+	unsigned char *d = text;
+	const unsigned char *s = buf->start;
+	int n;
+
+	/* We want to make a helpful fragment for the error message.
+	 * We want err_pos to be the point at which we just tripped
+	 * the error. err_pos needs to be at least 1 byte behind
+	 * our read pointer, as we've read that char. */
+	const unsigned char *err_pos = buf->s;
+	n = 1;
+
+	/* And if we're using lookahead, it's further behind. */
+	if (buf->lookahead >= CSS_KEYWORD)
+		n += buf->string_len;
+	else if (buf->lookahead != EOF)
+		n += 1;
+
+	/* But it can't be before the start of the buffer */
+	n = fz_mini(n, err_pos - buf->start);
+	err_pos -= n;
+
+	/* We're going to try to output:
+	 * <section prior to the error> ">" <the char that tripped> "<" <section after the error>
+	 */
+	/* Is the section prior to the error too long? If so, truncate it with an elipsis. */
+	n = sizeof(text)-1;
+	if (err_pos - s > n-PRE_POST_SIZE - 3)
+	{
+		*d++ = '.';
+		*d++ = '.';
+		*d++ = '.';
+		n -= 3;
+		s = err_pos - (n-PRE_POST_SIZE - 3);
+	}
+
+	/* Copy the prefix (if there is one) */
+	if (err_pos > s)
+	{
+		n = err_pos - s;
+		while (n)
+		{
+			unsigned char c = *s++;
+			*d++ = (c < 32 || c > 127) ? ' ' : c;
+			n--;
+		}
+	}
+
+	/* Marker, char, end marker */
+	*d++ = '>', n--;
+	if (*err_pos)
+		*d++ = *err_pos++, n--;
+	*d++ = '<', n--;
+
+	/* Postfix */
+	n = (int)strlen((const char *)err_pos);
+	if (n <= PRE_POST_SIZE)
+	{
+		while (n > 0)
+		{
+			unsigned char c = *err_pos++;
+			*d++ =  (c < 32 || c > 127) ? ' ' : c;
+			n--;
+		}
+	}
+	else
+	{
+		for (n = PRE_POST_SIZE-3; n > 0; n--)
+		{
+			unsigned char c = *err_pos++;
+			*d++ =  (c < 32 || c > 127) ? ' ' : c;
+		}
+
+		*d++ = '.';
+		*d++ = '.';
+		*d++ = '.';
+	}
+	*d = 0;
+
+	fz_throw(buf->ctx, FZ_ERROR_SYNTAX, "css syntax error: %s (%s:%d) (%s)", msg, buf->file, buf->line, text);
 }
 
 fz_css *fz_new_css(fz_context *ctx)
@@ -121,9 +224,12 @@ static fz_css_value *fz_new_css_value(fz_context *ctx, fz_pool *pool, int type, 
 
 static void css_lex_next(struct lexbuf *buf)
 {
-	buf->c = *(buf->s++);
+	if (buf->c == 0)
+		return;
+	buf->s += fz_chartorune(&buf->c, (const char *)buf->s);
 	if (buf->c == '\n')
 		++buf->line;
+	buf->lookahead = EOF;
 }
 
 static void css_lex_init(fz_context *ctx, struct lexbuf *buf, fz_pool *pool, const char *s, const char *file)
@@ -131,7 +237,9 @@ static void css_lex_init(fz_context *ctx, struct lexbuf *buf, fz_pool *pool, con
 	buf->ctx = ctx;
 	buf->pool = pool;
 	buf->s = (const unsigned char *)s;
-	buf->c = 0;
+	buf->lookahead = EOF;
+	buf->start = buf->s;
+	buf->c = -1;
 	buf->file = file;
 	buf->line = 1;
 	css_lex_next(buf);
@@ -147,20 +255,23 @@ static inline int iswhite(int c)
 static int isnmstart(int c)
 {
 	return c == '\\' || c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-		(c >= 128 && c <= 255);
+		(c >= 128 && c <= UCS_MAX);
 }
 
 static int isnmchar(int c)
 {
 	return c == '\\' || c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-		(c >= '0' && c <= '9') || c == '-' || (c >= 128 && c <= 255);
+		(c >= '0' && c <= '9') || c == '-' || (c >= 128 && c <= UCS_MAX);
 }
 
 static void css_push_char(struct lexbuf *buf, int c)
 {
-	if (buf->string_len + 1 >= (int)nelem(buf->string))
+	char out[4];
+	int n = fz_runetochar(out, c);
+	if (buf->string_len + n >= (int)nelem(buf->string))
 		fz_css_error(buf, "token too long");
-	buf->string[buf->string_len++] = c;
+	memcpy(buf->string + buf->string_len, out, n);
+	buf->string_len += n;
 }
 
 static int css_lex_accept(struct lexbuf *buf, int t)
@@ -364,8 +475,8 @@ restart:
 	{
 		if (css_lex_accept(buf, '-'))
 		{
-			css_lex_expect(buf, '>');
-			goto restart; /* ignore CDC */
+			if (css_lex_accept(buf, '>'))
+				goto restart; /* ignore CDC */
 		}
 		if (isnmstart(buf->c))
 		{
@@ -549,8 +660,11 @@ static fz_css_value *parse_expr(struct lexbuf *buf)
 		if (accept(buf, ','))
 		{
 			white(buf);
-			tail = tail->next = fz_new_css_value(buf->ctx, buf->pool, ',', ",");
-			tail = tail->next = parse_term(buf);
+			if (buf->lookahead != ';')
+			{
+				tail = tail->next = fz_new_css_value(buf->ctx, buf->pool, ',', ",");
+				tail = tail->next = parse_term(buf);
+			}
 		}
 		else if (accept(buf, '/'))
 		{
@@ -783,6 +897,7 @@ static fz_css_selector *parse_selector(struct lexbuf *buf)
 	{
 		if (accept(buf, ' '))
 		{
+			white(buf);
 			if (accept(buf, '+'))
 				sel = parse_combinator(buf, '+', sel);
 			else if (accept(buf, '>'))
@@ -830,8 +945,9 @@ static fz_css_rule *parse_ruleset(struct lexbuf *buf)
 	}
 	fz_catch(buf->ctx)
 	{
-		if (fz_caught(buf->ctx) != FZ_ERROR_SYNTAX)
-			fz_rethrow(buf->ctx);
+		fz_rethrow_unless(buf->ctx, FZ_ERROR_SYNTAX);
+		fz_report_error(buf->ctx);
+
 		while (buf->lookahead != EOF)
 		{
 			if (accept(buf, '}'))

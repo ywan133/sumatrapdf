@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2023 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <assert.h>
@@ -502,6 +524,20 @@ fz_bitmap *fz_new_bitmap_from_pixmap(fz_context *ctx, fz_pixmap *pix, fz_halfton
 	return fz_new_bitmap_from_pixmap_band(ctx, pix, ht, 0);
 }
 
+void fz_invert_bitmap(fz_context *ctx, fz_bitmap *bmp)
+{
+	unsigned char *s = bmp->samples;
+	int w, h, w2 = (bmp->w+7)>>3;
+
+	for (h = bmp->h; h > 0; h--)
+	{
+		unsigned char *t = s;
+		for (w = w2; w > 0; w--)
+			*t++ ^= 255;
+		s += bmp->stride;
+	}
+}
+
 /* TAOCP, vol 2, p337 */
 static int gcd(int u, int v)
 {
@@ -523,7 +559,7 @@ fz_bitmap *fz_new_bitmap_from_pixmap_band(fz_context *ctx, fz_pixmap *pix, fz_ha
 	fz_bitmap *out = NULL;
 	unsigned char *ht_line = NULL;
 	unsigned char *o, *p;
-	int w, h, x, y, n, pstride, ostride, lcm, i;
+	int w, h, x, y, n, pstride, ostride, lcm, i, alpha;
 	fz_halftone *ht_ = NULL;
 	threshold_fn *thresh;
 
@@ -532,10 +568,16 @@ fz_bitmap *fz_new_bitmap_from_pixmap_band(fz_context *ctx, fz_pixmap *pix, fz_ha
 	if (!pix)
 		return NULL;
 
-	if (pix->alpha != 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "pixmap may not have alpha channel to convert to bitmap");
-
 	n = pix->n;
+	alpha = pix->alpha;
+
+	/* Treat alpha only as greyscale */
+	if (n == 1 && alpha)
+		alpha = 0;
+	n -= alpha;
+
+	if (alpha != 0)
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "pixmap may not have alpha channel to convert to bitmap");
 
 	switch(n)
 	{
@@ -546,7 +588,7 @@ fz_bitmap *fz_new_bitmap_from_pixmap_band(fz_context *ctx, fz_pixmap *pix, fz_ha
 		thresh = do_threshold_4;
 		break;
 	default:
-		fz_throw(ctx, FZ_ERROR_GENERIC, "pixmap must be grayscale or CMYK to convert to bitmap");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "pixmap must be grayscale or CMYK to convert to bitmap");
 		return NULL;
 	}
 
@@ -569,7 +611,7 @@ fz_bitmap *fz_new_bitmap_from_pixmap_band(fz_context *ctx, fz_pixmap *pix, fz_ha
 
 	fz_try(ctx)
 	{
-		ht_line = fz_malloc(ctx, lcm * n);
+		ht_line = fz_malloc(ctx, lcm * (size_t)n);
 		out = fz_new_bitmap(ctx, pix->w, pix->h, n, pix->xres, pix->yres);
 		o = out->samples;
 		p = pix->samples;

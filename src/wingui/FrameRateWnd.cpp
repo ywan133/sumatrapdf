@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 // SetWindowSubclass, RemoveWindowSubclass and DefSubclassProc require the WinXP SDK
@@ -30,28 +30,28 @@ that it's actually a part of that window.
 #define COL_WHITE RGB(0xff, 0xff, 0xff)
 #define COL_BLACK RGB(0, 0, 0)
 
-static void FrameRatePaint(FrameRateWnd* w, HDC hdc, [[maybe_unused]] PAINTSTRUCT& ps) {
-    RECT rc = GetClientRect(w->hwnd);
-    ScopedGdiObj<HBRUSH> brush(CreateSolidBrush(COL_BLACK));
+static void FrameRatePaint(FrameRateWnd* w, HDC hdc, PAINTSTRUCT&) {
+    RECT rc = ClientRECT(w->hwnd);
+    AutoDeleteBrush brush = CreateSolidBrush(COL_BLACK);
     FillRect(hdc, &rc, brush);
 
     SetTextColor(hdc, COL_WHITE);
 
     ScopedSelectObject selFont(hdc, w->font);
-    AutoFreeWstr txt(str::Format(L"%d", w->frameRate));
+    TempStr txt = str::FormatTemp("%d", w->frameRate);
     DrawCenteredText(hdc, rc, txt);
 }
 
 static void PositionWindow(FrameRateWnd* w, SIZE s) {
-    RECT rc = GetClientRect(w->hwndAssociatedWith);
+    RECT rc = ClientRECT(w->hwndAssociatedWith);
     POINT p = {rc.right - s.cx, rc.top};
     ClientToScreen(w->hwndAssociatedWith, &p);
     MoveWindow(w->hwnd, p.x, p.y, s.cx, s.cy, TRUE);
 }
 
 static SIZE GetIdealSize(FrameRateWnd* w) {
-    WCHAR* txt = str::Format(L"%d", w->frameRate);
-    Size s = TextSizeInHwnd(w->hwnd, txt);
+    TempStr txt = str::FormatTemp("%d", w->frameRate);
+    Size s = HwndMeasureText(w->hwnd, txt);
 
     // add padding
     s.dy += 4;
@@ -65,7 +65,6 @@ static SIZE GetIdealSize(FrameRateWnd* w) {
     if (s.dy > w->maxSizeSoFar.cy) {
         w->maxSizeSoFar.cy = s.dy;
     }
-    free(txt);
     return w->maxSizeSoFar;
 }
 
@@ -76,8 +75,8 @@ static void FrameRateOnPaint(FrameRateWnd* w) {
     EndPaint(w->hwnd, &ps);
 }
 
-static LRESULT CALLBACK WndProcFrameRateAssociated(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
-                                                   [[maybe_unused]] UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+static LRESULT CALLBACK WndProcFrameRateAssociated(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
+                                                   DWORD_PTR dwRefData) {
     if (WM_MOVING == msg || WM_SIZING == msg || WM_SIZE == msg || WM_WINDOWPOSCHANGED == msg || WM_MOVE == msg) {
         FrameRateWnd* w = (FrameRateWnd*)dwRefData;
         PositionWindow(w, w->maxSizeSoFar);
@@ -129,10 +128,10 @@ static void RegisterFrameRateWndClass() {
         // already registered
         return;
     }
-    WNDCLASSEX wcex = {};
+    WNDCLASSEX wcex{};
     FillWndClassEx(wcex, FRAME_RATE_CLASS_NAME, WndProcFrameRate);
     atom = RegisterClassEx(&wcex);
-    CrashIf(!atom);
+    ReportIf(!atom);
 }
 
 bool FrameRateWnd::Create(HWND hwndAssociatedWith) {
@@ -154,9 +153,9 @@ bool FrameRateWnd::Create(HWND hwndAssociatedWith) {
     // is WS_OVERLAPEPED or WS_POPUP). Owned window always shows up on top of owner in z-order
     // http://msdn.microsoft.com/en-us/library/ms632599%28v=VS.85%29.aspx#owned_windows
     // WS_EX_TRANSPARENT so that the mouse events fall through to the window below
-    HWND hwnd = CreateWindowEx(WS_EX_LAYERED | WS_EX_TRANSPARENT, FRAME_RATE_CLASS_NAME, nullptr, dwStyle, 0, 0, 0, 0,
-                               this->hwndAssociatedWith, nullptr, GetModuleHandle(nullptr), this);
-    CrashIf(hwnd != this->hwnd);
+    HWND hwnd2 = CreateWindowEx(WS_EX_LAYERED | WS_EX_TRANSPARENT, FRAME_RATE_CLASS_NAME, nullptr, dwStyle, 0, 0, 0, 0,
+                                this->hwndAssociatedWith, nullptr, GetModuleHandle(nullptr), this);
+    ReportIf(hwnd2 != this->hwnd);
     if (!hwnd) {
         return false;
     }
@@ -175,7 +174,7 @@ void FrameRateWnd::ShowFrameRate(int frameRate) {
     this->frameRate = frameRate;
     SIZE s = GetIdealSize(this);
     PositionWindow(this, s);
-    ScheduleRepaint(this->hwnd);
+    HwndScheduleRepaint(this->hwnd);
 }
 
 void FrameRateWnd::ShowFrameRateDur(double durMs) {

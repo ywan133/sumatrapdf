@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2023 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_BUFFER_H
 #define MUPDF_FITZ_BUFFER_H
 
@@ -83,6 +105,12 @@ fz_buffer *fz_new_buffer_from_shared_data(fz_context *ctx, const unsigned char *
 fz_buffer *fz_new_buffer_from_copied_data(fz_context *ctx, const unsigned char *data, size_t size);
 
 /**
+	Make a new buffer, containing a copy of the data used in
+	the original.
+*/
+fz_buffer *fz_clone_buffer(fz_context *ctx, fz_buffer *buf);
+
+/**
 	Create a new buffer with data decoded from a base64 input string.
 */
 fz_buffer *fz_new_buffer_from_base64(fz_context *ctx, const char *data, size_t size);
@@ -117,12 +145,32 @@ void fz_trim_buffer(fz_context *ctx, fz_buffer *buf);
 void fz_clear_buffer(fz_context *ctx, fz_buffer *buf);
 
 /**
+	Create a new buffer with a (subset of) the data from the buffer.
+
+	start: if >= 0, offset from start of buffer, if < 0 offset from end of buffer.
+
+	end: if >= 0, offset from start of buffer, if < 0 offset from end of buffer.
+
+*/
+fz_buffer *fz_slice_buffer(fz_context *ctx, fz_buffer *buf, int64_t start, int64_t end);
+
+/**
 	Append the contents of the source buffer onto the end of the
 	destination buffer, extending automatically as required.
 
 	Ownership of buffers does not change.
 */
 void fz_append_buffer(fz_context *ctx, fz_buffer *destination, fz_buffer *source);
+
+/**
+	Write a base64 encoded data block, optionally with periodic newlines.
+*/
+void fz_append_base64(fz_context *ctx, fz_buffer *out, const unsigned char *data, size_t size, int newline);
+
+/**
+	Append a base64 encoded fz_buffer, optionally with periodic newlines.
+*/
+void fz_append_base64_buffer(fz_context *ctx, fz_buffer *out, fz_buffer *data, int newline);
 
 /**
 	fz_append_*: Append data to a buffer.

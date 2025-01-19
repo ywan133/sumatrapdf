@@ -1,11 +1,36 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
+#include "cmaps/TrueType-UCS2.h"
+
 #include <string.h>
 
-pdf_cmap *
-pdf_load_embedded_cmap(fz_context *ctx, pdf_document *doc, pdf_obj *stmobj)
+static pdf_cmap *
+pdf_load_embedded_cmap_imp(fz_context *ctx, pdf_document *doc, pdf_obj *stmobj, pdf_cycle_list *cycle_up)
 {
+	pdf_cycle_list cycle;
 	fz_stream *file = NULL;
 	pdf_cmap *cmap = NULL;
 	pdf_cmap *usecmap = NULL;
@@ -30,20 +55,38 @@ pdf_load_embedded_cmap(fz_context *ctx, pdf_document *doc, pdf_obj *stmobj)
 		obj = pdf_dict_get(ctx, stmobj, PDF_NAME(UseCMap));
 		if (pdf_is_name(ctx, obj))
 		{
-			usecmap = pdf_load_system_cmap(ctx, pdf_to_name(ctx, obj));
-			pdf_set_usecmap(ctx, cmap, usecmap);
+			fz_try(ctx)
+			{
+				usecmap = pdf_load_system_cmap(ctx, pdf_to_name(ctx, obj));
+				pdf_set_usecmap(ctx, cmap, usecmap);
+			}
+			fz_catch(ctx)
+			{
+				fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+				fz_report_error(ctx);
+				fz_warn(ctx, "cannot load system CMap: %s", pdf_to_name(ctx, obj));
+			}
 		}
 		else if (pdf_is_indirect(ctx, obj))
 		{
-			if (pdf_mark_obj(ctx, obj))
-				fz_throw(ctx, FZ_ERROR_GENERIC, "recursive CMap");
-			fz_try(ctx)
-				usecmap = pdf_load_embedded_cmap(ctx, doc, obj);
-			fz_always(ctx)
-				pdf_unmark_obj(ctx, obj);
-			fz_catch(ctx)
-				fz_rethrow(ctx);
+			if (pdf_cycle(ctx, &cycle, cycle_up, obj))
+				fz_throw(ctx, FZ_ERROR_FORMAT, "recursive CMap");
+			usecmap = pdf_load_embedded_cmap_imp(ctx, doc, obj, &cycle);
 			pdf_set_usecmap(ctx, cmap, usecmap);
+		}
+		else if (strlen(cmap->usecmap_name) > 0)
+		{
+			fz_try(ctx)
+			{
+				usecmap = pdf_load_system_cmap(ctx, cmap->usecmap_name);
+				pdf_set_usecmap(ctx, cmap, usecmap);
+			}
+			fz_catch(ctx)
+			{
+				fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+				fz_report_error(ctx);
+				fz_warn(ctx, "cannot load system CMap: %s", pdf_to_name(ctx, obj));
+			}
 		}
 
 		pdf_store_item(ctx, stmobj, cmap, pdf_cmap_size(ctx, cmap));
@@ -60,6 +103,12 @@ pdf_load_embedded_cmap(fz_context *ctx, pdf_document *doc, pdf_obj *stmobj)
 	}
 
 	return cmap;
+}
+
+pdf_cmap *
+pdf_load_embedded_cmap(fz_context *ctx, pdf_document *doc, pdf_obj *stmobj)
+{
+	return pdf_load_embedded_cmap_imp(ctx, doc, stmobj, NULL);
 }
 
 pdf_cmap *
@@ -93,6 +142,7 @@ pdf_load_builtin_cmap(fz_context *ctx, const char *name)
 {
 	if (!strcmp(name, "Identity-H")) return pdf_new_identity_cmap(ctx, 0, 2);
 	if (!strcmp(name, "Identity-V")) return pdf_new_identity_cmap(ctx, 1, 2);
+	if (!strcmp(name, "TrueType-UCS2")) return &cmap_TrueType_UCS2;
 	return NULL;
 }
 
@@ -219,6 +269,7 @@ static pdf_cmap *table[] = {
 	&cmap_KSCms_UHC_HW_V,
 	&cmap_KSCms_UHC_V,
 	&cmap_KSCpc_EUC_H,
+	&cmap_TrueType_UCS2,
 	&cmap_UniCNS_UCS2_H,
 	&cmap_UniCNS_UCS2_V,
 	&cmap_UniCNS_UTF16_H,
@@ -273,13 +324,13 @@ pdf_load_system_cmap(fz_context *ctx, const char *cmap_name)
 
 	cmap = pdf_load_builtin_cmap(ctx, cmap_name);
 	if (!cmap)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "no builtin cmap file: %s", cmap_name);
+		fz_throw(ctx, FZ_ERROR_FORMAT, "no builtin cmap file: %s", cmap_name);
 
 	if (cmap->usecmap_name[0] && !cmap->usecmap)
 	{
 		usecmap = pdf_load_system_cmap(ctx, cmap->usecmap_name);
 		if (!usecmap)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "no builtin cmap file: %s", cmap->usecmap_name);
+			fz_throw(ctx, FZ_ERROR_FORMAT, "no builtin cmap file: %s", cmap->usecmap_name);
 		pdf_set_usecmap(ctx, cmap, usecmap);
 	}
 

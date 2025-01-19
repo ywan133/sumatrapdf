@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /*
  * PDF posteriser; split pages within a PDF file into smaller lumps.
  */
@@ -11,6 +33,7 @@
 
 static int x_factor = 0;
 static int y_factor = 0;
+static int x_dir = 1;
 
 static int usage(void)
 {
@@ -18,7 +41,9 @@ static int usage(void)
 		"usage: mutool poster [options] input.pdf [output.pdf]\n"
 		"\t-p -\tpassword\n"
 		"\t-x\tx decimation factor\n"
-		"\t-y\ty decimation factor\n");
+		"\t-y\ty decimation factor\n"
+		"\t-r\tsplit right-to-left\n"
+		);
 	return 1;
 }
 
@@ -87,6 +112,7 @@ static void decimatepages(fz_context *ctx, pdf_document *doc)
 		int xf = x_factor, yf = y_factor;
 		float w, h;
 		int x, y;
+		int xd, yd, y0, y1;
 
 		rotate = pdf_to_int(ctx, pdf_dict_get_inheritable(ctx, page_obj, PDF_NAME(Rotate)));
 		mediabox = pdf_to_rect(ctx, pdf_dict_get_inheritable(ctx, page_obj, PDF_NAME(MediaBox)));
@@ -103,11 +129,15 @@ static void decimatepages(fz_context *ctx, pdf_document *doc)
 		{
 			xf = y_factor;
 			yf = x_factor;
+			yd = -x_dir;
+			xd = 1;
 		}
 		else
 		{
 			xf = x_factor;
 			yf = y_factor;
+			xd = x_dir;
+			yd = -1;
 		}
 
 		if (xf == 0 && yf == 0)
@@ -123,9 +153,13 @@ static void decimatepages(fz_context *ctx, pdf_document *doc)
 		else if (yf == 0)
 			yf = 1;
 
-		for (y = yf-1; y >= 0; y--)
+		y0 = (yd > 0) ? 0 : yf-1;
+		y1 = (yd > 0) ? yf : -1;
+		for (y = y0; y != y1; y += yd)
 		{
-			for (x = 0; x < xf; x++)
+			int x0 = (xd > 0) ? 0 : xf-1;
+			int x1 = (xd > 0) ? xf : -1;
+			for (x = x0; x != x1; x += xd)
 			{
 				pdf_obj *newpageobj, *newpageref, *newmediabox;
 				fz_rect mb;
@@ -183,14 +217,16 @@ int pdfposter_main(int argc, char **argv)
 	pdf_write_options opts = pdf_default_write_options;
 	pdf_document *doc;
 	fz_context *ctx;
+	int ret = 0;
 
-	while ((c = fz_getopt(argc, argv, "x:y:p:")) != -1)
+	while ((c = fz_getopt(argc, argv, "x:y:p:r")) != -1)
 	{
 		switch (c)
 		{
 		case 'p': password = fz_optarg; break;
 		case 'x': x_factor = atoi(fz_optarg); break;
 		case 'y': y_factor = atoi(fz_optarg); break;
+		case 'r': x_dir = -1; break;
 		default: return usage();
 		}
 	}
@@ -213,16 +249,27 @@ int pdfposter_main(int argc, char **argv)
 		exit(1);
 	}
 
-	doc = pdf_open_document(ctx, infile);
-	if (pdf_needs_password(ctx, doc))
-		if (!pdf_authenticate_password(ctx, doc, password))
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cannot authenticate password: %s", infile);
+	fz_var(doc);
 
-	decimatepages(ctx, doc);
+	fz_try(ctx)
+	{
+		doc = pdf_open_document(ctx, infile);
+		if (pdf_needs_password(ctx, doc))
+			if (!pdf_authenticate_password(ctx, doc, password))
+				fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot authenticate password: %s", infile);
 
-	pdf_save_document(ctx, doc, outfile, &opts);
+		decimatepages(ctx, doc);
 
-	pdf_drop_document(ctx, doc);
+		pdf_save_document(ctx, doc, outfile, &opts);
+	}
+	fz_always(ctx)
+		pdf_drop_document(ctx, doc);
+	fz_catch(ctx)
+	{
+		fz_report_error(ctx);
+		ret = 1;
+	}
 	fz_drop_context(ctx);
-	return 0;
+
+	return ret;
 }

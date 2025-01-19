@@ -30,7 +30,7 @@
 #if defined(WEBP_HAVE_JUST_SDL_H)
 #include <SDL.h>
 #else
-#include <SDL/SDL.h>
+#include <SDL2/SDL.h>
 #endif
 
 static void ProcessEvents(void) {
@@ -75,7 +75,7 @@ int main(int argc, char* argv[]) {
       fprintf(stderr, "File too large.\n");
       goto Error;
     }
-    ok = WebpToSDL((const char*)webp, (int)webp_size);
+    ok = WebPToSDL((const char*)webp, (int)webp_size);
     free((void*)webp);
     if (!ok) {
       WFPRINTF(stderr, "Error decoding file %s\n", (const W_CHAR*)file);

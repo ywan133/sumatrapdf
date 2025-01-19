@@ -1,6 +1,4 @@
 #include "jsi.h"
-#include "jsvalue.h"
-#include "jsbuiltin.h"
 #include "utf.h"
 #include "regexp.h"
 
@@ -22,31 +20,54 @@ static const char *checkstring(js_State *J, int idx)
 int js_runeat(js_State *J, const char *s, int i)
 {
 	Rune rune = EOF;
-	while (i-- >= 0) {
+	while (i >= 0) {
 		rune = *(unsigned char*)s;
 		if (rune < Runeself) {
 			if (rune == 0)
 				return EOF;
 			++s;
-		} else
+			--i;
+		} else {
 			s += chartorune(&rune, s);
+			if (rune >= 0x10000)
+				i -= 2;
+			else
+				--i;
+		}
+	}
+	if (rune >= 0x10000) {
+		/* high surrogate */
+		if (i == -2)
+			return 0xd800 + ((rune - 0x10000) >> 10);
+		/* low surrogate */
+		else
+			return 0xdc00 + ((rune - 0x10000) & 0x3ff);
 	}
 	return rune;
 }
 
-const char *js_utfidxtoptr(const char *s, int i)
+int js_utflen(const char *s)
 {
+	int c;
+	int n;
 	Rune rune;
-	while (i-- > 0) {
-		rune = *(unsigned char*)s;
-		if (rune < Runeself) {
-			if (rune == 0)
-				return NULL;
-			++s;
-		} else
+
+	n = 0;
+	for(;;) {
+		c = *(unsigned char *)s;
+		if (c < Runeself) {
+			if (c == 0)
+				return n;
+			s++;
+			n++;
+		} else {
 			s += chartorune(&rune, s);
+			if (rune >= 0x10000)
+				n += 2;
+			else
+				n++;
+		}
 	}
-	return s;
 }
 
 int js_utfptrtoidx(const char *s, const char *p)
@@ -58,7 +79,10 @@ int js_utfptrtoidx(const char *s, const char *p)
 			++s;
 		else
 			s += chartorune(&rune, s);
-		++i;
+		if (rune >= 0x10000)
+			i += 2;
+		else
+			i += 1;
 	}
 	return i;
 }
@@ -77,14 +101,14 @@ static void Sp_toString(js_State *J)
 {
 	js_Object *self = js_toobject(J, 0);
 	if (self->type != JS_CSTRING) js_typeerror(J, "not a string");
-	js_pushliteral(J, self->u.s.string);
+	js_pushstring(J, self->u.s.string);
 }
 
 static void Sp_valueOf(js_State *J)
 {
 	js_Object *self = js_toobject(J, 0);
 	if (self->type != JS_CSTRING) js_typeerror(J, "not a string");
-	js_pushliteral(J, self->u.s.string);
+	js_pushstring(J, self->u.s.string);
 }
 
 static void Sp_charAt(js_State *J)
@@ -116,26 +140,31 @@ static void Sp_concat(js_State *J)
 {
 	int i, top = js_gettop(J);
 	int n;
-	char * volatile out;
+	char * volatile out = NULL;
 	const char *s;
 
 	if (top == 1)
 		return;
 
 	s = checkstring(J, 0);
-	n = strlen(s);
-	out = js_malloc(J, n + 1);
-	strcpy(out, s);
+	n = 1 + strlen(s);
 
 	if (js_try(J)) {
 		js_free(J, out);
 		js_throw(J);
 	}
 
+	if (n > JS_STRLIMIT)
+		js_rangeerror(J, "invalid string length");
+	out = js_malloc(J, n);
+	strcpy(out, s);
+
 	for (i = 1; i < top; ++i) {
 		s = js_tostring(J, i);
 		n += strlen(s);
-		out = js_realloc(J, out, n + 1);
+		if (n > JS_STRLIMIT)
+			js_rangeerror(J, "invalid string length");
+		out = js_realloc(J, out, n);
 		strcat(out, s);
 	}
 
@@ -187,11 +216,67 @@ static void Sp_localeCompare(js_State *J)
 	js_pushnumber(J, strcmp(a, b));
 }
 
+static void Sp_substring_imp(js_State *J, const char *s, int a, int n)
+{
+	Rune head_rune = 0, tail_rune = 0;
+	const char *head, *tail;
+	char *p;
+	int i, k, head_len, tail_len;
+
+	/* find start of substring */
+	head = s;
+	for (i = 0; i < a; ++i) {
+		head += chartorune(&head_rune, head);
+		if (head_rune >= 0x10000)
+			++i;
+	}
+
+	/* find end of substring */
+	tail = head;
+	for (k = i - a; k < n; ++k) {
+		tail += chartorune(&tail_rune, tail);
+		if (tail_rune >= 0x10000)
+			++k;
+	}
+
+	/* no surrogate pair splits! */
+	if (i == a && k == n) {
+		js_pushlstring(J, head, tail - head);
+		return;
+	}
+
+	if (js_try(J)) {
+		js_free(J, p);
+		js_throw(J);
+	}
+
+	p = js_malloc(J, UTFmax + (tail - head));
+
+	/* substring starts with low surrogate (head is just after character) */
+	if (i > a) {
+		head_rune = 0xdc00 + ((head_rune - 0x10000) & 0x3ff);
+		head_len = runetochar(p, &head_rune);
+		memcpy(p + head_len, head, tail - head);
+		js_pushlstring(J, p, head_len + (tail - head));
+	}
+
+	/* substring ends with high surrogate (tail is just after character) */
+	if (k > n) {
+		tail -= runelen(tail_rune);
+		memcpy(p, head, tail - head);
+		tail_rune = 0xd800 + ((tail_rune - 0x10000) >> 10);
+		tail_len = runetochar(p + (tail - head), &tail_rune);
+		js_pushlstring(J, p, (tail - head) + tail_len);
+	}
+
+	js_endtry(J);
+	js_free(J, p);
+}
+
 static void Sp_slice(js_State *J)
 {
 	const char *str = checkstring(J, 0);
-	const char *ss, *ee;
-	int len = utflen(str);
+	int len = js_utflen(str);
 	int s = js_tointeger(J, 1);
 	int e = js_isdefined(J, 2) ? js_tointeger(J, 2) : len;
 
@@ -201,56 +286,48 @@ static void Sp_slice(js_State *J)
 	s = s < 0 ? 0 : s > len ? len : s;
 	e = e < 0 ? 0 : e > len ? len : e;
 
-	if (s < e) {
-		ss = js_utfidxtoptr(str, s);
-		ee = js_utfidxtoptr(ss, e - s);
-	} else {
-		ss = js_utfidxtoptr(str, e);
-		ee = js_utfidxtoptr(ss, s - e);
-	}
-
-	js_pushlstring(J, ss, ee - ss);
+	if (s < e)
+		Sp_substring_imp(J, str, s, e - s);
+	else
+		Sp_substring_imp(J, str, e, s - e);
 }
 
 static void Sp_substring(js_State *J)
 {
 	const char *str = checkstring(J, 0);
-	const char *ss, *ee;
-	int len = utflen(str);
+	int len = js_utflen(str);
 	int s = js_tointeger(J, 1);
 	int e = js_isdefined(J, 2) ? js_tointeger(J, 2) : len;
 
 	s = s < 0 ? 0 : s > len ? len : s;
 	e = e < 0 ? 0 : e > len ? len : e;
 
-	if (s < e) {
-		ss = js_utfidxtoptr(str, s);
-		ee = js_utfidxtoptr(ss, e - s);
-	} else {
-		ss = js_utfidxtoptr(str, e);
-		ee = js_utfidxtoptr(ss, s - e);
-	}
-
-	js_pushlstring(J, ss, ee - ss);
+	if (s < e)
+		Sp_substring_imp(J, str, s, e - s);
+	else
+		Sp_substring_imp(J, str, e, s - e);
 }
 
 static void Sp_toLowerCase(js_State *J)
 {
-	const char *src = checkstring(J, 0);
-	char *dst = js_malloc(J, UTFmax * strlen(src) + 1);
-	const char *s = src;
-	char *d = dst;
+	const char *s = checkstring(J, 0);
+	char * volatile dst = NULL;
+	char *d;
 	Rune rune;
+
+	if (js_try(J)) {
+		js_free(J, dst);
+		js_throw(J);
+	}
+
+	d = dst = js_malloc(J, UTFmax * strlen(s) + 1);
 	while (*s) {
 		s += chartorune(&rune, s);
 		rune = tolowerrune(rune);
 		d += runetochar(d, &rune);
 	}
 	*d = 0;
-	if (js_try(J)) {
-		js_free(J, dst);
-		js_throw(J);
-	}
+
 	js_pushstring(J, dst);
 	js_endtry(J);
 	js_free(J, dst);
@@ -258,21 +335,24 @@ static void Sp_toLowerCase(js_State *J)
 
 static void Sp_toUpperCase(js_State *J)
 {
-	const char *src = checkstring(J, 0);
-	char *dst = js_malloc(J, UTFmax * strlen(src) + 1);
-	const char *s = src;
-	char *d = dst;
+	const char *s = checkstring(J, 0);
+	char * volatile dst = NULL;
+	char *d;
 	Rune rune;
+
+	if (js_try(J)) {
+		js_free(J, dst);
+		js_throw(J);
+	}
+
+	d = dst = js_malloc(J, UTFmax * strlen(s) + 1);
 	while (*s) {
 		s += chartorune(&rune, s);
 		rune = toupperrune(rune);
 		d += runetochar(d, &rune);
 	}
 	*d = 0;
-	if (js_try(J)) {
-		js_free(J, dst);
-		js_throw(J);
-	}
+
 	js_pushstring(J, dst);
 	js_endtry(J);
 	js_free(J, dst);
@@ -299,23 +379,24 @@ static void Sp_trim(js_State *J)
 static void S_fromCharCode(js_State *J)
 {
 	int i, top = js_gettop(J);
+	char * volatile s = NULL;
+	char *p;
 	Rune c;
-	char *s, *p;
-
-	s = p = js_malloc(J, (top-1) * UTFmax + 1);
 
 	if (js_try(J)) {
 		js_free(J, s);
 		js_throw(J);
 	}
 
+	s = p = js_malloc(J, (top-1) * UTFmax + 1);
+
 	for (i = 1; i < top; ++i) {
 		c = js_touint32(J, i);
 		p += runetochar(p, &c);
 	}
 	*p = 0;
-	js_pushstring(J, s);
 
+	js_pushstring(J, s);
 	js_endtry(J);
 	js_free(J, s);
 }
@@ -580,12 +661,14 @@ static void Sp_split_regexp(js_State *J)
 	js_newarray(J);
 	len = 0;
 
+	if (limit == 0)
+		return;
+
 	e = text + strlen(text);
 
 	/* splitting the empty string */
 	if (e == text) {
 		if (js_doregexec(J, re->prog, text, &m, 0)) {
-			if (len == limit) return;
 			js_pushliteral(J, "");
 			js_setindex(J, -2, 0);
 		}
@@ -601,7 +684,7 @@ static void Sp_split_regexp(js_State *J)
 		c = m.sub[0].ep;
 
 		/* empty string at end of last match */
-		if (b == p) {
+		if (b == c && b == p) {
 			++a;
 			continue;
 		}
@@ -632,6 +715,9 @@ static void Sp_split_string(js_State *J)
 	int i, n;
 
 	js_newarray(J);
+
+	if (limit == 0)
+		return;
 
 	n = strlen(sep);
 
@@ -665,7 +751,7 @@ static void Sp_split(js_State *J)
 {
 	if (js_isundefined(J, 1)) {
 		js_newarray(J);
-		js_copy(J, 0);
+		js_pushstring(J, js_tostring(J, 0));
 		js_setindex(J, -2, 0);
 	} else if (js_isregexp(J, 1)) {
 		Sp_split_regexp(J);
@@ -676,7 +762,8 @@ static void Sp_split(js_State *J)
 
 void jsB_initstring(js_State *J)
 {
-	J->String_prototype->u.s.string = "";
+	J->String_prototype->u.s.shrstr[0] = 0;
+	J->String_prototype->u.s.string = J->String_prototype->u.s.shrstr;
 	J->String_prototype->u.s.length = 0;
 
 	js_pushobject(J, J->String_prototype);

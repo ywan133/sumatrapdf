@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
@@ -10,7 +32,7 @@ pdf_remap_cmap_range(fz_context *ctx, pdf_cmap *ucs_from_gid,
 	unsigned int cpt, unsigned int gid, unsigned int n, pdf_cmap *ucs_from_cpt)
 {
 	unsigned int k;
-	int ucsbuf[8];
+	int ucsbuf[PDF_MRANGE_CAP];
 	int ucslen;
 
 	for (k = 0; k <= n; ++k)
@@ -37,13 +59,7 @@ pdf_remap_cmap(fz_context *ctx, pdf_cmap *gid_from_cpt, pdf_cmap *ucs_from_cpt)
 		if (gid_from_cpt->usecmap)
 			ucs_from_gid->usecmap = pdf_remap_cmap(ctx, gid_from_cpt->usecmap, ucs_from_cpt);
 
-		for (i = 0; i < gid_from_cpt->codespace_len; i++)
-		{
-			pdf_add_codespace(ctx, ucs_from_gid,
-					gid_from_cpt->codespace[i].low,
-					gid_from_cpt->codespace[i].high,
-					gid_from_cpt->codespace[i].n);
-		}
+		pdf_add_codespace(ctx, ucs_from_gid, 0, 0x7fffffff, 4);
 
 		for (i = 0; i < gid_from_cpt->rlen; ++i)
 		{
@@ -83,6 +99,18 @@ pdf_load_to_unicode(fz_context *ctx, pdf_document *doc, pdf_font_desc *font,
 	if (pdf_is_stream(ctx, cmapstm))
 	{
 		pdf_cmap *ucs_from_cpt = pdf_load_embedded_cmap(ctx, doc, cmapstm);
+		fz_try(ctx)
+			font->to_unicode = pdf_remap_cmap(ctx, font->encoding, ucs_from_cpt);
+		fz_always(ctx)
+			pdf_drop_cmap(ctx, ucs_from_cpt);
+		fz_catch(ctx)
+			fz_rethrow(ctx);
+		font->size += pdf_cmap_size(ctx, font->to_unicode);
+	}
+
+	else if (pdf_is_name(ctx, cmapstm))
+	{
+		pdf_cmap *ucs_from_cpt = pdf_load_system_cmap(ctx, pdf_to_name(ctx, cmapstm));
 		fz_try(ctx)
 			font->to_unicode = pdf_remap_cmap(ctx, font->encoding, ucs_from_cpt);
 		fz_always(ctx)

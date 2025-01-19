@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 struct AttrInfo {
@@ -8,7 +8,7 @@ struct AttrInfo {
     size_t valLen;
 
     bool NameIs(const char* s) const;
-    bool NameIsNS(const char* s, const char* ns) const;
+    bool NameIsNS(const char* nameToCheck, const char* ns) const;
     bool ValIs(const char* s) const;
 };
 
@@ -89,7 +89,7 @@ class HtmlPullParser {
     }
     HtmlPullParser(const char* s, const char* end) : currPos(s), end(end), start(s), len(end - s) {
     }
-    HtmlPullParser(std::span<u8> d)
+    explicit HtmlPullParser(const ByteSlice& d)
         : currPos((char*)d.data()), end((char*)d.data() + d.size()), start((char*)d.data()), len(d.size()) {
     }
 
@@ -118,3 +118,4 @@ int HtmlEntityNameToRune(const WCHAR* name, size_t nameLen);
 const char* ResolveHtmlEntity(const char* s, size_t len, int& rune);
 const char* ResolveHtmlEntities(const char* s, const char* end, Allocator* alloc);
 char* ResolveHtmlEntities(const char* s, size_t len);
+TempStr ResolveHtmlEntitiesTemp(const char* s, size_t len);

@@ -1,7 +1,7 @@
 //---------------------------------------------------------------------------------
 //
 //  Little Color Management System
-//  Copyright (c) 1998-2020 Marti Maria Saguer
+//  Copyright (c) 1998-2022 Marti Maria Saguer
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files (the "Software"),
@@ -29,13 +29,22 @@
 #include "tiffio.h"
 #include "utils.h"
 
+// Fix broken libtiff 4.3.0, thanks to Bob Friesenhahn for uncovering this
+
+#if defined(HAVE_STDINT_H) && (TIFFLIB_VERSION >= 20201219)
+#include <stdint.h>
+#  undef cmsUInt16Number
+#  define cmsUInt16Number uint16_t
+#  undef cmsUInt32Number
+#  define cmsUInt32Number uint32_t
+#endif /* TIFFLIB_VERSION */
 
 // Flags
 
 static cmsBool BlackWhiteCompensation = FALSE;
 static cmsBool IgnoreEmbedded         = FALSE;
 static cmsBool EmbedProfile           = FALSE;
-static int     Width                  = 8;
+static int     PixelDepth             = 8;
 static cmsBool GamutCheck             = FALSE;
 static cmsBool lIsDeviceLink          = FALSE;
 static cmsBool StoreAsAlpha           = FALSE;
@@ -57,16 +66,15 @@ static const char* SaveEmbedded = NULL;
 static
 void ConsoleWarningHandler(const char* module, const char* fmt, va_list ap)
 {
-    char e[512] = { '\0' };
-    if (module != NULL)
-        strcat(strcpy(e, module), ": ");
-
-    vsprintf(e+strlen(e), fmt, ap);
-    strcat(e, ".");
     if (Verbose) {
 
-        fprintf(stderr, "\nWarning");
-        fprintf(stderr, " %s\n", e);
+        fprintf(stderr, "Warning: ");
+
+        if (module != NULL)
+            fprintf(stderr, "[%s] ", module);
+
+        vfprintf(stderr, fmt, ap);
+        fprintf(stderr, "\n");
         fflush(stderr);
     }
 }
@@ -74,18 +82,18 @@ void ConsoleWarningHandler(const char* module, const char* fmt, va_list ap)
 static
 void ConsoleErrorHandler(const char* module, const char* fmt, va_list ap)
 {
-    char e[512] = { '\0' };
+    if (Verbose) {
 
-    if (module != NULL) {
-        if (strlen(module) < 500)
-               strcat(strcpy(e, module), ": ");
+        fprintf(stderr, "Error: ");
+
+        if (module != NULL)
+            fprintf(stderr, "[%s] ", module);
+
+        vfprintf(stderr, fmt, ap);
+        fprintf(stderr, "\n");
+        fflush(stderr);
     }
 
-    vsprintf(e+strlen(e), fmt, ap);
-    strcat(e, ".");
-    fprintf(stderr, "\nError");
-    fprintf(stderr, " %s\n", e);
-    fflush(stderr);
 }
 
 
@@ -96,13 +104,13 @@ void Warning(const char *frm, ...)
     va_list args;
 
     va_start(args, frm);
-    ConsoleWarningHandler("[tificc]", frm, args);
+    ConsoleWarningHandler("tificc", frm, args);
     va_end(args);
 }
 
 
 
-// Out of mememory is a fatal error
+// Out of memory is a fatal error
 static
 void OutOfMem(cmsUInt32Number size)
 {
@@ -111,12 +119,16 @@ void OutOfMem(cmsUInt32Number size)
 
 
 // -----------------------------------------------------------------------------------------------
-
+// Lab plug-in
 // In TIFF, Lab is encoded in a different way, so let's use the plug-in
 // capabilities of lcms2 to change the meaning of TYPE_Lab_8.
 
+#define LABTIFF_SH(m)           ((m) << 30)
+#define T_LABTIFF(m)            (((m)>>30)&1)
+
 // * 0xffff / 0xff00 = (255 * 257) / (255 * 256) = 257 / 256
-static int FromLabV2ToLabV4(int x)
+static
+int FromLabV2ToLabV4(int x)
 {
     int a;
 
@@ -126,7 +138,8 @@ static int FromLabV2ToLabV4(int x)
 }
 
 // * 0xf00 / 0xffff = * 256 / 257
-static int FromLabV4ToLabV2(int x)
+static
+int FromLabV4ToLabV2(int x)
 {
     return ((x << 8) + 0x80) / 257;
 }
@@ -222,7 +235,7 @@ cmsFormatter TiffFormatterFactory(cmsContext ContextID, cmsUInt32Number Type,
 {
     cmsFormatter Result = { NULL };
     int bps           = T_BYTES(Type);
-    int IsTiffSpecial = (Type >> 23) & 1;
+    int IsTiffSpecial = T_LABTIFF(Type);
 
     if (IsTiffSpecial && !(dwFlags & CMS_PACK_FLAGS_FLOAT))
     {
@@ -239,18 +252,19 @@ cmsFormatter TiffFormatterFactory(cmsContext ContextID, cmsUInt32Number Type,
 
 static cmsPluginFormatters TiffLabPlugin = { {cmsPluginMagicNumber, 2000-2000, cmsPluginFormattersSig, NULL}, TiffFormatterFactory };
 
-
+// -----------------------------------------------------------------------------------------------
 
 // Build up the pixeltype descriptor
 static
 cmsUInt32Number GetInputPixelType(TIFF *Bank)
 {
-    uint16 Photometric, bps, spp, extra, PlanarConfig, *info;
-    uint16 Compression, reverse = 0;
-    int ColorChannels, IsPlanar = 0, pt = 0, IsFlt;
+    cmsUInt16Number Photometric, bps, spp, extra, PlanarConfig, *info;
+    cmsUInt16Number Compression;
+    int ColorChannels;
+    int IsPremul = FALSE, IsPlanar = FALSE, IsFlt = FALSE, IsReverse = FALSE;
     int labTiffSpecial = FALSE;
+    int pt = PT_ANY;
 
-    TIFFGetField(Bank,           TIFFTAG_PHOTOMETRIC,   &Photometric);
     TIFFGetFieldDefaulted(Bank,  TIFFTAG_BITSPERSAMPLE, &bps);
 
     if (bps == 1)
@@ -259,7 +273,7 @@ cmsUInt32Number GetInputPixelType(TIFF *Bank)
     if (bps != 8 && bps != 16 && bps != 32)
         FatalError("Sorry, 8, 16 or 32 bits per sample only");
 
-    TIFFGetFieldDefaulted(Bank, TIFFTAG_SAMPLESPERPIXEL, &spp);
+
     TIFFGetFieldDefaulted(Bank, TIFFTAG_PLANARCONFIG, &PlanarConfig);
 
     switch (PlanarConfig) {
@@ -271,17 +285,15 @@ cmsUInt32Number GetInputPixelType(TIFF *Bank)
          FatalError("Unsupported planar configuration (=%d) ", (int) PlanarConfig);
     }
 
-    // If Samples per pixel == 1, PlanarConfiguration is irrelevant and need
-    // not to be included.
+    TIFFGetFieldDefaulted(Bank, TIFFTAG_SAMPLESPERPIXEL, &spp);
 
+    // If Samples per pixel == 1, PlanarConfiguration is irrelevant and need not to be included.
     if (spp == 1) IsPlanar = 0;
 
     // Any alpha?
-
     TIFFGetFieldDefaulted(Bank, TIFFTAG_EXTRASAMPLES, &extra, &info);
 
-    // Read alpha channels as colorant
-
+    // Read alpha channels as colorant?
     if (StoreAsAlpha) {
 
         ColorChannels = spp;
@@ -290,11 +302,18 @@ cmsUInt32Number GetInputPixelType(TIFF *Bank)
     else
         ColorChannels = spp - extra;
 
+    // Is alpha premultiplied ?
+    IsPremul = ((extra == 1) && (info[0] == EXTRASAMPLE_ASSOCALPHA));
+
+
+    // Get photometric interpretation and proceed accordly
+    TIFFGetField(Bank, TIFFTAG_PHOTOMETRIC, &Photometric);
+
     switch (Photometric) {
 
     case PHOTOMETRIC_MINISWHITE:
 
-        reverse = 1;
+        IsReverse = 1;
 
         // ... fall through ...
 
@@ -304,31 +323,31 @@ cmsUInt32Number GetInputPixelType(TIFF *Bank)
 
     case PHOTOMETRIC_RGB:
         pt = PT_RGB;
+        if (ColorChannels < 3)
+            FatalError("Sorry, RGB needs at least 3 samples per pixel");
         break;
-
 
      case PHOTOMETRIC_PALETTE:
          FatalError("Sorry, palette images not supported");
          break;
 
      case PHOTOMETRIC_SEPARATED:
-
          pt = PixelTypeFromChanCount(ColorChannels);
          break;
 
      case PHOTOMETRIC_YCBCR:
          TIFFGetField(Bank, TIFFTAG_COMPRESSION, &Compression);
          {
-             uint16 subx, suby;
+             cmsUInt16Number subx, suby;
 
              pt = PT_YCbCr;
              TIFFGetFieldDefaulted(Bank, TIFFTAG_YCBCRSUBSAMPLING, &subx, &suby);
              if (subx != 1 || suby != 1)
-                 FatalError("Sorry, subsampled images not supported");
-
+                 FatalError("Sorry, subsampled images are not supported");
          }
          break;
 
+     // Two Lab flavours
      case PHOTOMETRIC_ICCLAB:
          pt = PT_LabV2;
          break;
@@ -338,8 +357,8 @@ cmsUInt32Number GetInputPixelType(TIFF *Bank)
          labTiffSpecial = TRUE;
          break;
 
-
-     case PHOTOMETRIC_LOGLUV:      // CIE Log2(L) (u',v')
+     // CIE Log2(L) (u',v')
+     case PHOTOMETRIC_LOGLUV:
 
          TIFFSetField(Bank, TIFFTAG_SGILOGDATAFMT, SGILOGDATAFMT_16BIT);
          pt = PT_YUV;             // *ICCSpace = icSigLuvData;
@@ -355,20 +374,29 @@ cmsUInt32Number GetInputPixelType(TIFF *Bank)
     bps >>= 3;
     IsFlt = (bps == 0) || (bps == 4);
 
-    return (FLOAT_SH(IsFlt)|COLORSPACE_SH(pt)|PLANAR_SH(IsPlanar)|EXTRA_SH(extra)|CHANNELS_SH(ColorChannels)|BYTES_SH(bps)|FLAVOR_SH(reverse) | (labTiffSpecial << 23) );
+    return (FLOAT_SH(IsFlt) | COLORSPACE_SH(pt) | PLANAR_SH(IsPlanar) | EXTRA_SH(extra) | PREMUL_SH(IsPremul) |
+           CHANNELS_SH(ColorChannels) | BYTES_SH(bps) | FLAVOR_SH(IsReverse) | LABTIFF_SH(labTiffSpecial));
 }
 
 
-
 // Rearrange pixel type to build output descriptor
+
 static
 cmsUInt32Number ComputeOutputFormatDescriptor(cmsUInt32Number dwInput, int OutColorSpace, int bps)
 {
     int IsPlanar  = T_PLANAR(dwInput);
     int Channels  = ChanCountFromPixelType(OutColorSpace);
     int IsFlt = (bps == 0) || (bps == 4);
+    int labTiffSpecial = FALSE;
+    int Extra = T_EXTRA(dwInput);
+    int IsPremul = T_PREMUL(dwInput);
 
-    return (FLOAT_SH(IsFlt)|COLORSPACE_SH(OutColorSpace)|PLANAR_SH(IsPlanar)|CHANNELS_SH(Channels)|BYTES_SH(bps));
+    if (OutColorSpace == PT_Lab)
+        labTiffSpecial = TRUE;
+
+    return (FLOAT_SH(IsFlt) | COLORSPACE_SH(OutColorSpace) | PLANAR_SH(IsPlanar) |
+        CHANNELS_SH(Channels) | BYTES_SH(bps) | EXTRA_SH(Extra) | PREMUL_SH(IsPremul) |
+        LABTIFF_SH(labTiffSpecial));
 }
 
 
@@ -381,9 +409,8 @@ int TileBasedXform(cmsContext ContextID, cmsHTRANSFORM hXForm, TIFF* in, TIFF* o
     tsize_t BufSizeOut = TIFFTileSize(out);
     unsigned char *BufferIn, *BufferOut;
     ttile_t i, TileCount = TIFFNumberOfTiles(in) / nPlanes;
-    uint32 tw, tl;
+    cmsUInt32Number tw, tl;
     int PixelCount, j;
-
 
     // Check for bad tiffs
     if (BufSizeIn > INT_MAX || BufSizeOut > INT_MAX)
@@ -409,6 +436,9 @@ int TileBasedXform(cmsContext ContextID, cmsHTRANSFORM hXForm, TIFF* in, TIFF* o
                 BufferIn + (j*BufSizeIn), BufSizeIn) < 0)   goto cleanup;
         }
 
+        if (PixelCount < 0)
+            FatalError("TIFF is corrupted");
+
         cmsDoTransform(ContextID, hXForm, BufferIn, BufferOut, PixelCount);
 
         for (j=0; j < nPlanes; j++) {
@@ -416,7 +446,6 @@ int TileBasedXform(cmsContext ContextID, cmsHTRANSFORM hXForm, TIFF* in, TIFF* o
             if (TIFFWriteEncodedTile(out, i + (j*TileCount),
                 BufferOut + (j*BufSizeOut), BufSizeOut) < 0) goto cleanup;
         }
-
     }
 
     _TIFFfree(BufferIn);
@@ -433,7 +462,6 @@ cleanup:
 
 
 // Strip based transforms
-
 static
 int StripBasedXform(cmsContext ContextID, cmsHTRANSFORM hXForm, TIFF* in, TIFF* out, int nPlanes)
 {
@@ -441,9 +469,9 @@ int StripBasedXform(cmsContext ContextID, cmsHTRANSFORM hXForm, TIFF* in, TIFF* 
     tsize_t BufSizeOut = TIFFStripSize(out);
     unsigned char *BufferIn, *BufferOut;
     ttile_t i, StripCount = TIFFNumberOfStrips(in) / nPlanes;
-    uint32 sw;
-    uint32 sl;
-    uint32 iml;
+    cmsUInt32Number sw;
+    cmsUInt32Number sl;
+    cmsUInt32Number iml;
     int j;
     int PixelCount;
 
@@ -477,6 +505,9 @@ int StripBasedXform(cmsContext ContextID, cmsHTRANSFORM hXForm, TIFF* in, TIFF* 
         PixelCount = (int) sw * (iml < sl ? iml : sl);
         iml -= sl;
 
+        if (PixelCount < 0)
+            FatalError("TIFF is corrupted");
+
         cmsDoTransform(ContextID, hXForm, BufferIn, BufferOut, PixelCount);
 
         for (j=0; j < nPlanes; j++) {
@@ -498,109 +529,119 @@ cleanup:
 }
 
 
+// Fill the array with a short value
+static
+void fillArray(cmsInt16Number array[],  cmsInt16Number val, cmsUInt32Number size)
+{
+    cmsUInt32Number i;
+
+    size /= sizeof(cmsInt16Number);
+    for (i = 0; i < size; i++)
+        array[i] = val;
+
+}
+
 // Creates minimum required tags
 static
-void WriteOutputTags(TIFF *out, int Colorspace, int BytesPerSample)
+void WriteOutputTags(TIFF* out, int Colorspace, int BytesPerSample, int AlphaChannels, int IsPremul)
 {
     int BitsPerSample = (8 * BytesPerSample);
-    int nChannels     = ChanCountFromPixelType(Colorspace);
+    int nChannels = ChanCountFromPixelType(Colorspace);
 
-    uint16 Extra[] = { EXTRASAMPLE_UNASSALPHA,
-                       EXTRASAMPLE_UNASSALPHA,
-                       EXTRASAMPLE_UNASSALPHA,
-                       EXTRASAMPLE_UNASSALPHA,
-                       EXTRASAMPLE_UNASSALPHA,
-                       EXTRASAMPLE_UNASSALPHA,
-                       EXTRASAMPLE_UNASSALPHA,
-                       EXTRASAMPLE_UNASSALPHA,
-                       EXTRASAMPLE_UNASSALPHA,
-                       EXTRASAMPLE_UNASSALPHA,
-                       EXTRASAMPLE_UNASSALPHA
-    };
+    TIFFSetField(out, TIFFTAG_BITSPERSAMPLE, BitsPerSample);
+    TIFFSetField(out, TIFFTAG_SAMPLESPERPIXEL, nChannels + AlphaChannels);
 
+    if (AlphaChannels > 0)
+    {
+        cmsInt16Number Extra[20];
 
-  switch (Colorspace) {
+        if (IsPremul)
+            fillArray(Extra, EXTRASAMPLE_ASSOCALPHA, sizeof(Extra));
+        else
+            fillArray(Extra, EXTRASAMPLE_UNASSALPHA, sizeof(Extra));
 
-  case PT_GRAY:
-      TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
-      TIFFSetField(out, TIFFTAG_SAMPLESPERPIXEL, 1);
-      TIFFSetField(out, TIFFTAG_BITSPERSAMPLE, BitsPerSample);
-      break;
-
-  case PT_RGB:
-      TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
-      TIFFSetField(out, TIFFTAG_SAMPLESPERPIXEL, 3);
-      TIFFSetField(out, TIFFTAG_BITSPERSAMPLE, BitsPerSample);
-      break;
-
-  case PT_CMY:
-      TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_SEPARATED);
-      TIFFSetField(out, TIFFTAG_SAMPLESPERPIXEL, 3);
-      TIFFSetField(out, TIFFTAG_INKSET, 2);
-      TIFFSetField(out, TIFFTAG_BITSPERSAMPLE, BitsPerSample);
-      break;
-
-  case PT_CMYK:
-      TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_SEPARATED);
-      TIFFSetField(out, TIFFTAG_SAMPLESPERPIXEL, 4);
-      TIFFSetField(out, TIFFTAG_INKSET, INKSET_CMYK);
-      TIFFSetField(out, TIFFTAG_BITSPERSAMPLE, BitsPerSample);
-      break;
-
-  case PT_Lab:
-      if (BitsPerSample == 16)
-          TIFFSetField(out, TIFFTAG_PHOTOMETRIC, 9);
-      else
-          TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_CIELAB);
-      TIFFSetField(out, TIFFTAG_SAMPLESPERPIXEL, 3);
-      TIFFSetField(out, TIFFTAG_BITSPERSAMPLE, BitsPerSample);    // Needed by TIFF Spec
-      break;
-
-
-      // Multi-ink separations
-  case PT_MCH2:
-  case PT_MCH3:
-  case PT_MCH4:
-  case PT_MCH5:
-  case PT_MCH6:
-  case PT_MCH7:
-  case PT_MCH8:
-  case PT_MCH9:
-  case PT_MCH10:
-  case PT_MCH11:
-  case PT_MCH12:
-  case PT_MCH13:
-  case PT_MCH14:
-  case PT_MCH15:
-
-      TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_SEPARATED);
-      TIFFSetField(out, TIFFTAG_SAMPLESPERPIXEL, nChannels);
-
-      if (StoreAsAlpha && nChannels >= 4) {
-          // CMYK plus extra alpha
-          TIFFSetField(out, TIFFTAG_EXTRASAMPLES, nChannels - 4, Extra);
-          TIFFSetField(out, TIFFTAG_INKSET, 1);
-          TIFFSetField(out, TIFFTAG_NUMBEROFINKS, 4);
-      }
-      else {
-          TIFFSetField(out, TIFFTAG_INKSET, 2);
-          TIFFSetField(out, TIFFTAG_NUMBEROFINKS, nChannels);
-      }
-
-      TIFFSetField(out, TIFFTAG_BITSPERSAMPLE, BitsPerSample);
-      break;
-
-
-  default:
-      FatalError("Unsupported output colorspace");
+        TIFFSetField(out, TIFFTAG_EXTRASAMPLES, AlphaChannels, Extra);
     }
 
-  if (Width == 32)
-      TIFFSetField(out, TIFFTAG_SAMPLEFORMAT, SAMPLEFORMAT_IEEEFP);
+    switch (Colorspace) {
+
+    case PT_GRAY:
+        TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
+
+        break;
+
+    case PT_RGB:
+        TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
+        break;
+
+    case PT_CMY:
+        TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_SEPARATED);
+        TIFFSetField(out, TIFFTAG_INKSET, INKSET_MULTIINK);
+        break;
+
+    case PT_CMYK:
+        TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_SEPARATED);
+        TIFFSetField(out, TIFFTAG_INKSET, INKSET_CMYK);
+        break;
+
+    case PT_Lab:
+        if (BitsPerSample == 16)
+            TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_ICCLAB);
+        else
+            TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_CIELAB);
+        break;
+
+
+        // Multi-ink separations
+    case PT_MCH2:
+    case PT_MCH3:
+    case PT_MCH4:
+    case PT_MCH5:
+    case PT_MCH6:
+    case PT_MCH7:
+    case PT_MCH8:
+    case PT_MCH9:
+    case PT_MCH10:
+    case PT_MCH11:
+    case PT_MCH12:
+    case PT_MCH13:
+    case PT_MCH14:
+    case PT_MCH15:
+
+        TIFFSetField(out, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_SEPARATED);
+
+        if (StoreAsAlpha && nChannels >= 4) {
+
+            cmsInt16Number Extra[20];
+
+            fillArray(Extra, EXTRASAMPLE_UNASSALPHA, sizeof(Extra));
+
+            // CMYK plus extra alpha
+            TIFFSetField(out, TIFFTAG_EXTRASAMPLES, nChannels - 4, Extra);
+            TIFFSetField(out, TIFFTAG_INKSET, INKSET_CMYK);
+            TIFFSetField(out, TIFFTAG_NUMBEROFINKS, 4);
+        }
+        else {
+            TIFFSetField(out, TIFFTAG_INKSET, INKSET_MULTIINK);
+            TIFFSetField(out, TIFFTAG_NUMBEROFINKS, nChannels);
+        }
+        break;
+
+
+    default:
+        FatalError("Unsupported output colorspace");
+    }
+
+    if (PixelDepth == 32)
+        TIFFSetField(out, TIFFTAG_SAMPLEFORMAT,
+                          SAMPLEFORMAT_IEEEFP,
+                          SAMPLEFORMAT_IEEEFP,
+                          SAMPLEFORMAT_IEEEFP,
+                          SAMPLEFORMAT_IEEEFP);
 }
 
 
-// Copies a bunch of tages
+// Copies a bunch of tags
 
 static
 void CopyOtherTags(TIFF* in, TIFF* out)
@@ -610,10 +651,11 @@ void CopyOtherTags(TIFF* in, TIFF* out)
 
 
     short shortv;
-    uint32 ow, ol;
+    unsigned short compression;
+    cmsUInt32Number ow, ol;
     cmsFloat32Number floatv;
     char *stringv;
-    uint32 longv;
+    cmsUInt32Number longv;
 
     CopyField(TIFFTAG_SUBFILETYPE, longv);
 
@@ -624,10 +666,20 @@ void CopyOtherTags(TIFF* in, TIFF* out)
     TIFFSetField(out, TIFFTAG_IMAGELENGTH, ol);
 
     CopyField(TIFFTAG_PLANARCONFIG, shortv);
-    CopyField(TIFFTAG_COMPRESSION, shortv);
+    CopyField(TIFFTAG_COMPRESSION, compression);
 
-    if (Width != 32)
-        CopyField(TIFFTAG_PREDICTOR, shortv);
+    // This is tricky, libtiff would access predictor in a wrong way
+    // if the codec is none of those
+    if (compression == COMPRESSION_LZW ||
+        compression == 34925 /*COMPRESSION_LZMA*/ ||
+        compression == COMPRESSION_PIXARLOG ||
+        compression == COMPRESSION_DEFLATE ||
+        compression == COMPRESSION_ADOBE_DEFLATE ||
+        compression == 50000 /*COMPRESSION_ZSTD*/)
+    {
+        if (PixelDepth != 32)
+            CopyField(TIFFTAG_PREDICTOR, shortv);
+    }
 
     CopyField(TIFFTAG_THRESHHOLDING, shortv);
     CopyField(TIFFTAG_FILLORDER, shortv);
@@ -657,8 +709,6 @@ void CopyOtherTags(TIFF* in, TIFF* out)
     CopyField(TIFFTAG_DOCUMENTNAME, stringv);
 
 }
-
-// A replacement for (the nonstandard) filelength
 
 
 static
@@ -694,7 +744,7 @@ void DoEmbedProfile(TIFF* Out, const char* ProfileFile)
 }
 
 
-
+// Read or create a ICC profile from the TIFF data
 static
 cmsHPROFILE GetTIFFProfile(cmsContext ContextID, TIFF* in)
 {
@@ -730,7 +780,6 @@ cmsHPROFILE GetTIFFProfile(cmsContext ContextID, TIFF* in)
     }
 
     // Try to see if "colorimetric" tiff
-
     if (TIFFGetField(in, TIFFTAG_PRIMARYCHROMATICITIES, &chr)) {
 
         Primaries.Red.x   =  chr[0];
@@ -748,8 +797,7 @@ cmsHPROFILE GetTIFFProfile(cmsContext ContextID, TIFF* in)
             WhitePoint.y = wp[1];
             WhitePoint.Y = 1.0;
 
-            // Transferfunction is a bit harder....
-
+            // Transfer function is a bit harder....
             TIFFGetFieldDefaulted(in, TIFFTAG_TRANSFERFUNCTION,
                 &gmr,
                 &gmg,
@@ -785,12 +833,14 @@ int TransformImage(cmsContext ContextID, TIFF* in, TIFF* out, const char *cDefIn
     cmsHTRANSFORM xform;
     cmsUInt32Number wInput, wOutput;
     int OutputColorSpace;
-    int bps = Width / 8;
-    cmsUInt32Number dwFlags = 0;
+    int BytesPerSample = PixelDepth / 8;
+    cmsUInt32Number dwFlags;
     int nPlanes;
 
-    // Observer adaptation state (only meaningful on absolute colorimetric intent)
+    // Default options
+    dwFlags = cmsFLAGS_COPY_ALPHA;
 
+    // Observer adaptation state (only meaningful on absolute colorimetric intent)
     cmsSetAdaptationState(ContextID, ObserverAdaptationState);
 
     if (EmbedProfile && cOutProf)
@@ -798,7 +848,6 @@ int TransformImage(cmsContext ContextID, TIFF* in, TIFF* out, const char *cDefIn
 
     if (BlackWhiteCompensation)
         dwFlags |= cmsFLAGS_BLACKPOINTCOMPENSATION;
-
 
     switch (PrecalcMode) {
 
@@ -809,7 +858,6 @@ int TransformImage(cmsContext ContextID, TIFF* in, TIFF* out, const char *cDefIn
 
        default: FatalError("Unknown precalculation mode '%d'", PrecalcMode);
     }
-
 
     if (GamutCheck)
         dwFlags |= cmsFLAGS_GAMUTCHECK;
@@ -838,11 +886,9 @@ int TransformImage(cmsContext ContextID, TIFF* in, TIFF* out, const char *cDefIn
     }
 
     // Take input color space
-
     wInput = GetInputPixelType(in);
 
     // Assure both, input profile and input TIFF are on same colorspace
-
     if (_cmsLCMScolorSpace(ContextID, cmsGetColorSpace(ContextID, hIn)) != (int) T_COLORSPACE(wInput))
         FatalError("Input profile is not operating in proper color space");
 
@@ -852,9 +898,9 @@ int TransformImage(cmsContext ContextID, TIFF* in, TIFF* out, const char *cDefIn
     else
         OutputColorSpace = _cmsLCMScolorSpace(ContextID, cmsGetPCS(ContextID, hIn));
 
-    wOutput  = ComputeOutputFormatDescriptor(wInput, OutputColorSpace, bps);
+    wOutput  = ComputeOutputFormatDescriptor(wInput, OutputColorSpace, BytesPerSample);
 
-    WriteOutputTags(out, OutputColorSpace, bps);
+    WriteOutputTags(out, OutputColorSpace, BytesPerSample, T_EXTRA(wOutput), T_PREMUL(wOutput));
     CopyOtherTags(in, out);
 
     // Ink limit
@@ -863,7 +909,6 @@ int TransformImage(cmsContext ContextID, TIFF* in, TIFF* out, const char *cDefIn
 
             cmsHPROFILE hProfiles[10];
             int nProfiles = 0;
-
 
             hInkLimit = cmsCreateInkLimitingDeviceLink(ContextID, cmsGetColorSpace(ContextID, hOut), InkLimit);
 
@@ -926,84 +971,70 @@ int TransformImage(cmsContext ContextID, TIFF* in, TIFF* out, const char *cDefIn
 
 // Print help
 static
-void Help(int level)
+void Help(cmsContext ContextID, int level)
 {
-    fprintf(stderr, "little cms ICC profile applier for TIFF - v6.2 [LittleCMS %2.2f]\n\n", LCMS_VERSION / 1000.0);
-    fflush(stderr);
+    UTILS_UNUSED_PARAMETER(level);
 
-    switch(level) {
+    fprintf(stderr, "usage: tificc [flags] input.tif output.tif\n");
 
-     default:
-     case 0:
+    fprintf(stderr, "\nflags:\n\n");
+    fprintf(stderr, "-v - Verbose\n");
+    fprintf(stderr, "-i<profile> - Input profile (defaults to sRGB)\n");
+    fprintf(stderr, "-o<profile> - Output profile (defaults to sRGB)\n");
+    fprintf(stderr, "-l<profile> - Transform by device-link profile\n");
 
-         fprintf(stderr, "usage: tificc [flags] input.tif output.tif\n");
+    PrintBuiltins();
 
-         fprintf(stderr, "\nflags:\n\n");
-         fprintf(stderr, "%cv - Verbose\n", SW);
-         fprintf(stderr, "%ci<profile> - Input profile (defaults to sRGB)\n", SW);
-         fprintf(stderr, "%co<profile> - Output profile (defaults to sRGB)\n", SW);
-         fprintf(stderr, "%cl<profile> - Transform by device-link profile\n", SW);
+    PrintRenderingIntents(ContextID);
 
-         PrintRenderingIntents(NULL);
+    fprintf(stderr, "-b - Black point compensation\n");
+    fprintf(stderr, "-d<0..1> - Observer adaptation state (abs.col. only)\n");
 
-         fprintf(stderr, "%cb - Black point compensation\n", SW);
-         fprintf(stderr, "%cd<0..1> - Observer adaptation state (abs.col. only)\n", SW);
+    fprintf(stderr, "-c<0,1,2,3> - Precalculates transform (0=Off, 1=Normal, 2=Hi-res, 3=LoRes)\n");
+    fprintf(stderr, "\n");
 
-         fprintf(stderr, "%cc<0,1,2,3> - Precalculates transform (0=Off, 1=Normal, 2=Hi-res, 3=LoRes)\n", SW);
-         fprintf(stderr, "\n");
+    fprintf(stderr, "-w<8,16,32> - Output depth. Use 32 for floating-point\n\n");
+    fprintf(stderr, "-a - Handle channels > 4 as alpha\n");
 
-         fprintf(stderr, "%cw<8,16,32> - Output depth. Use 32 for floating-point\n\n", SW);
-         fprintf(stderr, "%ca - Handle channels > 4 as alpha\n", SW);
-
-         fprintf(stderr, "%cn - Ignore embedded profile on input\n", SW);
-         fprintf(stderr, "%ce - Embed destination profile\n", SW);
-         fprintf(stderr, "%cs<new profile> - Save embedded profile as <new profile>\n", SW);
-         fprintf(stderr, "\n");
+    fprintf(stderr, "-n - Ignore embedded profile on input\n");
+    fprintf(stderr, "-e - Embed destination profile\n");
+    fprintf(stderr, "-s<new profile> - Save embedded profile as <new profile>\n");
+    fprintf(stderr, "\n");
 
 
-         fprintf(stderr, "%cp<profile> - Soft proof profile\n", SW);
-         fprintf(stderr, "%cm<n> - Soft proof intent\n", SW);
-         fprintf(stderr, "%cg - Marks out-of-gamut colors on softproof\n", SW);
+    fprintf(stderr, "-p<profile> - Soft proof profile\n");
+    fprintf(stderr, "-m<n> - Soft proof intent\n");
+    fprintf(stderr, "\tThat is the intent used to translate the simulation to the output device.\n\tNote that the simulated intent is set by using -t not by -m\n");
+    fprintf(stderr, "-g - Marks out-of-gamut colors on softproof\n");
 
-         fprintf(stderr, "\n");
+    fprintf(stderr, "\n");
 
-         fprintf(stderr, "%ck<0..400> - Ink-limiting in %% (CMYK only)\n", SW);
-         fprintf(stderr, "\n");
-         fprintf(stderr, "%ch<0,1,2,3> - More help\n", SW);
-         break;
+    fprintf(stderr, "-k<0..400> - Ink-limiting in %% (CMYK only)\n");
+    fprintf(stderr, "\n");
 
-     case 1:
 
-         fprintf(stderr, "Examples:\n\n"
-             "To color correct from scanner to sRGB:\n"
-             "\ttificc %ciscanner.icm in.tif out.tif\n"
-             "To convert from monitor1 to monitor2:\n"
-             "\ttificc %cimon1.icm %comon2.icm in.tif out.tif\n"
-             "To make a CMYK separation:\n"
-             "\ttificc %coprinter.icm inrgb.tif outcmyk.tif\n"
-             "To recover sRGB from a CMYK separation:\n"
-             "\ttificc %ciprinter.icm incmyk.tif outrgb.tif\n"
-             "To convert from CIELab TIFF to sRGB\n"
-             "\ttificc %ci*Lab in.tif out.tif\n\n",
-             SW, SW, SW, SW, SW, SW);
-         break;
+    fprintf(stderr, "Examples:\n\n"
+        "To color correct from scanner to sRGB:\n"
+        "\ttificc -iscanner.icm in.tif out.tif\n"
+        "To convert from monitor1 to monitor2:\n"
+        "\ttificc -imon1.icm -omon2.icm in.tif out.tif\n"
+        "To make a CMYK separation:\n"
+        "\ttificc -oprinter.icm inrgb.tif outcmyk.tif\n"
+        "To recover sRGB from a CMYK separation:\n"
+        "\ttificc -iprinter.icm incmyk.tif outrgb.tif\n"
+        "To soft-proof how behaves Probev1_ICCv4.icc on perceptual:\n"
+        "\ttifficc -t0 -p Probev1_ICCv4.icc -m1 infile.tif out.tif\n"
+        "To convert from CIELab TIFF to sRGB\n"
+        "\ttificc -i*Lab in.tif out.tif\n\n");
 
-     case 2:
-         PrintBuiltins();
-         break;
 
-     case 3:
+    fprintf(stderr, "This program is intended to be a demo of the Little CMS\n"
+        "color engine. Both lcms and this program are open source.\n"
+        "You can obtain both in source code at https://www.littlecms.com\n"
+        "For suggestions, comments, bug reports etc. send mail to\n"
+        "info@littlecms.com\n\n");
 
-         fprintf(stderr, "This program is intended to be a demo of the little cms\n"
-             "engine. Both lcms and this program are freeware. You can\n"
-             "obtain both in source code at http://www.littlecms.com\n"
-             "For suggestions, comments, bug reports etc. send mail to\n"
-             "info@littlecms.com\n\n");
 
-         break;
-    }
-
-    fflush(stderr);
     exit(0);
 }
 
@@ -1011,13 +1042,25 @@ void Help(int level)
 // The toggles stuff
 
 static
-void HandleSwitches(int argc, char *argv[])
+void HandleSwitches(cmsContext ContextID, int argc, char *argv[])
 {
     int s;
 
-    while ((s=xgetopt(argc,argv,"aAeEbBw:W:nNvVGgh:H:i:I:o:O:P:p:t:T:c:C:l:L:M:m:K:k:S:s:D:d:")) != EOF) {
+    while ((s=xgetopt(argc,argv,"aAeEbBw:W:nNvVGgh:H:i:I:o:O:P:p:t:T:c:C:l:L:M:m:K:k:S:s:D:d:-:")) != EOF) {
 
         switch (s) {
+
+
+        case '-':
+            if (strcmp(xoptarg, "help") == 0)
+            {
+                Help(ContextID, 0);
+            }
+            else
+            {
+                FatalError("Unknown option - run without args to see valid ones.\n");
+            }
+            break;
 
         case 'a':
         case 'A':
@@ -1104,8 +1147,8 @@ void HandleSwitches(int argc, char *argv[])
 
         case 'W':
         case 'w':
-            Width = atoi(xoptarg);
-            if (Width != 8 && Width != 16 && Width != 32)
+            PixelDepth = atoi(xoptarg);
+            if (PixelDepth != 8 && PixelDepth != 16 && PixelDepth != 32)
                 FatalError("Only 8, 16 and 32 bps are supported");
             break;
 
@@ -1125,7 +1168,7 @@ void HandleSwitches(int argc, char *argv[])
         case 'h':  {
 
             int a =  atoi(xoptarg);
-            Help(a);
+            Help(ContextID, a);
             }
             break;
 
@@ -1145,17 +1188,22 @@ int main(int argc, char* argv[])
     cmsContext ContextID;
     TIFF *in, *out;
 
+
+    fprintf(stderr, "Little CMS ICC profile applier for TIFF - v7.2 [LittleCMS %2.2f]\n\n", cmsGetEncodedCMMversion() / 1000.0);
+    fprintf(stderr, "Copyright (c) 1998-2022 Marti Maria Saguer. See COPYING file for details.\n");
+    fflush(stderr);
+
     ContextID = cmsCreateContext(NULL, NULL);
 
     cmsPlugin(ContextID, &TiffLabPlugin);
 
     InitUtils(ContextID, "tificc");
 
-    HandleSwitches(argc, argv);
+    HandleSwitches(ContextID, argc, argv);
 
     if ((argc - xoptind) != 2) {
 
-        Help(0);
+        Help(ContextID, 0);
     }
 
 

@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef SOURCE_XPS_IMP_H
 #define SOURCE_XPS_IMP_H
 
@@ -6,12 +28,13 @@ typedef struct xps_page_s xps_page;
 
 fz_document *xps_open_document(fz_context *ctx, const char *filename);
 fz_document *xps_open_document_with_stream(fz_context *ctx, fz_stream *file);
+fz_document *xps_open_document_with_directory(fz_context *ctx, fz_archive *dir);
 int xps_count_pages(fz_context *ctx, fz_document *doc, int chapter);
 fz_page *xps_load_page(fz_context *ctx, fz_document *doc, int chapter, int number);
 fz_outline *xps_load_outline(fz_context *ctx, fz_document *doc);
 void xps_run_page(fz_context *ctx, fz_page *page, fz_device *dev, fz_matrix ctm, fz_cookie *cookie);
 fz_link *xps_load_links(fz_context *ctx, fz_page *page);
-fz_location xps_lookup_link_target(fz_context *ctx, fz_document *doc, const char *target_uri, float *xp, float *yp);
+fz_link_dest xps_lookup_link_target(fz_context *ctx, fz_document *doc, const char *target_uri);
 
 int xps_strcasecmp(char *a, char *b);
 void xps_resolve_url(fz_context *ctx, xps_document *doc, char *output, char *base_uri, char *path, int output_size);

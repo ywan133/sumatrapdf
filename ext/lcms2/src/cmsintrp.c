@@ -1,7 +1,7 @@
 //---------------------------------------------------------------------------------
 //
 //  Little Color Management System
-//  Copyright (c) 1998-2020 Marti Maria Saguer
+//  Copyright (c) 1998-2022 Marti Maria Saguer
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files (the "Software"),
@@ -201,8 +201,8 @@ void LinLerp1D(cmsContext ContextID,
     const cmsUInt16Number* LutTable = (cmsUInt16Number*) p ->Table;
     cmsUNUSED_PARAMETER(ContextID);
 
-    // if last value...
-    if (Value[0] == 0xffff) {
+    // if last value or just one point
+    if (Value[0] == 0xffff || p->Domain[0] == 0) {
 
         Output[0] = LutTable[p -> Domain[0]];
     }
@@ -242,7 +242,7 @@ void LinLerp1Dfloat(cmsContext ContextID, const cmsFloat32Number Value[],
        val2 = fclamp(Value[0]);
 
        // if last value...
-       if (val2 == 1.0) {
+       if (val2 == 1.0 || p->Domain[0] == 0) {
            Output[0] = LutTable[p -> Domain[0]];
        }
        else
@@ -278,20 +278,34 @@ void Eval1Input(cmsContext ContextID,
        const cmsUInt16Number* LutTable = (cmsUInt16Number*) p16 -> Table;
        cmsUNUSED_PARAMETER(ContextID);
 
-       v = Input[0] * p16 -> Domain[0];
-       fk = _cmsToFixedDomain(v);
 
-       k0 = FIXED_TO_INT(fk);
-       rk = (cmsUInt16Number) FIXED_REST_TO_INT(fk);
+       // if last value...
+       if (Input[0] == 0xffff || p16->Domain[0] == 0) {
 
-       k1 = k0 + (Input[0] != 0xFFFFU ? 1 : 0);
+           cmsUInt32Number y0 = p16->Domain[0] * p16->opta[0];
 
-       K0 = p16 -> opta[0] * k0;
-       K1 = p16 -> opta[0] * k1;
+           for (OutChan = 0; OutChan < p16->nOutputs; OutChan++) {
+               Output[OutChan] = LutTable[y0 + OutChan];
+           }
+       }
+       else
+       {
 
-       for (OutChan=0; OutChan < p16->nOutputs; OutChan++) {
+           v = Input[0] * p16->Domain[0];
+           fk = _cmsToFixedDomain(v);
 
-           Output[OutChan] = LinearInterp(rk, LutTable[K0+OutChan], LutTable[K1+OutChan]);
+           k0 = FIXED_TO_INT(fk);
+           rk = (cmsUInt16Number)FIXED_REST_TO_INT(fk);
+
+           k1 = k0 + (Input[0] != 0xFFFFU ? 1 : 0);
+
+           K0 = p16->opta[0] * k0;
+           K1 = p16->opta[0] * k1;
+
+           for (OutChan = 0; OutChan < p16->nOutputs; OutChan++) {
+
+               Output[OutChan] = LinearInterp(rk, LutTable[K0 + OutChan], LutTable[K1 + OutChan]);
+           }
        }
 }
 
@@ -313,12 +327,12 @@ void Eval1InputFloat(cmsContext ContextID, const cmsFloat32Number Value[],
     val2 = fclamp(Value[0]);
 
     // if last value...
-    if (val2 == 1.0) {
+    if (val2 == 1.0 || p->Domain[0] == 0) {
 
-        y0 = LutTable[p->Domain[0]];
+        cmsUInt32Number start = p->Domain[0] * p->opta[0];
 
         for (OutChan = 0; OutChan < p->nOutputs; OutChan++) {
-            Output[OutChan] = y0;
+            Output[OutChan] = LutTable[start + OutChan];
         }
     }
     else
@@ -412,12 +426,13 @@ void BilinearInterp16(cmsContext ContextID,
            const cmsUInt16Number* LutTable = (cmsUInt16Number*) p ->Table;
            int        OutChan, TotalOut;
            cmsS15Fixed16Number    fx, fy;
-  CMSREGISTER int        rx, ry;
-           int        x0, y0;
-  CMSREGISTER int        X0, X1, Y0, Y1;
-           int        d00, d01, d10, d11,
-                      dx0, dx1,
-                      dxy;
+           CMSREGISTER int        rx, ry;
+           int                    x0, y0;
+           CMSREGISTER int        X0, X1, Y0, Y1;
+
+           int                    d00, d01, d10, d11,
+                                  dx0, dx1,
+                                  dxy;
            cmsUNUSED_PARAMETER(ContextID);
 
     TotalOut   = p -> nOutputs;
@@ -474,11 +489,12 @@ void TrilinearInterpFloat(cmsContext ContextID, const cmsFloat32Number Input[],
     int        x0, y0, z0,
                X0, Y0, Z0, X1, Y1, Z1;
     int        TotalOut, OutChan;
+
     cmsFloat32Number      fx, fy, fz,
-        d000, d001, d010, d011,
-        d100, d101, d110, d111,
-        dx00, dx01, dx10, dx11,
-        dxy0, dxy1, dxyz;
+                          d000, d001, d010, d011,
+                          d100, d101, d110, d111,
+                          dx00, dx01, dx10, dx11,
+                          dxy0, dxy1, dxyz;
     cmsUNUSED_PARAMETER(ContextID);
 
     TotalOut   = p -> nOutputs;
@@ -546,13 +562,13 @@ void TrilinearInterp16(cmsContext ContextID,
            const cmsUInt16Number* LutTable = (cmsUInt16Number*) p ->Table;
            int        OutChan, TotalOut;
            cmsS15Fixed16Number    fx, fy, fz;
-  CMSREGISTER int        rx, ry, rz;
-           int        x0, y0, z0;
-  CMSREGISTER int        X0, X1, Y0, Y1, Z0, Z1;
-           int        d000, d001, d010, d011,
-                      d100, d101, d110, d111,
-                      dx00, dx01, dx10, dx11,
-                      dxy0, dxy1, dxyz;
+           CMSREGISTER int        rx, ry, rz;
+           int                    x0, y0, z0;
+           CMSREGISTER int        X0, X1, Y0, Y1, Z0, Z1;
+           int                    d000, d001, d010, d011,
+                                  d100, d101, d110, d111,
+                                  dx00, dx01, dx10, dx11,
+                                  dxy0, dxy1, dxyz;
            cmsUNUSED_PARAMETER(ContextID);
 
     TotalOut   = p -> nOutputs;
@@ -621,8 +637,8 @@ void TetrahedralInterpFloat(cmsContext ContextID, const cmsFloat32Number Input[]
 {
     const cmsFloat32Number* LutTable = (cmsFloat32Number*) p -> Table;
     cmsFloat32Number     px, py, pz;
-    int        x0, y0, z0,
-               X0, Y0, Z0, X1, Y1, Z1;
+    int                  x0, y0, z0,
+                         X0, Y0, Z0, X1, Y1, Z1;
     cmsFloat32Number     rx, ry, rz;
     cmsFloat32Number     c0, c1=0, c2=0, c3=0;
     int                  OutChan, TotalOut;
@@ -713,9 +729,6 @@ void TetrahedralInterpFloat(cmsContext ContextID, const cmsFloat32Number Input[]
 
 #undef DENS
 
-
-
-
 static CMS_NO_SANITIZE
 void TetrahedralInterp16(cmsContext ContextID,
                          CMSREGISTER const cmsUInt16Number Input[],
@@ -727,7 +740,7 @@ void TetrahedralInterp16(cmsContext ContextID,
     cmsS15Fixed16Number rx, ry, rz;
     int x0, y0, z0;
     cmsS15Fixed16Number c0, c1, c2, c3, Rest;
-    cmsS15Fixed16Number X0, X1, Y0, Y1, Z0, Z1;
+    cmsUInt32Number X0, X1, Y0, Y1, Z0, Z1;
     cmsUInt32Number TotalOut = p -> nOutputs;
     cmsUNUSED_PARAMETER(ContextID);
 
@@ -752,7 +765,7 @@ void TetrahedralInterp16(cmsContext ContextID,
     Z0 = p -> opta[0] * z0;
     Z1 = (Input[2] == 0xFFFFU ? 0 : p->opta[0]);
 
-    LutTable = &LutTable[X0+Y0+Z0];
+    LutTable += X0+Y0+Z0;
 
     // Output should be computed as x = ROUND_FIXED_TO_INT(_cmsToFixedDomain(Rest))
     // which expands as: x = (Rest + ((Rest+0x7fff)/0xFFFF) + 0x8000)>>16
@@ -1038,8 +1051,6 @@ void Eval4Inputs(cmsContext ContextID,
 
 // For more that 3 inputs (i.e., CMYK)
 // evaluate two 3-dimensional interpolations and then linearly interpolate between them.
-
-
 static
 void Eval4InputsFloat(cmsContext ContextID, const cmsFloat32Number Input[],
                       cmsFloat32Number Output[],
@@ -1161,7 +1172,7 @@ static void Eval##N##InputsFloat(cmsContext contextID,\
 \
               Output[i] = y0 + (y1 - y0) * rest;\
        }\
-       }
+}
 
 
 /**

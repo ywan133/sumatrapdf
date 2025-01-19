@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* Page interface */
 
 JNIEXPORT void JNICALL
@@ -35,7 +57,7 @@ FUN(Page_toPixmap)(JNIEnv *env, jobject self, jobject jctm, jobject jcs, jboolea
 }
 
 JNIEXPORT jobject JNICALL
-FUN(Page_getBounds)(JNIEnv *env, jobject self)
+FUN(Page_getBoundsNative)(JNIEnv *env, jobject self, jint box)
 {
 	fz_context *ctx = get_context(env);
 	fz_page *page = from_Page(env, self);
@@ -44,7 +66,7 @@ FUN(Page_getBounds)(JNIEnv *env, jobject self)
 	if (!ctx || !page) return NULL;
 
 	fz_try(ctx)
-		rect = fz_bound_page(ctx, page);
+		rect = fz_bound_page_box(ctx, page, box);
 	fz_catch(ctx)
 		jni_rethrow(env, ctx);
 
@@ -197,32 +219,14 @@ FUN(Page_getLinks)(JNIEnv *env, jobject self)
 	link = links;
 	for (i = 0; link && i < link_count; i++)
 	{
-		jobject jbounds = NULL;
 		jobject jlink = NULL;
-		jobject juri = NULL;
 
-		jbounds = to_Rect_safe(ctx, env, link->rect);
-		if (!jbounds || (*env)->ExceptionCheck(env))
-		{
-			fz_drop_link(ctx, links);
-			return NULL;
-		}
-
-		juri = (*env)->NewStringUTF(env, link->uri);
-		if (!juri || (*env)->ExceptionCheck(env))
-		{
-			fz_drop_link(ctx, links);
-			return NULL;
-		}
-
-		jlink = (*env)->NewObject(env, cls_Link, mid_Link_init, jbounds, juri);
+		jlink = to_Link_safe(ctx, env, link);
 		if (!jlink || (*env)->ExceptionCheck(env))
 		{
 			fz_drop_link(ctx, links);
 			return NULL;
 		}
-		(*env)->DeleteLocalRef(env, juri);
-		(*env)->DeleteLocalRef(env, jbounds);
 
 		(*env)->SetObjectArrayElement(env, jlinks, i, jlink);
 		if ((*env)->ExceptionCheck(env))
@@ -245,24 +249,31 @@ FUN(Page_search)(JNIEnv *env, jobject self, jstring jneedle)
 {
 	fz_context *ctx = get_context(env);
 	fz_page *page = from_Page(env, self);
-	fz_quad hits[256];
 	const char *needle = NULL;
-	int n = 0;
+	search_state state = { env, NULL, 0 };
 
 	if (!ctx || !page) return NULL;
 	if (!jneedle) jni_throw_arg(env, "needle must not be null");
 
 	needle = (*env)->GetStringUTFChars(env, jneedle, NULL);
-	if (!needle) return 0;
+	if (!needle) return NULL;
+
+	state.hits = (*env)->NewObject(env, cls_ArrayList, mid_ArrayList_init);
+	if (!state.hits || (*env)->ExceptionCheck(env)) return NULL;
 
 	fz_try(ctx)
-		n = fz_search_page(ctx, page, needle, hits, nelem(hits));
+		fz_search_page_cb(ctx, page, needle, hit_callback, &state);
 	fz_always(ctx)
+	{
 		(*env)->ReleaseStringUTFChars(env, jneedle, needle);
+	}
 	fz_catch(ctx)
 		jni_rethrow(env, ctx);
 
-	return to_QuadArray_safe(ctx, env, hits, n);
+	if (state.error)
+		return NULL;
+
+	return (*env)->CallObjectMethod(env, state.hits, mid_ArrayList_toArray);
 }
 
 JNIEXPORT jobject JNICALL
@@ -412,4 +423,50 @@ FUN(Page_createLink)(JNIEnv *env, jobject self, jobject jrect, jstring juri)
 	}
 
 	return to_Link_safe_own(ctx, env, link);
+}
+
+JNIEXPORT void JNICALL
+FUN(Page_deleteLink)(JNIEnv *env, jobject self, jobject jlink)
+{
+	fz_context *ctx = get_context(env);
+	fz_page *page = from_Page(env, self);
+	fz_link *link = from_Link(env, jlink);
+
+	if (!ctx || !page)
+		return;
+
+	fz_try(ctx)
+		fz_delete_link(ctx, page, link);
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT jobject JNICALL
+FUN(Page_getDocument)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	fz_page *page = from_Page(env, self);
+	fz_document *doc = page ? page->doc : NULL;
+
+	if (!ctx || !page || !doc) return NULL;
+
+	return to_Document_safe_own(ctx, env, fz_keep_document(ctx, doc));
+}
+
+JNIEXPORT jstring JNICALL
+FUN(Page_getLabel)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	fz_page *page = from_Page(env, self);
+	char buf[100];
+
+	if (!ctx || !page)
+		return NULL;
+
+	fz_try(ctx)
+		fz_page_label(ctx, page, buf, sizeof buf);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return (*env)->NewStringUTF(env, buf);
 }

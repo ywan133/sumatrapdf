@@ -1,30 +1,23 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-enum class TextSearchDirection : bool { Backward = false, Forward = true };
+struct TextSearch : public TextSelection {
+    enum class Direction : bool { Backward = false, Forward = true };
 
-class TextSearch : public TextSelection {
-  public:
     TextSearch(EngineBase* engine, DocumentTextCache* textCache);
     ~TextSearch();
 
     void SetSensitive(bool sensitive);
-    void SetDirection(TextSearchDirection direction);
+    void SetDirection(Direction direction);
     void SetLastResult(TextSelection* sel);
-    TextSel* FindFirst(int page, const WCHAR* text, ProgressUpdateUI* tracker = nullptr);
-    TextSel* FindNext(ProgressUpdateUI* tracker = nullptr);
+    TextSel* FindFirst(int page, const WCHAR* text);
+    TextSel* FindNext();
 
-    // note: the result might not be a valid page number!
-    int GetCurrentPageNo() const {
-        return findPage;
-    }
+    int GetCurrentPageNo() const;
+    int GetSearchHitStartPageNo() const;
 
-    // note: the result might not be a valid page number!
-    int GetSearchHitStartPageNo() const {
-        return searchHitStartAt;
-    }
+    ProgressUpdateCb progressCb;
 
-  protected:
     // Lightweight container for page and offset within the page to use as return value of MatchEnd
     struct PageAndOffset {
         int page;
@@ -45,18 +38,12 @@ class TextSearch : public TextSelection {
 
     void SetText(const WCHAR* text);
     bool FindTextInPage(int pageNo, PageAndOffset* finalGlyph);
-    bool FindStartingAtPage(int pageNo, ProgressUpdateUI* tracker);
+    bool FindStartingAtPage(int pageNo);
     PageAndOffset MatchEnd(const WCHAR* start) const;
 
-    void Clear() {
-        str::ReplacePtr(&findText, nullptr);
-        str::ReplacePtr(&anchor, nullptr);
-        str::ReplacePtr(&lastText, nullptr);
-        Reset();
-    }
+    void Clear();
     void Reset();
 
-  private:
     const WCHAR* pageText = nullptr;
     int findIndex = 0;
 

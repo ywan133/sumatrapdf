@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* DisplayList interface */
 
 JNIEXPORT jlong JNICALL
@@ -117,9 +139,8 @@ FUN(DisplayList_search)(JNIEnv *env, jobject self, jstring jneedle)
 {
 	fz_context *ctx = get_context(env);
 	fz_display_list *list = from_DisplayList(env, self);
-	fz_quad hits[256];
 	const char *needle = NULL;
-	int n = 0;
+	search_state state = { env, NULL, 0 };
 
 	if (!ctx || !list) return NULL;
 	if (!jneedle) jni_throw_arg(env, "needle must not be null");
@@ -127,12 +148,37 @@ FUN(DisplayList_search)(JNIEnv *env, jobject self, jstring jneedle)
 	needle = (*env)->GetStringUTFChars(env, jneedle, NULL);
 	if (!needle) return NULL;
 
+	state.hits = (*env)->NewObject(env, cls_ArrayList, mid_ArrayList_init);
+	if (!state.hits || (*env)->ExceptionCheck(env)) return NULL;
+
 	fz_try(ctx)
-		n = fz_search_display_list(ctx, list, needle, hits, nelem(hits));
+		fz_search_display_list_cb(ctx, list, needle, hit_callback, &state);
 	fz_always(ctx)
+	{
 		(*env)->ReleaseStringUTFChars(env, jneedle, needle);
+	}
 	fz_catch(ctx)
 		jni_rethrow(env, ctx);
 
-	return to_QuadArray_safe(ctx, env, hits, n);
+	if (state.error)
+		return NULL;
+
+	return (*env)->CallObjectMethod(env, state.hits, mid_ArrayList_toArray);
+}
+
+JNIEXPORT jobject JNICALL
+FUN(DisplayList_getBounds)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	fz_display_list *list = from_DisplayList(env, self);
+	fz_rect bounds;
+
+	if (!ctx || !list) return NULL;
+
+	fz_try(ctx)
+		bounds = fz_bound_display_list(ctx, list);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return to_Rect(ctx, env, bounds);
 }

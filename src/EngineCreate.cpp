@@ -1,49 +1,38 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 #include "utils/BaseUtil.h"
 #include "utils/ScopedWin.h"
 #include "utils/WinUtil.h"
 #include "utils/GuessFileType.h"
+#include "utils/Dpi.h"
 
-#include "wingui/TreeModel.h"
+#include "wingui/UIModels.h"
 
 #include "SumatraConfig.h"
 #include "Annotation.h"
+#include "Settings.h"
+#include "SumatraPDF.h"
+#include "DocController.h"
 #include "EngineBase.h"
-#include "EngineDjVu.h"
-#include "EngineEbook.h"
-#include "EngineImages.h"
-#include "EnginePdf.h"
-#include "EnginePs.h"
-#include "EngineXps.h"
-#include "EngineMulti.h"
-#include "EngineMupdf.h"
-#include "EngineCreate.h"
+#include "EngineAll.h"
+#include "Flags.h"
 
-// still working on EngineMupdf, so this is an easy way
-// to enable / disable it
-static bool gEnableMupdfEngine = true;
+static bool gEnableEpubWithPdfEngine = true;
 
 bool IsSupportedFileType(Kind kind, bool enableEngineEbooks) {
-    if (IsPdfEngineSupportedFileType(kind)) {
+    if (IsEngineMupdfSupportedFileType(kind)) {
         return true;
-    } else if (kind == kindFileVbkm) {
+    } else if (IsEngineDjVuSupportedFileType(kind)) {
         return true;
-    } else if (IsXpsEngineSupportedFileType(kind)) {
+    } else if (IsEngineImageSupportedFileType(kind)) {
         return true;
-    } else if (IsDjVuEngineSupportedFileType(kind)) {
-        return true;
-    } else if (IsImageEngineSupportedFileType(kind)) {
-        return true;
-    } else if (kind == kindFileDir) {
+    } else if (kind == kindDirectory) {
         // TODO: more complex
         return false;
-    } else if (IsCbxEngineSupportedFileType(kind)) {
+    } else if (IsEngineCbxSupportedFileType(kind)) {
         return true;
-    } else if (IsPsEngineSupportedFileType(kind)) {
-        return true;
-    } else if (gEnableMupdfEngine && IsMupdfEngineSupportedFileType(kind)) {
+    } else if (IsEnginePsSupportedFileType(kind)) {
         return true;
     }
 
@@ -54,6 +43,8 @@ bool IsSupportedFileType(Kind kind, bool enableEngineEbooks) {
     if (kind == kindFileEpub) {
         return true;
     } else if (kind == kindFileFb2) {
+        return true;
+    } else if (kind == kindFileFb2z) {
         return true;
     } else if (kind == kindFileMobi) {
         return true;
@@ -67,128 +58,140 @@ bool IsSupportedFileType(Kind kind, bool enableEngineEbooks) {
     return false;
 }
 
-static EngineBase* CreateEngineForKind(Kind kind, const WCHAR* path, PasswordUI* pwdUI, bool enableChmEngine,
-                                       bool enableEngineEbooks) {
+static EngineBase* CreateEngineForKind(Kind kind, const char* path, PasswordUI* pwdUI, bool enableChmEngine) {
     if (!kind) {
         return nullptr;
     }
+    int dpi = DpiGet(nullptr);
     EngineBase* engine = nullptr;
     if (kind == kindFilePDF) {
-        engine = CreateEnginePdfFromFile(path, pwdUI);
-    } else if (kind == kindFileVbkm) {
-        engine = CreateEngineMultiFromFile(path, pwdUI);
-    } else if (IsXpsEngineSupportedFileType(kind)) {
-        engine = CreateXpsEngineFromFile(path);
-    } else if (IsDjVuEngineSupportedFileType(kind)) {
-        engine = CreateDjVuEngineFromFile(path);
-    } else if (IsImageEngineSupportedFileType(kind)) {
-        engine = CreateImageEngineFromFile(path);
-    } else if (kind == kindFileDir) {
-        if (IsXpsDirectory(path)) {
-            engine = CreateXpsEngineFromFile(path);
-        }
-        // in ra-micro builds, prioritize opening folders as multiple PDFs
-        // for 'Open Folder' functionality
-        // TODO: in 3.1.2 we open folder of images (IsImageDirEngineSupportedFile)
+        engine = CreateEngineMupdfFromFile(path, kind, dpi, pwdUI);
+        return engine;
+    }
+    if (IsEngineDjVuSupportedFileType(kind)) {
+        engine = CreateEngineDjVuFromFile(path);
+        return engine;
+    }
+    if (IsEngineImageSupportedFileType(kind)) {
+        engine = CreateEngineImageFromFile(path);
+        return engine;
+    }
+    if (kind == kindDirectory) {
+        // TODO: in 3.1.2 we open folder of images (IsEngineImageDirSupportedFile())
         // To avoid changing behavior, we open pdfs only in ramicro build
         // this should be controlled via cmd-line flag e.g. -folder-open-pdf
         // Then we could have more options, like -folder-open-images (default)
         // -folder-open-all (show all files we support in toc)
-        if (!engine && gIsRaMicroBuild) {
-            engine = CreateEngineMultiFromFile(path, pwdUI);
-        }
         if (!engine) {
-            engine = CreateImageDirEngineFromFile(path);
+            engine = CreateEngineImageDirFromFile(path);
         }
-    } else if (IsCbxEngineSupportedFileType(kind)) {
-        engine = CreateCbxEngineFromFile(path);
-    } else if (IsPsEngineSupportedFileType(kind)) {
-        engine = CreatePsEngineFromFile(path);
-    } else if (enableChmEngine && (kind == kindFileChm)) {
-        engine = CreateChmEngineFromFile(path);
-    } else if (gEnableMupdfEngine && kind == kindFileEpub) {
-        engine = CreateEngineMupdfFromFile(path);
-    }
-
-    if (!enableEngineEbooks) {
         return engine;
     }
 
-    if (kind == kindFileEpub) {
-        engine = CreateEpubEngineFromFile(path);
-    } else if (kind == kindFileFb2) {
-        engine = CreateFb2EngineFromFile(path);
-    } else if (kind == kindFileMobi) {
-        engine = CreateMobiEngineFromFile(path);
-    } else if (kind == kindFilePalmDoc) {
-        engine = CreatePdbEngineFromFile(path);
-    } else if (kind == kindFileHTML) {
-        engine = CreatePdbEngineFromFile(path);
-    } else if (kind == kindFileTxt) {
-        engine = CreateTxtEngineFromFile(path);
+    if (IsEngineCbxSupportedFileType(kind)) {
+        engine = CreateEngineCbxFromFile(path);
+        return engine;
     }
-    return engine;
+    if (IsEnginePsSupportedFileType(kind)) {
+        engine = CreateEnginePsFromFile(path);
+        return engine;
+    }
+    if (enableChmEngine && (kind == kindFileChm)) {
+        engine = CreateEngineChmFromFile(path);
+        return engine;
+    }
+    if (gEnableEpubWithPdfEngine && IsEngineMupdfSupportedFileType(kind)) {
+        engine = CreateEngineMupdfFromFile(path, kind, dpi, pwdUI);
+        // https://github.com/sumatrapdfreader/sumatrapdf/issues/2212
+        // if failed to open with EngineMupdf, will also try to open
+        // with my engine
+        if (engine) {
+            return engine;
+        }
+    }
+#if 0
+    if (kind == kindFileTxt) {
+        engine = CreateEngineTxtFromFile(path);
+        return engine;
+    }
+#endif
+
+    if (kind == kindFileEpub) {
+        engine = CreateEngineEpubFromFile(path);
+        return engine;
+    }
+    if (kind == kindFileFb2 || kind == kindFileFb2z) {
+        engine = CreateEngineFb2FromFile(path);
+        return engine;
+    }
+    if (kind == kindFileMobi) {
+        engine = CreateEngineMobiFromFile(path);
+        return engine;
+    }
+    if (kind == kindFilePalmDoc) {
+        engine = CreateEnginePdbFromFile(path);
+        return engine;
+    }
+    if (kind == kindFileHTML) {
+        engine = CreateEnginePdbFromFile(path);
+        return engine;
+    }
+    return nullptr;
 }
 
-EngineBase* CreateEngine(const WCHAR* path, PasswordUI* pwdUI, bool enableChmEngine, bool enableEngineEbooks) {
-    CrashIf(!path);
+EngineBase* CreateEngineFromFile(const char* path, PasswordUI* pwdUI, bool enableChmEngine) {
+    ReportIf(!path);
 
     // try to open with the engine guess from file name
     // if that fails, try to guess the file type based on content
     Kind kind = GuessFileTypeFromName(path);
-    EngineBase* engine = CreateEngineForKind(kind, path, pwdUI, enableChmEngine, enableEngineEbooks);
+    EngineBase* engine = CreateEngineForKind(kind, path, pwdUI, enableChmEngine);
     if (engine) {
         return engine;
     }
 
     Kind newKind = GuessFileTypeFromContent(path);
     if (kind != newKind) {
-        engine = CreateEngineForKind(newKind, path, pwdUI, enableChmEngine, enableEngineEbooks);
+        engine = CreateEngineForKind(newKind, path, pwdUI, enableChmEngine);
     }
     return engine;
 }
 
-bool EngineSupportsAnnotations(EngineBase* engine) {
+static bool IsEngineMupdf(EngineBase* engine) {
     if (!engine) {
         return false;
     }
-    Kind kind = engine->kind;
-    if (kind == kindEnginePdf) {
-        return true;
-    }
-    return false;
+    return engine->kind == kindEngineMupdf;
 }
 
-bool EngineGetAnnotations(EngineBase* engine, Vec<Annotation*>* annotsOut) {
-    if (!engine) {
+bool EngineSupportsAnnotations(EngineBase* engine) {
+    if (AnnotationsAreDisabled()) {
         return false;
     }
-    Kind kind = engine->kind;
-    if (kind != kindEnginePdf) {
+    if (!IsEngineMupdf(engine)) {
         return false;
     }
-    EnginePdfGetAnnotations(engine, annotsOut);
+    return EngineMupdfSupportsAnnotations(engine);
+}
+
+bool EngineGetAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut) {
+    if (!IsEngineMupdf(engine)) {
+        return false;
+    }
+    EngineMupdfGetAnnotations(engine, annotsOut);
     return true;
 }
 
 bool EngineHasUnsavedAnnotations(EngineBase* engine) {
-    if (!engine) {
+    if (!IsEngineMupdf(engine)) {
         return false;
     }
-    Kind kind = engine->kind;
-    if (kind != kindEnginePdf) {
-        return false;
-    }
-    return EnginePdfHasUnsavedAnnotations(engine);
+    return EngineMupdfHasUnsavedAnnotations(engine);
 }
 
-Annotation* EngineGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF pos, AnnotationType* allowedAnnots) {
-    if (!engine) {
+Annotation* EngineGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF pos, Annotation* annot) {
+    if (!IsEngineMupdf(engine)) {
         return nullptr;
     }
-    Kind kind = engine->kind;
-    if (kind != kindEnginePdf) {
-        return nullptr;
-    }
-    return EnginePdfGetAnnotationAtPos(engine, pageNo, pos, allowedAnnots);
+    return EngineMupdfGetAnnotationAtPos(engine, pageNo, pos, annot);
 }

@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_DEVICE_H
 #define MUPDF_FITZ_DEVICE_H
 
@@ -84,6 +106,63 @@ int fz_lookup_blendmode(const char *name);
 */
 const char *fz_blendmode_name(int blendmode);
 
+/*
+	Generic function type.
+
+	Different function implementations will derive from this.
+*/
+typedef struct fz_function fz_function;
+
+typedef void (fz_function_eval_fn)(fz_context *, fz_function *, const float *, float *);
+
+enum
+{
+	FZ_FUNCTION_MAX_N = FZ_MAX_COLORS,
+	FZ_FUNCTION_MAX_M = FZ_MAX_COLORS
+};
+
+struct fz_function
+{
+	fz_storable storable;
+	size_t size;
+	int m;					/* number of input values */
+	int n;					/* number of output values */
+
+	fz_function_eval_fn *eval;
+};
+
+fz_function *fz_new_function_of_size(fz_context *ctx, int size, size_t size2, int m, int n, fz_function_eval_fn *eval, fz_store_drop_fn *drop);
+
+#define fz_new_derived_function(CTX,TYPE,SIZE,M,N,EVAL,DROP) \
+	((TYPE*)Memento_label(fz_new_function_of_size(CTX,sizeof(TYPE),SIZE,M,N,EVAL,DROP), #TYPE))
+
+/*
+	Evaluate a function.
+
+	Input vector = (in[0], ..., in[inlen-1])
+	Output vector = (out[0], ..., out[outlen-1])
+
+	If inlen or outlen do not match that expected by the function, this
+	routine will truncate or extend the input/output (with 0's) as
+	required.
+*/
+void fz_eval_function(fz_context *ctx, fz_function *func, const float *in, int inlen, float *out, int outlen);
+
+/*
+	Keep a function reference.
+*/
+fz_function *fz_keep_function(fz_context *ctx, fz_function *func);
+
+/*
+	Drop a function reference.
+*/
+void fz_drop_function(fz_context *ctx, fz_function *func);
+
+/*
+	Function size
+*/
+size_t fz_function_size(fz_context *ctx, fz_function *func);
+
 /**
 	The device structure is public to allow devices to be
 	implemented outside of fitz.
@@ -111,6 +190,103 @@ enum
 	fz_device_container_stack_is_group,
 	fz_device_container_stack_is_tile,
 };
+
+/* Structure types */
+typedef enum
+{
+	FZ_STRUCTURE_INVALID = -1,
+
+	/* Grouping elements (PDF 1.7 - Table 10.20) */
+	FZ_STRUCTURE_DOCUMENT,
+	FZ_STRUCTURE_PART,
+	FZ_STRUCTURE_ART,
+	FZ_STRUCTURE_SECT,
+	FZ_STRUCTURE_DIV,
+	FZ_STRUCTURE_BLOCKQUOTE,
+	FZ_STRUCTURE_CAPTION,
+	FZ_STRUCTURE_TOC,
+	FZ_STRUCTURE_TOCI,
+	FZ_STRUCTURE_INDEX,
+	FZ_STRUCTURE_NONSTRUCT,
+	FZ_STRUCTURE_PRIVATE,
+	/* Grouping elements (PDF 2.0 - Table 364) */
+	FZ_STRUCTURE_DOCUMENTFRAGMENT,
+	/* Grouping elements (PDF 2.0 - Table 365) */
+	FZ_STRUCTURE_ASIDE,
+	/* Grouping elements (PDF 2.0 - Table 366) */
+	FZ_STRUCTURE_TITLE,
+	FZ_STRUCTURE_FENOTE,
+	/* Grouping elements (PDF 2.0 - Table 367) */
+	FZ_STRUCTURE_SUB,
+
+	/* Paragraphlike elements (PDF 1.7 - Table 10.21) */
+	FZ_STRUCTURE_P,
+	FZ_STRUCTURE_H,
+	FZ_STRUCTURE_H1,
+	FZ_STRUCTURE_H2,
+	FZ_STRUCTURE_H3,
+	FZ_STRUCTURE_H4,
+	FZ_STRUCTURE_H5,
+	FZ_STRUCTURE_H6,
+
+	/* List elements (PDF 1.7 - Table 10.23) */
+	FZ_STRUCTURE_LIST,
+	FZ_STRUCTURE_LISTITEM,
+	FZ_STRUCTURE_LABEL,
+	FZ_STRUCTURE_LISTBODY,
+
+	/* Table elements (PDF 1.7 - Table 10.24) */
+	FZ_STRUCTURE_TABLE,
+	FZ_STRUCTURE_TR,
+	FZ_STRUCTURE_TH,
+	FZ_STRUCTURE_TD,
+	FZ_STRUCTURE_THEAD,
+	FZ_STRUCTURE_TBODY,
+	FZ_STRUCTURE_TFOOT,
+
+	/* Inline elements (PDF 1.7 - Table 10.25) */
+	FZ_STRUCTURE_SPAN,
+	FZ_STRUCTURE_QUOTE,
+	FZ_STRUCTURE_NOTE,
+	FZ_STRUCTURE_REFERENCE,
+	FZ_STRUCTURE_BIBENTRY,
+	FZ_STRUCTURE_CODE,
+	FZ_STRUCTURE_LINK,
+	FZ_STRUCTURE_ANNOT,
+	/* Inline elements (PDF 2.0 - Table 368) */
+	FZ_STRUCTURE_EM,
+	FZ_STRUCTURE_STRONG,
+
+	/* Ruby inline element (PDF 1.7 - Table 10.26) */
+	FZ_STRUCTURE_RUBY,
+	FZ_STRUCTURE_RB,
+	FZ_STRUCTURE_RT,
+	FZ_STRUCTURE_RP,
+
+	/* Warichu inline element (PDF 1.7 - Table 10.26) */
+	FZ_STRUCTURE_WARICHU,
+	FZ_STRUCTURE_WT,
+	FZ_STRUCTURE_WP,
+
+	/* Illustration elements (PDF 1.7 - Table 10.27) */
+	FZ_STRUCTURE_FIGURE,
+	FZ_STRUCTURE_FORMULA,
+	FZ_STRUCTURE_FORM,
+
+	/* Artifact structure type (PDF 2.0 - Table 375) */
+	FZ_STRUCTURE_ARTIFACT
+} fz_structure;
+
+const char *fz_structure_to_string(fz_structure type);
+fz_structure fz_structure_from_string(const char *str);
+
+typedef enum
+{
+	FZ_METATEXT_ACTUALTEXT,
+	FZ_METATEXT_ALT,
+	FZ_METATEXT_ABBREVIATION,
+	FZ_METATEXT_TITLE
+} fz_metatext;
 
 struct fz_device
 {
@@ -140,7 +316,7 @@ struct fz_device
 	void (*pop_clip)(fz_context *, fz_device *);
 
 	void (*begin_mask)(fz_context *, fz_device *, fz_rect area, int luminosity, fz_colorspace *, const float *bc, fz_color_params );
-	void (*end_mask)(fz_context *, fz_device *);
+	void (*end_mask)(fz_context *, fz_device *, fz_function *fn);
 	void (*begin_group)(fz_context *, fz_device *, fz_rect area, fz_colorspace *cs, int isolated, int knockout, int blendmode, float alpha);
 	void (*end_group)(fz_context *, fz_device *);
 
@@ -152,6 +328,12 @@ struct fz_device
 
 	void (*begin_layer)(fz_context *, fz_device *, const char *layer_name);
 	void (*end_layer)(fz_context *, fz_device *);
+
+	void (*begin_structure)(fz_context *, fz_device *, fz_structure standard, const char *raw, int idx);
+	void (*end_structure)(fz_context *, fz_device *);
+
+	void (*begin_metatext)(fz_context *, fz_device *, fz_metatext meta, const char *text);
+	void (*end_metatext)(fz_context *, fz_device *);
 
 	fz_rect d1_rect;
 
@@ -179,6 +361,7 @@ void fz_fill_image_mask(fz_context *ctx, fz_device *dev, fz_image *image, fz_mat
 void fz_clip_image_mask(fz_context *ctx, fz_device *dev, fz_image *image, fz_matrix ctm, fz_rect scissor);
 void fz_begin_mask(fz_context *ctx, fz_device *dev, fz_rect area, int luminosity, fz_colorspace *colorspace, const float *bc, fz_color_params color_params);
 void fz_end_mask(fz_context *ctx, fz_device *dev);
+void fz_end_mask_tr(fz_context *ctx, fz_device *dev, fz_function *fn);
 void fz_begin_group(fz_context *ctx, fz_device *dev, fz_rect area, fz_colorspace *cs, int isolated, int knockout, int blendmode, float alpha);
 void fz_end_group(fz_context *ctx, fz_device *dev);
 void fz_begin_tile(fz_context *ctx, fz_device *dev, fz_rect area, fz_rect view, float xstep, float ystep, fz_matrix ctm);
@@ -188,6 +371,10 @@ void fz_render_flags(fz_context *ctx, fz_device *dev, int set, int clear);
 void fz_set_default_colorspaces(fz_context *ctx, fz_device *dev, fz_default_colorspaces *default_cs);
 void fz_begin_layer(fz_context *ctx, fz_device *dev, const char *layer_name);
 void fz_end_layer(fz_context *ctx, fz_device *dev);
+void fz_begin_structure(fz_context *ctx, fz_device *dev, fz_structure standard, const char *raw, int idx);
+void fz_end_structure(fz_context *ctx, fz_device *dev);
+void fz_begin_metatext(fz_context *ctx, fz_device *dev, fz_metatext meta, const char *text);
+void fz_end_metatext(fz_context *ctx, fz_device *dev);
 
 /**
 	Devices are created by calls to device implementations, for
@@ -245,6 +432,7 @@ enum
 	/* Hints */
 	FZ_DONT_INTERPOLATE_IMAGES = 1,
 	FZ_NO_CACHE = 2,
+	FZ_DONT_DECODE_IMAGES = 4
 };
 
 /**
@@ -444,7 +632,7 @@ typedef struct
 	int text;
 } fz_draw_options;
 
-extern const char *fz_draw_options_usage;
+FZ_DATA extern const char *fz_draw_options_usage;
 
 /**
 	Parse draw device options from a comma separated key-value string.

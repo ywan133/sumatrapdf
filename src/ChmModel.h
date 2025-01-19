@@ -1,21 +1,21 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-struct ChmDoc;
+struct ChmFile;
 struct ChmTocTraceItem;
 class HtmlWindow;
-class HtmlWindowCallback;
+struct HtmlWindowCallback;
 struct ChmCacheEntry;
 
-struct ChmModel : Controller {
-    explicit ChmModel(ControllerCallback* cb);
+struct ChmModel : DocController {
+    explicit ChmModel(DocControllerCallback* cb);
     ~ChmModel() override;
 
     // meta data
-    const WCHAR* FilePath() const override;
-    const WCHAR* DefaultFileExt() const override;
+    const char* GetFilePath() const override;
+    const char* GetDefaultFileExt() const override;
     int PageCount() const override;
-    WCHAR* GetProperty(DocumentProperty prop) override;
+    TempStr GetPropertyTemp(const char* name) override;
 
     // page navigation (stateful)
     int CurrentPageNo() const override;
@@ -26,7 +26,7 @@ struct ChmModel : Controller {
     // view settings
     void SetDisplayMode(DisplayMode mode, bool keepContinuous = false) override;
     DisplayMode GetDisplayMode() const override;
-    void SetPresentationMode(bool enable) override;
+    void SetInPresentation(bool) override;
     void SetZoomVirtual(float zoom, Point* fixPt) override;
     float GetZoomVirtual(bool absolute = false) const override;
     float GetNextZoomStep(float towards) const override;
@@ -34,59 +34,62 @@ struct ChmModel : Controller {
 
     // table of contents
     TocTree* GetToc() override;
-    void ScrollToLink(PageDestination* link) override;
-    PageDestination* GetNamedDest(const WCHAR* name) override;
+    void ScrollTo(int pageNo, RectF rect, float zoom) override;
 
-    void GetDisplayState(DisplayState* ds) override;
+    bool HandleLink(IPageDestination*, ILinkHandler*) override;
+
+    IPageDestination* GetNamedDest(const char* name) override;
+
+    void GetDisplayState(FileState* ds) override;
     // asynchronously calls saveThumbnail (fails silently)
-    void CreateThumbnail(Size size, const onBitmapRenderedCb& saveThumbnail) override;
+    void CreateThumbnail(Size size, const OnBitmapRendered* saveThumbnail) override;
 
     // for quick type determination and type-safe casting
     ChmModel* AsChm() override;
 
-    static ChmModel* Create(const WCHAR* fileName, ControllerCallback* cb = nullptr);
+    static ChmModel* Create(const char* fileName, DocControllerCallback* cb = nullptr);
 
     // the following is specific to ChmModel
 
     bool SetParentHwnd(HWND hwnd);
     void RemoveParentHwnd();
 
-    void PrintCurrentPage(bool showUI);
-    void FindInCurrentPage();
-    void SelectAll();
-    void CopySelection();
-    LRESULT PassUIMsg(UINT msg, WPARAM wp, LPARAM lp);
+    void PrintCurrentPage(bool showUI) const;
+    void FindInCurrentPage() const;
+    void SelectAll() const;
+    void CopySelection() const;
+    LRESULT PassUIMsg(UINT msg, WPARAM wp, LPARAM lp) const;
 
     // for HtmlWindowCallback (called through htmlWindowCb)
-    bool OnBeforeNavigate(const WCHAR* url, bool newWindow);
-    void OnDocumentComplete(const WCHAR* url);
+    bool OnBeforeNavigate(const char* url, bool newWindow);
+    void OnDocumentComplete(const char* url);
     void OnLButtonDown();
-    std::span<u8> GetDataForUrl(const WCHAR* url);
-    void DownloadData(const WCHAR* url, std::span<u8> data);
+    ByteSlice GetDataForUrl(const char* url);
+    void DownloadData(const char* url, const ByteSlice& data);
 
     static bool IsSupportedFileType(Kind);
 
-    AutoFreeWstr fileName;
-    ChmDoc* doc = nullptr;
+    AutoFreeStr fileName;
+    ChmFile* doc = nullptr;
     TocTree* tocTree = nullptr;
     CRITICAL_SECTION docAccess;
     Vec<ChmTocTraceItem>* tocTrace = nullptr;
 
-    WStrList pages;
+    StrVec pages;
     int currentPageNo = 1;
     HtmlWindow* htmlWindow = nullptr;
     HtmlWindowCallback* htmlWindowCb = nullptr;
-    float initZoom = INVALID_ZOOM;
+    float initZoom = kInvalidZoom;
 
     Vec<ChmCacheEntry*> urlDataCache;
     // use a pool allocator for strings that aren't freed until this ChmModel
     // is deleted (e.g. for titles and URLs for ChmTocItem and ChmCacheEntry)
     PoolAllocator poolAlloc;
 
-    bool Load(const WCHAR* fileName);
-    void DisplayPage(const WCHAR* pageUrl);
+    bool Load(const char* fileName);
+    bool DisplayPage(const char* pageUrl);
 
-    ChmCacheEntry* FindDataForUrl(const WCHAR* url);
+    ChmCacheEntry* FindDataForUrl(const char* url) const;
 
-    void ZoomTo(float zoomLevel);
+    void ZoomTo(float zoomLevel) const;
 };

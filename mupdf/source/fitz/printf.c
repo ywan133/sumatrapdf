@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <float.h>
@@ -22,6 +44,7 @@ int snprintf(char *s, size_t n, const char *fmt, ...)
 #endif
 
 static const char *fz_hex_digits = "0123456789abcdef";
+static const char *fz_hex_digits_UC = "0123456789ABCDEF";
 
 struct fmtbuf
 {
@@ -97,16 +120,23 @@ static void fmtfloat_f(struct fmtbuf *out, double f, int w, int p)
 		fmtputc(out, *s++);
 }
 
-static void fmtuint32(struct fmtbuf *out, unsigned int a, int s, int z, int w, int base)
+static void fmtuint32(struct fmtbuf *out, unsigned int a, int s, int z, int w, int base, int q)
 {
 	char buf[40];
 	int i;
+	const char *hex_digits = fz_hex_digits;
+
+	if (base < 0)
+	{
+		base = -base;
+		hex_digits = fz_hex_digits_UC;
+	}
 
 	i = 0;
 	if (a == 0)
 		buf[i++] = '0';
 	while (a) {
-		buf[i++] = fz_hex_digits[a % base];
+		buf[i++] = hex_digits[a % base];
 		a /= base;
 	}
 	if (s) {
@@ -118,19 +148,30 @@ static void fmtuint32(struct fmtbuf *out, unsigned int a, int s, int z, int w, i
 	while (i < w)
 		buf[i++] = z;
 	while (i > 0)
+	{
 		fmtputc(out, buf[--i]);
+		if (q && i != 0 && i % 3 == 0)
+			fmtputc(out, q);
+	}
 }
 
-static void fmtuint64(struct fmtbuf *out, uint64_t a, int s, int z, int w, int base)
+static void fmtuint64(struct fmtbuf *out, uint64_t a, int s, int z, int w, int base, int q)
 {
 	char buf[80];
 	int i;
+	const char *hex_digits = fz_hex_digits;
+
+	if (base < 0)
+	{
+		base = -base;
+		hex_digits = fz_hex_digits_UC;
+	}
 
 	i = 0;
 	if (a == 0)
 		buf[i++] = '0';
 	while (a) {
-		buf[i++] = fz_hex_digits[a % base];
+		buf[i++] = hex_digits[a % base];
 		a /= base;
 	}
 	if (s) {
@@ -142,10 +183,14 @@ static void fmtuint64(struct fmtbuf *out, uint64_t a, int s, int z, int w, int b
 	while (i < w)
 		buf[i++] = z;
 	while (i > 0)
+	{
 		fmtputc(out, buf[--i]);
+		if (q && i != 0 && i % 3 == 0)
+			fmtputc(out, q);
+	}
 }
 
-static void fmtint32(struct fmtbuf *out, int value, int s, int z, int w, int base)
+static void fmtint32(struct fmtbuf *out, int value, int s, int z, int w, int base, int q)
 {
 	unsigned int a;
 
@@ -164,10 +209,10 @@ static void fmtint32(struct fmtbuf *out, int value, int s, int z, int w, int bas
 		s = 0;
 		a = value;
 	}
-	fmtuint32(out, a, s, z, w, base);
+	fmtuint32(out, a, s, z, w, base, q);
 }
 
-static void fmtint64(struct fmtbuf *out, int64_t value, int s, int z, int w, int base)
+static void fmtint64(struct fmtbuf *out, int64_t value, int s, int z, int w, int base, int q)
 {
 	uint64_t a;
 
@@ -186,7 +231,7 @@ static void fmtint64(struct fmtbuf *out, int64_t value, int s, int z, int w, int
 		s = 0;
 		a = value;
 	}
-	fmtuint64(out, a, s, z, w, base);
+	fmtuint64(out, a, s, z, w, base, q);
 }
 
 static void fmtquote(struct fmtbuf *out, const char *s, int sq, int eq, int verbatim)
@@ -208,7 +253,7 @@ static void fmtquote(struct fmtbuf *out, const char *s, int sq, int eq, int verb
 					for (i = 0; i < n; ++i)
 						fmtputc(out, s[i]);
 				}
-				else
+				else if (c <= 0xffff)
 				{
 					fmtputc(out, '\\');
 					fmtputc(out, 'u');
@@ -216,6 +261,24 @@ static void fmtquote(struct fmtbuf *out, const char *s, int sq, int eq, int verb
 					fmtputc(out, "0123456789ABCDEF"[(c>>8)&15]);
 					fmtputc(out, "0123456789ABCDEF"[(c>>4)&15]);
 					fmtputc(out, "0123456789ABCDEF"[(c)&15]);
+				}
+				else
+				{
+					/* Use a surrogate pair */
+					int hi = 0xd800 + ((c - 0x10000) >> 10);
+					int lo = 0xdc00 + ((c - 0x10000) & 0x3ff);
+					fmtputc(out, '\\');
+					fmtputc(out, 'u');
+					fmtputc(out, "0123456789ABCDEF"[(hi>>12)&15]);
+					fmtputc(out, "0123456789ABCDEF"[(hi>>8)&15]);
+					fmtputc(out, "0123456789ABCDEF"[(hi>>4)&15]);
+					fmtputc(out, "0123456789ABCDEF"[(hi)&15]);
+					fmtputc(out, '\\');
+					fmtputc(out, 'u');
+					fmtputc(out, "0123456789ABCDEF"[(lo>>12)&15]);
+					fmtputc(out, "0123456789ABCDEF"[(lo>>8)&15]);
+					fmtputc(out, "0123456789ABCDEF"[(lo>>4)&15]);
+					fmtputc(out, "0123456789ABCDEF"[(lo)&15]);
 				}
 			} else {
 				if (c == sq || c == eq)
@@ -273,6 +336,68 @@ static void fmtquote_pdf(struct fmtbuf *out, const char *s, int sq, int eq)
 	fmtputc(out, eq);
 }
 
+static void fmtquote_xml(struct fmtbuf *out, const char *s)
+{
+	int c, n;
+	fmtputc(out, '"');
+	while (*s != 0) {
+		n = fz_chartorune(&c, s);
+		switch (c) {
+		case '"':
+			fmtputc(out, '&');
+			fmtputc(out, 'q');
+			fmtputc(out, 'u');
+			fmtputc(out, 'o');
+			fmtputc(out, 't');
+			fmtputc(out, ';');
+			break;
+		case '&':
+			fmtputc(out, '&');
+			fmtputc(out, 'a');
+			fmtputc(out, 'm');
+			fmtputc(out, 'p');
+			fmtputc(out, ';');
+			break;
+		case '<':
+			fmtputc(out, '&');
+			fmtputc(out, 'l');
+			fmtputc(out, 't');
+			fmtputc(out, ';');
+			break;
+		case '>':
+			fmtputc(out, '&');
+			fmtputc(out, 'g');
+			fmtputc(out, 't');
+			fmtputc(out, ';');
+			break;
+		default:
+			if (c < 32 || c >= 127) {
+				fmtputc(out, '&');
+				fmtputc(out, '#');
+				fmtputc(out, 'x');
+				if (c > 65535)
+				{
+					fmtputc(out, "0123456789ABCDEF"[(c>>20)&15]);
+					fmtputc(out, "0123456789ABCDEF"[(c>>16)&15]);
+				}
+				if (c > 255)
+				{
+					fmtputc(out, "0123456789ABCDEF"[(c>>12)&15]);
+					fmtputc(out, "0123456789ABCDEF"[(c>>8)&15]);
+				}
+				fmtputc(out, "0123456789ABCDEF"[(c>>4)&15]);
+				fmtputc(out, "0123456789ABCDEF"[(c)&15]);
+				fmtputc(out, ';');
+			}
+			else
+				fmtputc(out, c);
+			break;
+		}
+		s += n;
+	}
+	fmtputc(out, '"');
+}
+
 static void fmtname(struct fmtbuf *out, const char *s)
 {
 	int c;
@@ -292,7 +417,7 @@ void
 fz_format_string(fz_context *ctx, void *user, void (*emit)(fz_context *ctx, void *user, int c), const char *fmt, va_list args)
 {
 	struct fmtbuf out;
-	int c, s, z, p, w;
+	int c, s, z, p, w, q;
 	int32_t i32;
 	int64_t i64;
 	const char *str;
@@ -306,6 +431,7 @@ fz_format_string(fz_context *ctx, void *user, void (*emit)(fz_context *ctx, void
 	{
 		if (c == '%')
 		{
+			q = 0;
 			s = 0;
 			z = ' ';
 
@@ -321,6 +447,13 @@ fz_format_string(fz_context *ctx, void *user, void (*emit)(fz_context *ctx, void
 				/* zero padding */
 				else if (c == '0')
 					z = '0';
+				/* comma separators */
+				else if (c == '\'')
+					q = '\'';
+				else if (c == ',')
+					q = ',';
+				else if (c == '_')
+					q = '_';
 				/* TODO: '-' to left justify */
 				else
 					break;
@@ -452,17 +585,30 @@ fz_format_string(fz_context *ctx, void *user, void (*emit)(fz_context *ctx, void
 				z = '0';
 				fmtputc(&out, '0');
 				fmtputc(&out, 'x');
+				q = 0;
 				/* fallthrough */
 			case 'x':
 				if (bits == 64)
 				{
 					i64 = va_arg(args, int64_t);
-					fmtuint64(&out, i64, 0, z, w, 16);
+					fmtuint64(&out, i64, 0, z, w, 16, q);
 				}
 				else
 				{
 					i32 = va_arg(args, int);
-					fmtuint32(&out, i32, 0, z, w, 16);
+					fmtuint32(&out, i32, 0, z, w, 16, q);
+				}
+				break;
+			case 'X':
+				if (bits == 64)
+				{
+					i64 = va_arg(args, int64_t);
+					fmtuint64(&out, i64, 0, z, w, -16, q);
+				}
+				else
+				{
+					i32 = va_arg(args, int);
+					fmtuint32(&out, i32, 0, z, w, -16, q);
 				}
 				break;
 			case 'd':
@@ -470,24 +616,24 @@ fz_format_string(fz_context *ctx, void *user, void (*emit)(fz_context *ctx, void
 				if (bits == 64)
 				{
 					i64 = va_arg(args, int64_t);
-					fmtint64(&out, i64, s, z, w, 10);
+					fmtint64(&out, i64, s, z, w, 10, q);
 				}
 				else
 				{
 					i32 = va_arg(args, int);
-					fmtint32(&out, i32, s, z, w, 10);
+					fmtint32(&out, i32, s, z, w, 10, q);
 				}
 				break;
 			case 'u':
 				if (bits == 64)
 				{
 					i64 = va_arg(args, int64_t);
-					fmtuint64(&out, i64, 0, z, w, 10);
+					fmtuint64(&out, i64, 0, z, w, 10, q);
 				}
 				else
 				{
 					i32 = va_arg(args, int);
-					fmtuint32(&out, i32, 0, z, w, 10);
+					fmtuint32(&out, i32, 0, z, w, 10, q);
 				}
 				break;
 
@@ -507,6 +653,11 @@ fz_format_string(fz_context *ctx, void *user, void (*emit)(fz_context *ctx, void
 				str = va_arg(args, const char*);
 				if (!str) str = "";
 				fmtquote(&out, str, '"', '"', 0);
+				break;
+			case '<': /* quoted string for xml */
+				str = va_arg(args, const char*);
+				if (!str) str = "";
+				fmtquote_xml(&out, str);
 				break;
 			case '(': /* pdf string */
 				str = va_arg(args, const char*);

@@ -1,9 +1,36 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_CONTEXT_H
 #define MUPDF_FITZ_CONTEXT_H
 
 #include "mupdf/fitz/version.h"
 #include "mupdf/fitz/system.h"
 #include "mupdf/fitz/geometry.h"
+
+
+#ifndef FZ_VERBOSE_EXCEPTIONS
+#define FZ_VERBOSE_EXCEPTIONS 0
+#endif
 
 typedef struct fz_font_context fz_font_context;
 typedef struct fz_colorspace_context fz_colorspace_context;
@@ -12,6 +39,7 @@ typedef struct fz_tuning_context fz_tuning_context;
 typedef struct fz_store fz_store;
 typedef struct fz_glyph_cache fz_glyph_cache;
 typedef struct fz_document_handler_context fz_document_handler_context;
+typedef struct fz_archive_handler_context fz_archive_handler_context;
 typedef struct fz_output fz_output;
 typedef struct fz_context fz_context;
 
@@ -30,31 +58,182 @@ typedef struct
 	Exception macro definitions. Just treat these as a black box -
 	pay no attention to the man behind the curtain.
 */
-
 #define fz_var(var) fz_var_imp((void *)&(var))
 #define fz_try(ctx) if (!fz_setjmp(*fz_push_try(ctx))) if (fz_do_try(ctx)) do
 #define fz_always(ctx) while (0); if (fz_do_always(ctx)) do
 #define fz_catch(ctx) while (0); if (fz_do_catch(ctx))
 
+/**
+	These macros provide a simple exception handling system. Use them as
+	follows:
+
+	fz_try(ctx)
+		...
+	fz_catch(ctx)
+		...
+
+	or as:
+
+	fz_try(ctx)
+		...
+	fz_always(ctx)
+		...
+	fz_catch(ctx)
+		...
+
+	Code within the fz_try() section can then throw exceptions using fz_throw()
+	(or fz_vthrow()).
+
+	They are implemented with setjmp/longjmp, which can have unfortunate
+	consequences for 'losing' local variable values on a throw. To avoid this
+	we recommend calling 'fz_var(variable)' before the fz_try() for any
+	local variable whose value may change within the fz_try() block and whose
+	value will be required afterwards.
+
+	Do not call anything in the fz_always() section that can throw.
+
+	Any exception can be rethrown from the fz_catch() section using fz_rethrow()
+	as long as there has been no intervening use of fz_try/fz_catch.
+*/
+
+/**
+	Throw an exception.
+
+	This assumes an enclosing fz_try() block within the callstack.
+*/
 FZ_NORETURN void fz_vthrow(fz_context *ctx, int errcode, const char *, va_list ap);
 FZ_NORETURN void fz_throw(fz_context *ctx, int errcode, const char *, ...) FZ_PRINTFLIKE(3,4);
 FZ_NORETURN void fz_rethrow(fz_context *ctx);
+
+/**
+	Called within a catch block this modifies the current
+	exception's code. If it's of type 'fromcode' it is
+	modified to 'tocode'. Typically used for 'downgrading'
+	exception severity.
+*/
+void fz_morph_error(fz_context *ctx, int fromcode, int tocode);
+
+/**
+	Log a warning.
+
+	This goes to the registered warning stream (stderr by
+	default).
+*/
 void fz_vwarn(fz_context *ctx, const char *fmt, va_list ap);
 void fz_warn(fz_context *ctx, const char *fmt, ...) FZ_PRINTFLIKE(2,3);
-const char *fz_caught_message(fz_context *ctx);
-int fz_caught(fz_context *ctx);
-void fz_rethrow_if(fz_context *ctx, int errcode);
 
-enum
+/**
+	Within an fz_catch() block, retrieve the formatted message
+	string for the current exception.
+
+	This assumes no intervening use of fz_try/fz_catch.
+*/
+const char *fz_caught_message(fz_context *ctx);
+
+/**
+	Within an fz_catch() block, retrieve the error code for
+	the current exception.
+
+	This assumes no intervening use of fz_try/fz_catch.
+*/
+int fz_caught(fz_context *ctx);
+
+/*
+	Within an fz_catch() block, retrieve the errno code for
+	the current SYSTEM exception.
+
+	Is undefined for non-SYSTEM errors.
+*/
+int fz_caught_errno(fz_context *ctx);
+
+/**
+	Within an fz_catch() block, rethrow the current exception
+	if the errcode of the current exception matches.
+
+	This assumes no intervening use of fz_try/fz_catch.
+*/
+void fz_rethrow_if(fz_context *ctx, int errcode);
+void fz_rethrow_unless(fz_context *ctx, int errcode);
+
+/**
+	Format an error message, and log it to the registered
+	error stream (stderr by default).
+*/
+void fz_log_error_printf(fz_context *ctx, const char *fmt, ...) FZ_PRINTFLIKE(2,3);
+void fz_vlog_error_printf(fz_context *ctx, const char *fmt, va_list ap);
+
+/**
+	Log a (preformatted) string to the registered
+	error stream (stderr by default).
+*/
+void fz_log_error(fz_context *ctx, const char *str);
+
+void fz_start_throw_on_repair(fz_context *ctx);
+void fz_end_throw_on_repair(fz_context *ctx);
+
+/**
+	Now, a debugging feature. If FZ_VERBOSE_EXCEPTIONS is 1 then
+	some of the above functions are replaced by versions that print
+	FILE and LINE information.
+*/
+#if FZ_VERBOSE_EXCEPTIONS
+#define fz_vthrow(CTX, ERRCODE, FMT, VA) fz_vthrowFL(CTX, __FILE__, __LINE__, ERRCODE, FMT, VA)
+#define fz_throw(CTX, ERRCODE, ...) fz_throwFL(CTX, __FILE__, __LINE__, ERRCODE, __VA_ARGS__)
+#define fz_rethrow(CTX) fz_rethrowFL(CTX, __FILE__, __LINE__)
+#define fz_morph_error(CTX, FROM, TO) fz_morph_errorFL(CTX, __FILE__, __LINE__, FROM, TO)
+#define fz_vwarn(CTX, FMT, VA) fz_vwarnFL(CTX, __FILE__, __LINE__, FMT, VA)
+#define fz_warn(CTX, ...) fz_warnFL(CTX, __FILE__, __LINE__, __VA_ARGS__)
+#define fz_rethrow_if(CTX, ERRCODE) fz_rethrow_ifFL(CTX, __FILE__, __LINE__, ERRCODE)
+#define fz_rethrow_unless(CTX, ERRCODE) fz_rethrow_unlessFL(CTX, __FILE__, __LINE__, ERRCODE)
+#define fz_log_error_printf(CTX, ...) fz_log_error_printfFL(CTX, __FILE__, __LINE__, __VA_ARGS__)
+#define fz_vlog_error_printf(CTX, FMT, VA) fz_log_error_printfFL(CTX, __FILE__, __LINE__, FMT, VA)
+#define fz_log_error(CTX, STR) fz_log_error_printfFL(CTX, __FILE__, __LINE__, STR)
+#define fz_do_catch(CTX) fz_do_catchFL(CTX, __FILE__, __LINE__)
+FZ_NORETURN void fz_vthrowFL(fz_context *ctx, const char *file, int line, int errcode, const char *fmt, va_list ap);
+FZ_NORETURN void fz_throwFL(fz_context *ctx, const char *file, int line, int errcode, const char *fmt, ...) FZ_PRINTFLIKE(5,6);
+FZ_NORETURN void fz_rethrowFL(fz_context *ctx, const char *file, int line);
+void fz_morph_errorFL(fz_context *ctx, const char *file, int line, int fromcode, int tocode);
+void fz_vwarnFL(fz_context *ctx, const char *file, int line, const char *fmt, va_list ap);
+void fz_warnFL(fz_context *ctx, const char *file, int line, const char *fmt, ...) FZ_PRINTFLIKE(4,5);
+void fz_rethrow_ifFL(fz_context *ctx, const char *file, int line, int errcode);
+void fz_rethrow_unlessFL(fz_context *ctx, const char *file, int line, int errcode);
+void fz_log_error_printfFL(fz_context *ctx, const char *file, int line, const char *fmt, ...) FZ_PRINTFLIKE(4,5);
+void fz_vlog_error_printfFL(fz_context *ctx, const char *file, int line, const char *fmt, va_list ap);
+void fz_log_errorFL(fz_context *ctx, const char *file, int line, const char *str);
+int fz_do_catchFL(fz_context *ctx, const char *file, int line);
+#endif
+
+/* Report an error to the registered error callback. */
+void fz_report_error(fz_context *ctx);
+
+/*
+ * Swallow an error and ignore it completely.
+ * This should only be called to signal that you've handled a TRYLATER or ABORT error,
+ */
+void fz_ignore_error(fz_context *ctx);
+
+/* Convert an error into another runtime exception.
+ * For use when converting an exception from Fitz to a language binding exception.
+ */
+const char *fz_convert_error(fz_context *ctx, int *code);
+
+enum fz_error_type
 {
-	FZ_ERROR_NONE = 0,
-	FZ_ERROR_MEMORY = 1,
-	FZ_ERROR_GENERIC = 2,
-	FZ_ERROR_SYNTAX = 3,
-	FZ_ERROR_MINOR = 4,
-	FZ_ERROR_TRYLATER = 5,
-	FZ_ERROR_ABORT = 6,
-	FZ_ERROR_COUNT
+	FZ_ERROR_NONE,
+	FZ_ERROR_GENERIC,
+
+	FZ_ERROR_SYSTEM, // fatal out of memory or syscall error
+	FZ_ERROR_LIBRARY, // unclassified error from third-party library
+	FZ_ERROR_ARGUMENT, // invalid or out-of-range arguments to functions
+	FZ_ERROR_LIMIT, // failed because of resource or other hard limits
+	FZ_ERROR_UNSUPPORTED, // tried to use an unsupported feature
+	FZ_ERROR_FORMAT, // syntax or format errors that are unrecoverable
+	FZ_ERROR_SYNTAX, // syntax errors that should be diagnosed and ignored
+
+	// for internal use only
+	FZ_ERROR_TRYLATER, // try-later progressive loading signal
+	FZ_ERROR_ABORT, // user requested abort signal
+	FZ_ERROR_REPAIRED, // internal flag used when repairing a PDF to avoid cycles
 };
 
 /**
@@ -233,12 +412,34 @@ void fz_default_error_callback(void *user, const char *message);
 void fz_default_warning_callback(void *user, const char *message);
 
 /**
+	A callback called whenever an error message is generated.
+	The user pointer passed to fz_set_error_callback() is passed
+	along with the error message.
+*/
+typedef void (fz_error_cb)(void *user, const char *message);
+
+/**
+	A callback called whenever a warning message is generated.
+	The user pointer passed to fz_set_warning_callback() is
+	passed along with the warning message.
+*/
+typedef void (fz_warning_cb)(void *user, const char *message);
+
+/**
 	Set the error callback. This will be called as part of the
 	exception handling.
 
 	The callback must not throw exceptions!
 */
-void fz_set_error_callback(fz_context *ctx, void (*print)(void *user, const char *message), void *user);
+void fz_set_error_callback(fz_context *ctx, fz_error_cb *error_cb, void *user);
+
+/**
+	Retrieve the currently set error callback, or NULL if none
+	has been set. Optionally, if user is non-NULL, the user pointer
+	given when the warning callback was set is also passed back to
+	the caller.
+*/
+fz_error_cb *fz_error_callback(fz_context *ctx, void **user);
 
 /**
 	Set the warning callback. This will be called as part of the
@@ -246,7 +447,15 @@ void fz_set_error_callback(fz_context *ctx, void (*print)(void *user, const char
 
 	The callback must not throw exceptions!
 */
-void fz_set_warning_callback(fz_context *ctx, void (*print)(void *user, const char *message), void *user);
+void fz_set_warning_callback(fz_context *ctx, fz_warning_cb *warning_cb, void *user);
+
+/**
+	Retrieve the currently set warning callback, or NULL if none
+	has been set. Optionally, if user is non-NULL, the user pointer
+	given when the warning callback was set is also passed back to
+	the caller.
+*/
+fz_warning_cb *fz_warning_callback(fz_context *ctx, void **user);
 
 /**
 	In order to tune MuPDF's behaviour, certain functions can
@@ -506,6 +715,17 @@ void *fz_calloc_no_throw(fz_context *ctx, size_t count, size_t size);
 void *fz_realloc_no_throw(fz_context *ctx, void *p, size_t size);
 
 /**
+	fz_malloc equivalent, except that the block is guaranteed aligned.
+	Block must be freed later using fz_free_aligned.
+*/
+void *fz_malloc_aligned(fz_context *ctx, size_t size, int align);
+
+/**
+	fz_free equivalent, for blocks allocated via fz_malloc_aligned.
+*/
+void fz_free_aligned(fz_context *ctx, void *p);
+
+/**
 	Portable strdup implementation, using fz allocators.
 */
 char *fz_strdup(fz_context *ctx, const char *s);
@@ -515,6 +735,34 @@ char *fz_strdup(fz_context *ctx, const char *s);
 */
 void fz_memrnd(fz_context *ctx, uint8_t *block, int len);
 
+/*
+	Reference counted malloced C strings.
+*/
+typedef struct
+{
+	int refs;
+	char str[1];
+} fz_string;
+
+/*
+	Allocate a new string to hold a copy of str.
+
+	Returns with a refcount of 1.
+*/
+fz_string *fz_new_string(fz_context *ctx, const char *str);
+
+/*
+	Take another reference to a string.
+*/
+fz_string *fz_keep_string(fz_context *ctx, fz_string *str);
+
+/*
+	Drop a reference to a string, freeing if the refcount
+	reaches 0.
+*/
+void fz_drop_string(fz_context *ctx, fz_string *str);
+
+#define fz_cstring_from_string(A) ((A) == NULL ? NULL : (A)->str)
 
 /* Implementation details: subject to change. */
 
@@ -524,19 +772,27 @@ void fz_var_imp(void *);
 fz_jmp_buf *fz_push_try(fz_context *ctx);
 int fz_do_try(fz_context *ctx);
 int fz_do_always(fz_context *ctx);
-int fz_do_catch(fz_context *ctx);
+int (fz_do_catch)(fz_context *ctx);
+
+#ifndef FZ_JMPBUF_ALIGN
+#define FZ_JMPBUF_ALIGN 32
+#endif
 
 typedef struct
 {
-	int state, code;
 	fz_jmp_buf buffer;
+	int state, code;
+	char padding[FZ_JMPBUF_ALIGN-sizeof(int)*2];
 } fz_error_stack_slot;
 
 typedef struct
 {
 	fz_error_stack_slot *top;
 	fz_error_stack_slot stack[256];
+	fz_error_stack_slot padding;
+	fz_error_stack_slot *stack_base;
 	int errcode;
+	int errnum; /* errno for SYSTEM class errors */
 	void *print_user;
 	void (*print)(void *user, const char *message);
 	char message[256];
@@ -574,9 +830,11 @@ struct fz_context
 #if FZ_ENABLE_ICC
 	int icc_enabled;
 #endif
+	int throw_on_repair;
 
 	/* TODO: should these be unshared? */
 	fz_document_handler_context *handler;
+	fz_archive_handler_context *archive;
 	fz_style_context *style;
 	fz_tuning_context *tuning;
 
@@ -625,6 +883,36 @@ fz_keep_imp(fz_context *ctx, void *p, int *refs)
 			++*refs;
 		}
 		fz_unlock(ctx, FZ_LOCK_ALLOC);
+	}
+	return p;
+}
+
+static inline void *
+fz_keep_imp_locked(fz_context *ctx FZ_UNUSED, void *p, int *refs)
+{
+	if (p)
+	{
+		(void)Memento_checkIntPointerOrNull(refs);
+		if (*refs > 0)
+		{
+			(void)Memento_takeRef(p);
+			++*refs;
+		}
+	}
+	return p;
+}
+
+static inline void *
+fz_keep_imp8_locked(fz_context *ctx FZ_UNUSED, void *p, int8_t *refs)
+{
+	if (p)
+	{
+		(void)Memento_checkIntPointerOrNull(refs);
+		if (*refs > 0)
+		{
+			(void)Memento_takeRef(p);
+			++*refs;
+		}
 	}
 	return p;
 }

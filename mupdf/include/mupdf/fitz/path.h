@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_PATH_H
 #define MUPDF_FITZ_PATH_H
 
@@ -130,28 +152,20 @@ int fz_packed_path_size(const fz_path *path);
 	be aligned by the caller to the same alignment as required for
 	a fz_path pointer.
 
-	max: The number of bytes available in the block.
-	If max < sizeof(fz_path) then an exception will
-	be thrown. If max >= the value returned by
-	fz_packed_path_size, then this call will never
-	fail, except in low memory situations with large
-	paths.
-
 	path: The path to pack.
 
 	Returns the number of bytes within the block used. Callers can
 	access the packed path data by casting the value of pack on
 	entry to be a fz_path *.
 
-	Throws exceptions on failure to allocate, or if
-	max < sizeof(fz_path).
+	Throws exceptions on failure to allocate.
 
 	Implementation details: Paths can be 'unpacked', 'flat', or
-	'open'. Standard paths, as created are 'unpacked'. Paths that
-	will pack into less than max bytes will be packed as 'flat',
-	unless they are too large (where large indicates that they
-	exceed some private implementation defined limits, currently
-	including having more than 256 coordinates or commands).
+	'open'. Standard paths, as created are 'unpacked'. Paths
+	will be packed as 'flat', unless they are too large
+	(where large indicates that they exceed some private
+	implementation defined limits, currently including having
+	more than 256 coordinates or commands).
 
 	Large paths are 'open' packed as a header into the given block,
 	plus pointers to other data blocks.
@@ -160,7 +174,7 @@ int fz_packed_path_size(const fz_path *path);
 	or 'flat' packed. Simply pack a path (if required), and then
 	forget about the details.
 */
-size_t fz_pack_path(fz_context *ctx, uint8_t *pack, size_t max, const fz_path *path);
+size_t fz_pack_path(fz_context *ctx, uint8_t *pack, const fz_path *path);
 
 /**
 	Clone the data for a path.
@@ -352,7 +366,7 @@ fz_rect fz_adjust_rect_for_stroke(fz_context *ctx, fz_rect rect, const fz_stroke
 /**
 	A sane 'default' stroke state.
 */
-extern const fz_stroke_state fz_default_stroke_state;
+FZ_DATA extern const fz_stroke_state fz_default_stroke_state;
 
 /**
 	Create a new (empty) stroke state structure (with no dash

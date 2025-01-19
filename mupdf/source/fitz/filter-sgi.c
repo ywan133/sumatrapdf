@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <math.h>
@@ -236,7 +258,7 @@ next_sgilog16(fz_context *ctx, fz_stream *stm, size_t max)
 				if (state->run < 0)
 				{
 					state->run = -1;
-					fz_throw(ctx, FZ_ERROR_GENERIC, "premature end of data in run length decode");
+					fz_throw(ctx, FZ_ERROR_FORMAT, "premature end of data in run length decode");
 				}
 				if (state->run < 128)
 					state->n = state->run;
@@ -247,7 +269,7 @@ next_sgilog16(fz_context *ctx, fz_stream *stm, size_t max)
 					if (state->c < 0)
 					{
 						state->run = -1;
-						fz_throw(ctx, FZ_ERROR_GENERIC, "premature end of data in run length decode");
+						fz_throw(ctx, FZ_ERROR_FORMAT, "premature end of data in run length decode");
 					}
 				}
 			}
@@ -260,7 +282,7 @@ next_sgilog16(fz_context *ctx, fz_stream *stm, size_t max)
 					if (c < 0)
 					{
 						state->run = -1;
-						fz_throw(ctx, FZ_ERROR_GENERIC, "premature end of data in run length decode");
+						fz_throw(ctx, FZ_ERROR_FORMAT, "premature end of data in run length decode");
 					}
 					*p++ |= c<<shift;
 					state->n--;
@@ -445,7 +467,7 @@ next_sgilog24(fz_context *ctx, fz_stream *stm, size_t max)
 		if (c < 0)
 		{
 			state->err = 1;
-			fz_throw(ctx, FZ_ERROR_GENERIC, "premature end of data in run length decode");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "premature end of data in run length decode");
 		}
 		p += 3;
 	}
@@ -569,7 +591,7 @@ next_sgilog32(fz_context *ctx, fz_stream *stm, size_t max)
 				if (state->run < 0)
 				{
 					state->run = -1;
-					fz_throw(ctx, FZ_ERROR_GENERIC, "premature end of data in run length decode");
+					fz_throw(ctx, FZ_ERROR_FORMAT, "premature end of data in run length decode");
 				}
 				if (state->run < 128)
 					state->n = state->run;
@@ -580,7 +602,7 @@ next_sgilog32(fz_context *ctx, fz_stream *stm, size_t max)
 					if (state->c < 0)
 					{
 						state->run = -1;
-						fz_throw(ctx, FZ_ERROR_GENERIC, "premature end of data in run length decode");
+						fz_throw(ctx, FZ_ERROR_FORMAT, "premature end of data in run length decode");
 					}
 				}
 			}
@@ -593,7 +615,7 @@ next_sgilog32(fz_context *ctx, fz_stream *stm, size_t max)
 					if (c < 0)
 					{
 						state->run = -1;
-						fz_throw(ctx, FZ_ERROR_GENERIC, "premature end of data in run length decode");
+						fz_throw(ctx, FZ_ERROR_FORMAT, "premature end of data in run length decode");
 					}
 					*p++ |= c<<shift;
 					state->n--;

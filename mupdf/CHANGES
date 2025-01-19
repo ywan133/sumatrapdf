@@ -1,3 +1,333 @@
+List of changes in MuPDF 1.25
+
+	New logo!
+
+	Redaction options:
+		- New "don't redact text" option
+		- New "redact line art" option
+
+	Structured Text options:
+		- Use "Tagged PDF" structure information
+		- Detect underlines and strikeouts
+		- Mark automatically inserted spaces
+		- Mark areas where line art (vectors) are present
+		- Use accurate glyph bounding boxes
+		- Ignore ActualText tags
+		- Scan page for 'grid' lines
+		- Segment page into areas (headers, columns, etc)
+
+	Annotation features:
+		- Intent property accessors.
+		- Rich Content styling on FreeText annotations.
+		- Callout arrows on FreeText annotations.
+		- Leader Line and Caption on Line annotations.
+		- Improved handling of Rect and RD.
+
+	Low level FDF format support.
+		- See docs/examples/import-fdf.js for how to use.
+
+	Improved FileSpec handling with new functions.
+
+	Functions for listing document and page Associated Files (AF).
+
+	Functions to create and write XML DOM trees (fz_xml).
+
+	Skew detection and deskew algorithms on pixmaps and PDFOCR device.
+
+	Document area detection in scanned images.
+
+	ZUGFeRD support.
+
+	New tool "mutool audit" to create summary of PDF file composition.
+
+	Noteworthy API changes:
+		- New "wants_file" member for fz_document_handler.
+		- fz_text_item now has an explicit pen "advance" member.
+		- mutool recolor can now be used as a function.
+		- pdf_annot_rect works with the "design" rectangle.
+		- structured text "color" field renamed to "argb" and now includes alpha channel
+
+	Important bug fixes:
+		- More robust font subsetting.
+		- More robust handling of page and annotation objects during
+		  undo and redo.
+		- Updated "gray.icc" profile to actual sGray gamma ramp.
+
+	Support for "SmartOffice" commercially licensed plugin to load office
+	documents.
+
+List of changes in MuPDF 1.24
+
+	Error handling changes:
+
+		You must call pdf_report_error in the final fz_catch. Any
+		unreported errors will be automatically reported when a new
+		error is raised, or when closing the fitz context.
+
+
+	New formats:
+
+		Read Office (XML) files! We internally open and convert
+		docx/pptx/xlsx documents to HTML to allow reading the plain
+		text content. The exact layout will NOT be preserved.
+
+		Optional compile time option to use libarchive for reading CBR
+		and other archive formats.
+
+		Read plain text documents.
+
+		Read gzipped files directly.
+
+		Open and read FDF files to support importing annotations or
+		form data using the low-level PDF functions. There are no tools
+		for this yet.
+
+		Read CFB (Compound File Binary) format archives -- used for the
+		Office formats.
+
+		Write images as JPEG2000.
+
+	New tools and features:
+
+		mutool bake (and associated functions) to bake appearance of
+		annotations and forms into static content.
+
+		Font subsetting flag to mutool clean (EXPERIMENTAL FEATURE).
+
+		Option to use ObjStms when writing PDF files.
+
+		Compression effort option when writing PDF files.
+
+		Add option to control how line art is affected by redaction.
+		Add more options to control how images are affected by
+		redaction (remove-unless-invisible).
+
+		Fix up q/Q gstate balance when cleaning content streams.
+
+	New functions and types:
+
+		pdf_rearrange_pages to subset or re-order pages in a PDF file.
+
+		fz_invert_bitmap to invert monochrome bitmaps.
+
+		fz_compressed_image_type to query the format of a compressed
+		image.
+
+		fz_text_decoder to convert various legacy and CJK encodings
+		into UTF-8.
+
+		More helper functions to easily manipulate PDF objects in C.
+
+		Add flag to control fz_place_story overflow behavior when the
+		text doesn't fit into the box.
+
+		New archive handlers can be added at runtime.
+
+	Major bug fixes and improvements:
+
+		Support using Art, Bleed, Media, and Trim boxes for PDF page
+		size.
+
+		Support ActualText in PDF! No more strange text extraction when
+		the file uses ActualText to patch over bad font encodings.
+
+		Add special TrueType fallback encoding CMap for a specific
+		flavor of broken PDF files that use an "identity" encoding
+		without embedding the font.
+
+		Limited "transfer function" support in PDF. Transfer functions
+		are a deprecated legacy PDF feature that predates proper color
+		management. They were intended to provide limited color
+		management such as applying a gamma curve. Transfer functions
+		have often been (ab)-used to invert images, and many PDF
+		creators use them when writing softmask images. We have added
+		support for this case only.
+
+		Box drawing characters added to fonts for HTML and plain text
+		documents.
+
+		Write more compact PDF files (removed some unneccessary
+		whitespace).
+
+		Improved selection behavior for non-axis aligned text.
+
+		Improved heuristics for detecting the logical and visual order
+		of RTL text in PDF.
+
+		Improved heuristics for inserting missing spaces in PDF text.
+
+		Improved handling of CMYK JPEG files (which ones are inverted
+		and which are not).
+
+		Improved content type detection. Don't assume everything is PDF
+		when we can't recognize it.
+
+	Removed deprecated functions:
+		pdf_check_signature
+
+List of changes in MuPDF 1.23.0
+
+	New features:
+		New WASM library with same API as mutool run and Java, for both browser and Node environments.
+		Support CropBox, TrimBox, BleedBox, and ArtBox in PDF tools and viewers.
+		PhotoShop PSD image support.
+		mupdf-gl: Custom ICC display profile support.
+		mutool poster: Option to split in RTL direction.
+
+	Miscellaneous improvements and notable bug fixes:
+		EPUB: Fix table cell height calculations.
+		EPUB: Inherit table cell background color from table row.
+		EPUB: Support files with partial encryption (only read unencrypted parts).
+		EPUB: Support files with incorrect directory prefixes.
+		TIFF: Stability improvements.
+		MOBI: Stability improvements.
+		PDF: Support old style border dash patterns.
+		PDF: Support GoToR links to remote PDF documents.
+		PDF: Improve link parsing and creation.
+		ZIP: Improve unicode file name handling.
+		Fall back to unhinted fonts if hints are broken.
+		Recognize document types by sniffing contents (don't need to rely on mimetype or file extension).
+
+	New APIs:
+		More PDF document permission flags.
+		Tweaked exception error logging.
+		pdf_minimize_document to squeeze amount of memory used by an open document.
+
+	Incompatible API changes:
+		pdf_field_name renamed to pdf_load_field_name.
+		mutool run -- changed many methods to match Java and new WASM library.
+
+	New and improved documentation.
+
+List of changes in MuPDF 1.22.0
+
+	New command line "mutool recolor" to change colorspace of PDF files.
+	New command line "mutool trim" to remove content outside mediabox.
+	New flag to "mutool draw": -KK to remove all non-textual content.
+
+	Support PDF page labels.
+
+	Layout HTML tables with variable column widths.
+
+	Added JPEG output format. JPEG should be used with care due to its
+	lossy nature (if in doubt, use PDF instead).
+
+	Added PDF filter factories.
+	Added PDF color filter.
+	Added "culler" to sanitize filter.
+	Added flags to control embedding fonts in output.
+	New device methods for structured tags.
+	Increased maximum allowed image size.
+	Add magic flag to temporarily hide annotations when editing them.
+
+	Support RD in Square and Circle annotations.
+	Support dashed borders in annotations.
+	Support cloudy borders in annotations.
+	Improved layers in PDF files.
+	Fix performance issue with large PDF files and outlines.
+
+	Updated multi-threading examples.
+
+	Moved WASM project into separate repository.
+
+	Added Java and "mutool run" bindings for many more functions.
+
+List of changes in MuPDF 1.21.0
+
+	Added MOBI input format support.
+	Added Story API for creating PDF documents from formatted text.
+	Added API to create, edit, and delete links.
+
+	Support custom images for Stamp annotations.
+	Support interior color on Polygon annotations.
+	Support line endings on PolyLine annotations.
+
+	Improved SVG output.
+
+	C++/Python/C# binding:
+		Changes to naming of wrapper functions and classes.
+		Added limited support for callbacks into Python, using SWIG Directors.
+
+List of changes in MuPDF 1.20.0
+
+	Experimental C# bindings.
+	Cross compilation should no longer need a host compiler.
+	Major additions to JNI bindings.
+
+	New API to edit outline
+	New API to resolve and create links
+	New API to toggle individual layers in PDF
+		Layer panel in mupdf-gl
+		Layer option in mutool draw
+	New API to add a Javascript console
+		Console panel in mupdf-gl
+
+	Text search API extended to be able to distinguish between separate search hits.
+
+	Command line tool improvements:
+		all: Negative page numbers to index from the last page
+		mutool draw: Add option to render document without text
+		mutool draw and convert: Support DPI option in text and HTML output
+
+	New hybrid HTML output format using "scripts/pdftohtml" script:
+		Graphics in a background image
+		Text on top
+
+	Improved WASM viewer demo
+		Support high DPI screens
+		Progressive loading
+
+	Update to zlib 1.2.12 for security fix.
+
+	Too many bug fixes to list.
+
+List of changes in MuPDF 1.19.0
+
+	Removed support for Luratech JBIG2 and JPEG2000 decoders.
+
+	Added 'extract' library for more output options:
+		Added DOCX output format
+		Added ODT output format
+
+	Notable new features:
+		Journal for undo and redo
+		Snapshot for auto-save and restore (for backgrounding mobile apps)
+		Reflow document wrapper
+		Rollover appearance for annotations and widgets
+		Customize appearance of signed digital signatures
+		Progress and cancel callbacks to OCR functions
+		Create signature form fields
+
+	Minor new features:
+		Support CJK fonts in pdfwrite output
+		Support JBIG2 images in pdfwrite output
+		Support opacity for all markup annotation types
+		High-DPI aware UI in mupdf-gl
+		mutool extract -a option to embed SMasks as alpha channel
+
+	API changes:
+		Removed pdf_widget type alias (was always same as pdf_annot)
+		Updated annotation 'dirty' logic
+		Fix typo in function and type names: designated name -> distinguished name
+		More functions available to 'mutool run'
+		More functions available to Java library
+
+	New unicode scripts and fonts for EPUB:
+		Dogra, Elymaic, Gondi, Hanifi Rohingya, Masaram Gondi,
+		Medefaidrin, Nushu, Nyiakeng Puachue Hmong, Old Sogdian,
+		Sogdian, Soyombo, Wancho, Yezidi, and Zanabazar Square.
+
+	C++ and Python bindings:
+		C++ and Python bindings now work on Windows.
+		Python bindings are available as pre-built binaries on pypi.org.
+		Added demo PDF viewer using the Python MuPDF bindings and PyQt.
+
+		Better access to data in generated wrapper classes.
+		Improved handling of out-parameters in generated Python.
+		Text representation of POD types via C++ operator<< and Python str().
+		Fixed ref-counting bug in iterators.
+		Updates for new MuPDF functions.
+
 List of changes in MuPDF 1.18.0
 
 	mutool draw: bbox output format.

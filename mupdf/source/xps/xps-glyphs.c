@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "xps-imp.h"
 
@@ -39,16 +61,21 @@ void
 xps_select_font_encoding(fz_context *ctx, fz_font *font, int idx)
 {
 	FT_Face face = fz_font_ft_face(ctx, font);
+	fz_ft_lock(ctx);
 	FT_Set_Charmap(face, face->charmaps[idx]);
+	fz_ft_unlock(ctx);
 }
 
 int
 xps_encode_font_char(fz_context *ctx, fz_font *font, int code)
 {
 	FT_Face face = fz_font_ft_face(ctx, font);
-	int gid = FT_Get_Char_Index(face, code);
+	int gid;
+	fz_ft_lock(ctx);
+	gid = FT_Get_Char_Index(face, code);
 	if (gid == 0 && face->charmap && face->charmap->platform_id == 3 && face->charmap->encoding_id == 0)
 		gid = FT_Get_Char_Index(face, 0xF000 | code);
+	fz_ft_unlock(ctx);
 	return gid;
 }
 
@@ -59,10 +86,10 @@ xps_measure_font_glyph(fz_context *ctx, xps_document *doc, fz_font *font, int gi
 	FT_Face face = fz_font_ft_face(ctx, font);
 	FT_Fixed hadv = 0, vadv = 0;
 
-	fz_lock(ctx, FZ_LOCK_FREETYPE);
+	fz_ft_lock(ctx);
 	FT_Get_Advance(face, gid, mask, &hadv);
 	FT_Get_Advance(face, gid, mask | FT_LOAD_VERTICAL_LAYOUT, &vadv);
-	fz_unlock(ctx, FZ_LOCK_FREETYPE);
+	fz_ft_unlock(ctx);
 
 	mtx->hadv = (float) hadv / face->units_per_EM;
 	mtx->vadv = (float) vadv / face->units_per_EM;
@@ -231,10 +258,19 @@ xps_lookup_font(fz_context *ctx, xps_document *doc, char *base_uri, char *font_u
 			if (fz_caught(ctx) == FZ_ERROR_TRYLATER)
 			{
 				if (doc->cookie)
+				{
 					doc->cookie->incomplete = 1;
+					fz_ignore_error(ctx);
+				}
+				else
+					fz_rethrow(ctx);
 			}
 			else
+			{
+				fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+				fz_report_error(ctx);
 				fz_warn(ctx, "cannot find font resource part '%s'", partname);
+			}
 			return NULL;
 		}
 
@@ -522,7 +558,7 @@ xps_parse_glyphs(fz_context *ctx, xps_document *doc, fz_matrix ctm,
 	int is_sideways = 0;
 	int bidi_level = 0;
 
-	fz_text *text;
+	fz_text *text = NULL;
 	fz_rect area;
 
 	/*
@@ -589,6 +625,8 @@ xps_parse_glyphs(fz_context *ctx, xps_document *doc, fz_matrix ctm,
 	font = xps_lookup_font(ctx, doc, base_uri, font_uri_att, style_att);
 	if (!font)
 		font = fz_new_base14_font(ctx, "Times-Roman");
+
+	fz_var(text);
 
 	fz_try(ctx)
 	{

@@ -1,8 +1,4 @@
 #include "jsi.h"
-#include "jslex.h"
-#include "jsparse.h"
-#include "jscompile.h"
-#include "jsvalue.h" /* for jsV_numbertostring */
 
 #define cexp jsC_cexp /* collision with math.h */
 
@@ -10,7 +6,7 @@
 
 JS_NORETURN void jsC_error(js_State *J, js_Ast *node, const char *fmt, ...) JS_PRINTFLIKE(3,4);
 
-static void cfunbody(JF, js_Ast *name, js_Ast *params, js_Ast *body);
+static void cfunbody(JF, js_Ast *name, js_Ast *params, js_Ast *body, int is_fun_exp);
 static void cexp(JF, js_Ast *exp);
 static void cstmlist(JF, js_Ast *list);
 static void cstm(JF, js_Ast *stm);
@@ -51,7 +47,7 @@ static void checkfutureword(JF, js_Ast *exp)
 	}
 }
 
-static js_Function *newfun(js_State *J, int line, js_Ast *name, js_Ast *params, js_Ast *body, int script, int default_strict)
+static js_Function *newfun(js_State *J, int line, js_Ast *name, js_Ast *params, js_Ast *body, int script, int default_strict, int is_fun_exp)
 {
 	js_Function *F = js_malloc(J, sizeof *F);
 	memset(F, 0, sizeof *F);
@@ -66,7 +62,7 @@ static js_Function *newfun(js_State *J, int line, js_Ast *name, js_Ast *params, 
 	F->strict = default_strict;
 	F->name = name ? name->string : "";
 
-	cfunbody(J, F, name, params, body);
+	cfunbody(J, F, name, params, body, is_fun_exp);
 
 	return F;
 }
@@ -108,34 +104,6 @@ static int addfunction(JF, js_Function *value)
 	}
 	F->funtab[F->funlen] = value;
 	return F->funlen++;
-}
-
-static int addnumber(JF, double value)
-{
-	int i;
-	for (i = 0; i < F->numlen; ++i)
-		if (F->numtab[i] == value)
-			return i;
-	if (F->numlen >= F->numcap) {
-		F->numcap = F->numcap ? F->numcap * 2 : 16;
-		F->numtab = js_realloc(J, F->numtab, F->numcap * sizeof *F->numtab);
-	}
-	F->numtab[F->numlen] = value;
-	return F->numlen++;
-}
-
-static int addstring(JF, const char *value)
-{
-	int i;
-	for (i = 0; i < F->strlen; ++i)
-		if (!strcmp(F->strtab[i], value))
-			return i;
-	if (F->strlen >= F->strcap) {
-		F->strcap = F->strcap ? F->strcap * 2 : 16;
-		F->strtab = js_realloc(J, F->strtab, F->strcap * sizeof *F->strtab);
-	}
-	F->strtab[F->strlen] = value;
-	return F->strlen++;
 }
 
 static int addlocal(JF, js_Ast *ident, int reuse)
@@ -196,15 +164,27 @@ static void emitnumber(JF, double num)
 		emit(J, F, OP_INTEGER);
 		emitarg(J, F, num + 32768);
 	} else {
+#define N (sizeof(num) / sizeof(js_Instruction))
+		js_Instruction x[N];
+		size_t i;
 		emit(J, F, OP_NUMBER);
-		emitarg(J, F, addnumber(J, F, num));
+		memcpy(x, &num, sizeof(num));
+		for (i = 0; i < N; ++i)
+			emitarg(J, F, x[i]);
+#undef N
 	}
 }
 
 static void emitstring(JF, int opcode, const char *str)
 {
+#define N (sizeof(str) / sizeof(js_Instruction))
+	js_Instruction x[N];
+	size_t i;
 	emit(J, F, opcode);
-	emitarg(J, F, addstring(J, F, str));
+	memcpy(x, &str, sizeof(str));
+	for (i = 0; i < N; ++i)
+		emitarg(J, F, x[i]);
+#undef N
 }
 
 static void emitlocal(JF, int oploc, int opvar, js_Ast *ident)
@@ -302,16 +282,13 @@ static void cbinary(JF, js_Ast *exp, int opcode)
 
 static void carray(JF, js_Ast *list)
 {
-	int i = 0;
 	while (list) {
-		if (list->a->type != EXP_UNDEF) {
-			emitline(J, F, list->a);
-			emitnumber(J, F, i++);
-			cexp(J, F, list->a);
-			emitline(J, F, list->a);
-			emit(J, F, OP_INITPROP);
+		emitline(J, F, list->a);
+		if (list->a->type == EXP_ELISION) {
+			emit(J, F, OP_SKIPARRAY);
 		} else {
-			++i;
+			cexp(J, F, list->a);
+			emit(J, F, OP_INITARRAY);
 		}
 		list = list->b;
 	}
@@ -370,12 +347,12 @@ static void cobject(JF, js_Ast *list)
 			emit(J, F, OP_INITPROP);
 			break;
 		case EXP_PROP_GET:
-			emitfunction(J, F, newfun(J, prop->line, NULL, NULL, kv->c, 0, F->strict));
+			emitfunction(J, F, newfun(J, prop->line, NULL, NULL, kv->c, 0, F->strict, 1));
 			emitline(J, F, kv);
 			emit(J, F, OP_INITGETTER);
 			break;
 		case EXP_PROP_SET:
-			emitfunction(J, F, newfun(J, prop->line, NULL, kv->b, kv->c, 0, F->strict));
+			emitfunction(J, F, newfun(J, prop->line, NULL, kv->b, kv->c, 0, F->strict, 1));
 			emitline(J, F, kv);
 			emit(J, F, OP_INITSETTER);
 			break;
@@ -607,9 +584,7 @@ static void cexp(JF, js_Ast *exp)
 		emitline(J, F, exp);
 		emitnumber(J, F, exp->number);
 		break;
-	case EXP_UNDEF:
-		emitline(J, F, exp);
-		emit(J, F, OP_UNDEF);
+	case EXP_ELISION:
 		break;
 	case EXP_NULL:
 		emitline(J, F, exp);
@@ -630,8 +605,7 @@ static void cexp(JF, js_Ast *exp)
 
 	case EXP_REGEXP:
 		emitline(J, F, exp);
-		emit(J, F, OP_NEWREGEXP);
-		emitarg(J, F, addstring(J, F, exp->string));
+		emitstring(J, F, OP_NEWREGEXP, exp->string);
 		emitarg(J, F, exp->number);
 		break;
 
@@ -649,7 +623,7 @@ static void cexp(JF, js_Ast *exp)
 
 	case EXP_FUN:
 		emitline(J, F, exp);
-		emitfunction(J, F, newfun(J, exp->line, exp->a, exp->b, exp->c, 0, F->strict));
+		emitfunction(J, F, newfun(J, exp->line, exp->a, exp->b, exp->c, 0, F->strict, 1));
 		break;
 
 	case EXP_IDENTIFIER:
@@ -803,7 +777,7 @@ static void cexp(JF, js_Ast *exp)
 		break;
 
 	default:
-		jsC_error(J, exp, "unknown expression: (%s)", jsP_aststring(exp->type));
+		jsC_error(J, exp, "unknown expression type");
 	}
 }
 
@@ -818,15 +792,19 @@ static void addjump(JF, enum js_AstType type, js_Ast *target, int inst)
 	target->jumps = jump;
 }
 
-static void labeljumps(JF, js_JumpList *jump, int baddr, int caddr)
+static void labeljumps(JF, js_Ast *stm, int baddr, int caddr)
 {
+	js_JumpList *jump = stm->jumps;
 	while (jump) {
+		js_JumpList *next = jump->next;
 		if (jump->type == STM_BREAK)
 			labelto(J, F, jump->inst, baddr);
 		if (jump->type == STM_CONTINUE)
 			labelto(J, F, jump->inst, caddr);
-		jump = jump->next;
+		js_free(J, jump);
+		jump = next;
 	}
+	stm->jumps = NULL;
 }
 
 static int isloop(enum js_AstType T)
@@ -1145,7 +1123,7 @@ static void cstm(JF, js_Ast *stm)
 		cexp(J, F, stm->b);
 		emitline(J, F, stm);
 		emitjumpto(J, F, OP_JTRUE, loop);
-		labeljumps(J, F, stm->jumps, here(J,F), cont);
+		labeljumps(J, F, stm, here(J,F), cont);
 		break;
 
 	case STM_WHILE:
@@ -1157,7 +1135,7 @@ static void cstm(JF, js_Ast *stm)
 		emitline(J, F, stm);
 		emitjumpto(J, F, OP_JUMP, loop);
 		label(J, F, end);
-		labeljumps(J, F, stm->jumps, here(J,F), loop);
+		labeljumps(J, F, stm, here(J,F), loop);
 		break;
 
 	case STM_FOR:
@@ -1188,7 +1166,7 @@ static void cstm(JF, js_Ast *stm)
 		emitjumpto(J, F, OP_JUMP, loop);
 		if (end)
 			label(J, F, end);
-		labeljumps(J, F, stm->jumps, here(J,F), cont);
+		labeljumps(J, F, stm, here(J,F), cont);
 		break;
 
 	case STM_FOR_IN:
@@ -1213,12 +1191,12 @@ static void cstm(JF, js_Ast *stm)
 			emitjumpto(J, F, OP_JUMP, loop);
 		}
 		label(J, F, end);
-		labeljumps(J, F, stm->jumps, here(J,F), loop);
+		labeljumps(J, F, stm, here(J,F), loop);
 		break;
 
 	case STM_SWITCH:
 		cswitch(J, F, stm->a, stm->b);
-		labeljumps(J, F, stm->jumps, here(J,F), 0);
+		labeljumps(J, F, stm, here(J,F), 0);
 		break;
 
 	case STM_LABEL:
@@ -1228,7 +1206,7 @@ static void cstm(JF, js_Ast *stm)
 			stm = stm->b;
 		/* loops and switches have already been labelled */
 		if (!isloop(stm->type) && stm->type != STM_SWITCH)
-			labeljumps(J, F, stm->jumps, here(J,F), 0);
+			labeljumps(J, F, stm, here(J,F), 0);
 		break;
 
 	case STM_BREAK:
@@ -1383,17 +1361,17 @@ static void cfundecs(JF, js_Ast *list)
 		js_Ast *stm = list->a;
 		if (stm->type == AST_FUNDEC) {
 			emitline(J, F, stm);
-			emitfunction(J, F, newfun(J, stm->line, stm->a, stm->b, stm->c, 0, F->strict));
+			emitfunction(J, F, newfun(J, stm->line, stm->a, stm->b, stm->c, 0, F->strict, 0));
 			emitline(J, F, stm);
 			emit(J, F, OP_SETLOCAL);
-			emitarg(J, F, addlocal(J, F, stm->a, 0));
+			emitarg(J, F, addlocal(J, F, stm->a, 1));
 			emit(J, F, OP_POP);
 		}
 		list = list->b;
 	}
 }
 
-static void cfunbody(JF, js_Ast *name, js_Ast *params, js_Ast *body)
+static void cfunbody(JF, js_Ast *name, js_Ast *params, js_Ast *body, int is_fun_exp)
 {
 	F->lightweight = 1;
 	F->arguments = 0;
@@ -1417,11 +1395,14 @@ static void cfunbody(JF, js_Ast *name, js_Ast *params, js_Ast *body)
 
 	if (name) {
 		checkfutureword(J, F, name);
-		if (findlocal(J, F, name->string) < 0) {
-			emit(J, F, OP_CURRENT);
-			emit(J, F, OP_SETLOCAL);
-			emitarg(J, F, addlocal(J, F, name, 0));
-			emit(J, F, OP_POP);
+		if (is_fun_exp) {
+			if (findlocal(J, F, name->string) < 0) {
+				/* TODO: make this binding immutable! */
+				emit(J, F, OP_CURRENT);
+				emit(J, F, OP_SETLOCAL);
+				emitarg(J, F, addlocal(J, F, name, 1));
+				emit(J, F, OP_POP);
+			}
 		}
 	}
 
@@ -1438,10 +1419,10 @@ static void cfunbody(JF, js_Ast *name, js_Ast *params, js_Ast *body)
 
 js_Function *jsC_compilefunction(js_State *J, js_Ast *prog)
 {
-	return newfun(J, prog->line, prog->a, prog->b, prog->c, 0, J->default_strict);
+	return newfun(J, prog->line, prog->a, prog->b, prog->c, 0, J->default_strict, 1);
 }
 
 js_Function *jsC_compilescript(js_State *J, js_Ast *prog, int default_strict)
 {
-	return newfun(J, prog ? prog->line : 0, NULL, NULL, prog, 1, default_strict);
+	return newfun(J, prog ? prog->line : 0, NULL, NULL, prog, 1, default_strict, 0);
 }

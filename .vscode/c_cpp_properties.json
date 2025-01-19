@@ -7,7 +7,11 @@
                 "${workspaceRoot}/src",
                 "${workspaceRoot}/src/utils",
                 "${workspaceRoot}/src/wingui",
-                "${workspaceRoot}/ext/WDL"
+                "${workspaceRoot}/ext/synctex",
+                "${workspaceRoot}/ext/unarr",
+                "${workspaceRoot}/ext/zlib",
+                "${workspaceRoot}/ext/CHMLIB",
+                "${workspaceRoot}/packages/Microsoft.Web.WebView2.1.0.992.28/build/native/include"
             ],
             "defines": [
                 "_DEBUG",

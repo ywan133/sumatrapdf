@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "draw-imp.h"
 
@@ -245,7 +267,7 @@ fz_unpack_tile(fz_context *ctx, fz_pixmap *dst, unsigned char *src, int n, int d
 		size_t skipbits = 8 * stride - (size_t)w * n * depth;
 
 		if (skipbits > 32)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Inappropriate stride!");
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "Inappropriate stride!");
 
 		stm = fz_open_memory(ctx, sp, h * stride);
 		fz_try(ctx)
@@ -275,7 +297,7 @@ fz_unpack_tile(fz_context *ctx, fz_pixmap *dst, unsigned char *src, int n, int d
 			fz_rethrow(ctx);
 	}
 	else
-		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot unpack tile with %d bits per component", depth);
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot unpack tile with %d bits per component", depth);
 }
 
 /* Apply decode array */
@@ -449,7 +471,7 @@ fz_unpack_stream(fz_context *ctx, fz_stream *src, int depth, int w, int h, int n
 	else if (depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth  == 16 || depth == 24 || depth == 32)
 		unpack_line = fz_unpack_any_l2depth;
 	else
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Unsupported combination in fz_unpack_stream");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Unsupported combination in fz_unpack_stream");
 
 	state = fz_malloc(ctx, sizeof(unpack_state) + dst_stride + src_stride);
 	state->src = src;

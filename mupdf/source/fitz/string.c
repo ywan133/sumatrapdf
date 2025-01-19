@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <string.h>
@@ -6,19 +28,59 @@
 #include <float.h>
 #include <stdlib.h>
 
-#ifndef PATH_MAX
-#define PATH_MAX 4096
-#endif
-
 #ifdef _WIN32
 #include <windows.h> /* for MultiByteToWideChar etc. */
 #endif
 
-static inline int
+#include "utfdata.h"
+
+static const int *
+fz_ucd_bsearch(int c, const int *t, int n, int ne)
+{
+	const int *p;
+	int m;
+	while (n > 1)
+	{
+		m = n/2;
+		p = t + m*ne;
+		if (c >= p[0])
+		{
+			t = p;
+			n = n - m;
+		}
+		else
+		{
+			n = m;
+		}
+	}
+	if (n && c >= t[0])
+		return t;
+	return 0;
+}
+
+int
 fz_tolower(int c)
 {
-	if (c >= 'A' && c <= 'Z')
-		return c + 32;
+	const int *p;
+	p = fz_ucd_bsearch(c, ucd_tolower2, nelem(ucd_tolower2) / 3, 3);
+	if (p && c >= p[0] && c <= p[1])
+		return c + p[2];
+	p = fz_ucd_bsearch(c, ucd_tolower1, nelem(ucd_tolower1) / 2, 2);
+	if (p && c == p[0])
+		return c + p[1];
+	return c;
+}
+
+int
+fz_toupper(int c)
+{
+	const int *p;
+	p = fz_ucd_bsearch(c, ucd_toupper2, nelem(ucd_toupper2) / 3, 3);
+	if (p && c >= p[0] && c <= p[1])
+		return c + p[2];
+	p = fz_ucd_bsearch(c, ucd_toupper1, nelem(ucd_toupper1) / 2, 2);
+	if (p && c == p[0])
+		return c + p[1];
 	return c;
 }
 
@@ -135,9 +197,20 @@ fz_dirname(char *dir, const char *path, size_t n)
 	dir[i+1] = 0;
 }
 
+const char *
+fz_basename(const char *path)
+{
+	const char *name = strrchr(path, '/');
+	if (!name)
+		name = strrchr(path, '\\');
+	if (!name)
+		return path;
+	return name + 1;
+}
+
 #ifdef _WIN32
 
-char *fz_realpath(const char *path, char buf[PATH_MAX])
+char *fz_realpath(const char *path, char *buf)
 {
 	wchar_t wpath[PATH_MAX];
 	wchar_t wbuf[PATH_MAX];
@@ -156,7 +229,7 @@ char *fz_realpath(const char *path, char buf[PATH_MAX])
 
 #else
 
-char *fz_realpath(const char *path, char buf[PATH_MAX])
+char *fz_realpath(const char *path, char *buf)
 {
 	return realpath(path, buf);
 }
@@ -178,6 +251,14 @@ static inline int tohex(int c)
 	return 0;
 }
 
+#define URIRESERVED ";/?:@&=+$,"
+#define URIALPHA "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+#define URIDIGIT "0123456789"
+#define URIMARK "-_.!~*'()"
+#define URIUNESCAPED URIALPHA URIDIGIT URIMARK
+#define HEX "0123456789ABCDEF"
+
+/* Same as fz_decode_uri_component but in-place */
 char *
 fz_urldecode(char *url)
 {
@@ -199,6 +280,100 @@ fz_urldecode(char *url)
 	}
 	*p = 0;
 	return url;
+}
+
+char *
+fz_decode_uri_component(fz_context *ctx, const char *s)
+{
+	char *uri = fz_malloc(ctx, strlen(s) + 1);
+	char *p = uri;
+	while (*s)
+	{
+		int c = (unsigned char) *s++;
+		if (c == '%' && ishex(s[0]) && ishex(s[1]))
+		{
+			int a = tohex(*s++);
+			int b = tohex(*s++);
+			*p++ = a << 4 | b;
+		}
+		else
+		{
+			*p++ = c;
+		}
+	}
+	*p = 0;
+	return uri;
+}
+
+char *
+fz_decode_uri(fz_context *ctx, const char *s)
+{
+	char *uri = fz_malloc(ctx, strlen(s) + 1);
+	char *p = uri;
+	while (*s)
+	{
+		int c = (unsigned char) *s++;
+		if (c == '%' && ishex(s[0]) && ishex(s[1]))
+		{
+			int a = tohex(*s++);
+			int b = tohex(*s++);
+			int c = a << 4 | b;
+			if (strchr(URIRESERVED "#", c)) {
+				*p++ = '%';
+				*p++ = HEX[a];
+				*p++ = HEX[b];
+			} else {
+				*p++ = c;
+			}
+		}
+		else
+		{
+			*p++ = c;
+		}
+	}
+	*p = 0;
+	return uri;
+}
+
+static char *
+fz_encode_uri_imp(fz_context *ctx, const char *s, const char *unescaped)
+{
+	char *uri = fz_malloc(ctx, strlen(s) * 3 + 1); /* allocate enough for worst case */
+	char *p = uri;
+	while (*s)
+	{
+		int c = (unsigned char) *s++;
+		if (strchr(unescaped, c))
+		{
+			*p++ = c;
+		}
+		else
+		{
+			*p++ = '%';
+			*p++ = HEX[(c >> 4) & 15];
+			*p++ = HEX[(c) & 15];
+		}
+	}
+	*p = 0;
+	return uri;
+}
+
+char *
+fz_encode_uri_component(fz_context *ctx, const char *s)
+{
+	return fz_encode_uri_imp(ctx, s, URIUNESCAPED);
+}
+
+char *
+fz_encode_uri_pathname(fz_context *ctx, const char *s)
+{
+	return fz_encode_uri_imp(ctx, s, URIUNESCAPED "/");
+}
+
+char *
+fz_encode_uri(fz_context *ctx, const char *s)
+{
+	return fz_encode_uri_imp(ctx, s, URIUNESCAPED URIRESERVED "#");
 }
 
 void
@@ -237,7 +412,7 @@ fz_format_output_path(fz_context *ctx, char *path, size_t size, const char *fmt,
 		num[i++] = '0';
 	n = s - fmt;
 	if (n + i + strlen(p) >= size)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "path name buffer overflow");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "path name buffer overflow");
 	memcpy(path, fmt, n);
 	while (i > 0)
 		path[n++] = num[--i];
@@ -298,6 +473,16 @@ fz_cleanname(char *name)
 		*q++ = '.';
 	*q = '\0';
 	return name;
+}
+
+char *
+fz_cleanname_strdup(fz_context *ctx, const char *name)
+{
+	size_t len = strlen(name);
+	char *newname = fz_malloc(ctx, fz_maxz(2, len + 1));
+	memcpy(newname, name, len + 1);
+	newname[len] = '\0';
+	return fz_cleanname(newname);
 }
 
 enum
@@ -475,6 +660,37 @@ fz_runelen(int c)
 }
 
 int
+fz_runeidx(const char *s, const char *p)
+{
+	int rune;
+	int i = 0;
+	while (s < p) {
+		if (*(unsigned char *)s < Runeself)
+			++s;
+		else
+			s += fz_chartorune(&rune, s);
+		++i;
+	}
+	return i;
+}
+
+const char *
+fz_runeptr(const char *s, int i)
+{
+	int rune;
+	while (i-- > 0) {
+		rune = *(unsigned char*)s;
+		if (rune < Runeself) {
+			if (rune == 0)
+				return NULL;
+			++s;
+		} else
+			s += fz_chartorune(&rune, s);
+	}
+	return s;
+}
+
+int
 fz_utflen(const char *s)
 {
 	int c, n, rune;
@@ -536,6 +752,8 @@ int fz_is_page_range(fz_context *ctx, const char *s)
 
 const char *fz_parse_page_range(fz_context *ctx, const char *s, int *a, int *b, int n)
 {
+	const char *orig = s;
+
 	if (!s || !s[0])
 		return NULL;
 
@@ -563,8 +781,17 @@ const char *fz_parse_page_range(fz_context *ctx, const char *s, int *a, int *b, 
 	else
 		*b = *a;
 
+	if (*a < 0) *a = n + 1 + *a;
+	if (*b < 0) *b = n + 1 + *b;
+
 	*a = fz_clampi(*a, 1, n);
 	*b = fz_clampi(*b, 1, n);
+
+	if (s == orig)
+	{
+		fz_warn(ctx, "skipping invalid page range");
+		return NULL;
+	}
 
 	return s;
 }
@@ -714,4 +941,67 @@ void *fz_memmem(const void *h0, size_t k, const void *n0, size_t l)
 	if (l==4) return fourbyte_memmem(h, k, n);
 
 	return twoway_memmem(h, h+k, n, l);
+}
+
+char *
+fz_utf8_from_wchar(fz_context *ctx, const wchar_t *s)
+{
+	const wchar_t *src = s;
+	char *d;
+	char *dst;
+	int len = 1;
+
+	while (*src)
+	{
+		len += fz_runelen(*src++);
+	}
+
+	d = Memento_label(fz_malloc(ctx, len), "utf8_from_wchar");
+	dst = d;
+	src = s;
+	while (*src)
+	{
+		dst += fz_runetochar(dst, *src++);
+	}
+	*dst = 0;
+
+	return d;
+}
+
+wchar_t *
+fz_wchar_from_utf8(fz_context *ctx, const char *path)
+{
+	size_t z = 0;
+	const char *p = path;
+	wchar_t *wpath, *w;
+
+	if (!path)
+		return NULL;
+
+	while (*p)
+	{
+		int c;
+		p += fz_chartorune(&c, p);
+		z++;
+		if (c >= 0x10000)
+			z++;
+	}
+
+	w = wpath = fz_malloc(ctx, 2*(z+1));
+	while (*path)
+	{
+		int c;
+		path += fz_chartorune(&c, path);
+		if (c >= 0x10000)
+		{
+			c -= 0x10000;
+			*w++ = 0xd800 + (c>>10);
+			*w++ = 0xdc00 + (c&1023);
+		}
+		else
+			*w++ = c;
+	}
+	*w = 0;
+
+	return wpath;
 }

@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /*
  * muraster -- Convert a document to a raster file.
  *
@@ -143,7 +165,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 struct timeval;
 struct timezone;
 int gettimeofday(struct timeval *tv, struct timezone *tz);
@@ -479,13 +501,11 @@ static struct {
 	char *maxfilename;
 } timing;
 
-#define stringify(A) #A
-
 static int usage(void)
 {
 	fprintf(stderr,
 		"muraster version " FZ_VERSION "\n"
-		"Usage: muraster [options] file [pages]\n"
+		"usage: muraster [options] file [pages]\n"
 		"\t-p -\tpassword\n"
 		"\n"
 		"\t-o -\toutput file name\n"
@@ -498,9 +518,9 @@ static int usage(void)
 		"\n"
 		"\t-R {auto,0,90,180,270}\n"
 		"\t\trotate clockwise (default: auto)\n"
-		"\t-r -{,_}\tx and y resolution in dpi (default: " stringify(X_RESOLUTION) "x" stringify(Y_RESOLUTION) ")\n"
-		"\t-w -\tprintable width (in inches) (default: " stringify(PAPER_WIDTH) ")\n"
-		"\t-h -\tprintable height (in inches) (default: " stringify(PAPER_HEIGHT) "\n"
+		"\t-r -{,_}\tx and y resolution in dpi (default: %dx%d)\n"
+		"\t-w -\tprintable width (in inches) (default: %.2f)\n"
+		"\t-h -\tprintable height (in inches) (default: %.2f)\n"
 		"\t-f\tfit file to page if too large\n"
 		"\t-B -\tminimum band height (e.g. 32)\n"
 		"\t-M -\tmax bandmemory (e.g. 655360)\n"
@@ -518,7 +538,8 @@ static int usage(void)
 		"\t-A -\tnumber of bits of antialiasing (0 to 8)\n"
 		"\t-A -/-\tnumber of bits of antialiasing (0 to 8) (graphics, text)\n"
 		"\n"
-		"\tpages\tcomma separated list of page numbers and ranges\n"
+		"\tpages\tcomma separated list of page numbers and ranges\n",
+		X_RESOLUTION, Y_RESOLUTION, PAPER_WIDTH, PAPER_HEIGHT
 		);
 	return 1;
 }
@@ -542,6 +563,8 @@ static int drawband(fz_context *ctx, fz_page *page, fz_display_list *list, fz_ma
 	fz_device *dev = NULL;
 
 	*bit = NULL;
+
+	fz_var(dev);
 
 	fz_try(ctx)
 	{
@@ -613,11 +636,11 @@ static int dodrawpage(fz_context *ctx, int pagenum, fz_cookie *cookie, render_de
 					ibounds.y1 = ibounds.y0 + remaining_height;
 				remaining_height -= band_height;
 				w->pix = fz_new_pixmap_with_bbox(ctx, colorspace, ibounds, NULL, 0);
+				w->pix->y += band * band_height;
 				fz_set_pixmap_resolution(ctx, w->pix, x_resolution, y_resolution);
 				DEBUG_THREADS(("Worker %d, Pre-triggering band %d\n", band, band));
 				w->started = 1;
 				mu_trigger_semaphore(&w->start);
-				ctm.f -= band_height;
 			}
 			pix = workers[0].pix;
 		}
@@ -677,7 +700,8 @@ static int dodrawpage(fz_context *ctx, int pagenum, fz_cookie *cookie, render_de
 				w->started = 1;
 				mu_trigger_semaphore(&w->start);
 			}
-			ctm.f -= draw_height;
+			if (render->num_workers <= 0)
+				pix += draw_height;
 		}
 	}
 	fz_always(ctx)
@@ -779,6 +803,8 @@ static int try_render_page(fz_context *ctx, int pagenum, fz_cookie *cookie, int 
 		DEBUG_THREADS(("Render failure; nothing else to try\n"));
 		break;
 	}
+
+	fz_close_band_writer(ctx, render->bander);
 
 	fz_drop_page(ctx, render->page);
 	fz_drop_display_list(ctx, render->list);
@@ -977,16 +1003,21 @@ initialise_banding(fz_context *ctx, render_details *render, int color)
 	}
 
 	w = render->ibounds.x1 - render->ibounds.x0;
+	h = render->ibounds.y1 - render->ibounds.y0;
+	if (w <= 0 || h <= 0)
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Invalid page dimensions");
+
+
 	min_band_mem = (size_t)bpp * w * min_band_height;
-	reps = (int)(max_band_memory / min_band_mem);
-	if (reps < 1)
+	if (min_band_mem > 0)
+		reps = (int)(max_band_memory / min_band_mem);
+	if (min_band_mem == 0 || reps < 1)
 		reps = 1;
 
 	/* Adjust reps to even out the work between threads */
 	if (render->num_workers > 0)
 	{
 		int runs, num_bands;
-		h = render->ibounds.y1 - render->ibounds.y0;
 		num_bands = (h + min_band_height - 1) / min_band_height;
 		/* num_bands = number of min_band_height bands */
 		runs = (num_bands + reps-1) / reps;
@@ -1393,6 +1424,13 @@ read_resolution(const char *arg)
 		y_resolution = fz_atoi(arg);
 	else
 		y_resolution = x_resolution;
+
+	if (x_resolution <= 0 || y_resolution <= 0)
+	{
+		fprintf(stderr, "Ignoring invalid resolution\n");
+		x_resolution =  X_RESOLUTION;
+		y_resolution =  Y_RESOLUTION;
+	}
 }
 
 static int
@@ -1664,7 +1702,7 @@ int main(int argc, char **argv)
 				if (fz_needs_password(ctx, doc))
 				{
 					if (!fz_authenticate_password(ctx, doc, password))
-						fz_throw(ctx, FZ_ERROR_GENERIC, "cannot authenticate password: %s", filename);
+						fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot authenticate password: %s", filename);
 				}
 
 				fz_layout_document(ctx, doc, layout_w, layout_h, layout_em);
@@ -1684,6 +1722,7 @@ int main(int argc, char **argv)
 
 				fz_drop_document(ctx, doc);
 				doc = NULL;
+				fz_report_error(ctx);
 				fz_warn(ctx, "ignoring error in '%s'", filename);
 			}
 		}
@@ -1692,7 +1731,7 @@ int main(int argc, char **argv)
 	fz_catch(ctx)
 	{
 		fz_drop_document(ctx, doc);
-		fprintf(stderr, "error: cannot draw '%s'\n", filename);
+		fz_log_error_printf(ctx, "cannot draw '%s'", filename);
 		errored = 1;
 	}
 

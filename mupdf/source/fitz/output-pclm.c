@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <string.h>
@@ -24,13 +46,13 @@ fz_parse_pclm_options(fz_context *ctx, fz_pclm_options *opts, const char *args)
 		else if (fz_option_eq(val, "flate"))
 			opts->compress = 1;
 		else
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Unsupported PCLm compression %s (none, or flate only)", val);
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "Unsupported PCLm compression %s (none, or flate only)", val);
 	}
 	if (fz_has_option(ctx, args, "strip-height", &val))
 	{
 		int i = fz_atoi(val);
 		if (i <= 0)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Unsupported PCLm strip height %d (suggest 16)", i);
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "Unsupported PCLm strip height %d (suggest 16)", i);
 		opts->strip_height = i;
 	}
 
@@ -50,6 +72,7 @@ fz_write_pixmap_as_pclm(fz_context *ctx, fz_output *out, const fz_pixmap *pixmap
 	{
 		fz_write_header(ctx, writer, pixmap->w, pixmap->h, pixmap->n, pixmap->alpha, pixmap->xres, pixmap->yres, 0, pixmap->colorspace, pixmap->seps);
 		fz_write_band(ctx, writer, pixmap->stride, pixmap->h, pixmap->samples);
+		fz_close_band_writer(ctx, writer);
 	}
 	fz_always(ctx)
 		fz_drop_band_writer(ctx, writer);
@@ -112,11 +135,11 @@ pclm_write_header(fz_context *ctx, fz_band_writer *writer_, fz_colorspace *cs)
 	fz_buffer *buf = NULL;
 
 	if (a != 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "PCLm cannot write alpha channel");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "PCLm cannot write alpha channel");
 	if (s != 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "PCLm cannot write spot colors");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "PCLm cannot write spot colors");
 	if (n != 3 && n != 1)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "PCLm expected to be Grayscale or RGB");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "PCLm expected to be Grayscale or RGB");
 
 	fz_free(ctx, writer->stripbuf);
 	writer->stripbuf = NULL;
@@ -239,13 +262,13 @@ pclm_write_trailer(fz_context *ctx, fz_band_writer *writer_)
 }
 
 static void
-pclm_drop_band_writer(fz_context *ctx, fz_band_writer *writer_)
+pclm_close_band_writer(fz_context *ctx, fz_band_writer *writer_)
 {
 	pclm_band_writer *writer = (pclm_band_writer *)writer_;
 	fz_output *out = writer->super.out;
 	int i;
 
-	/* We actually do the trailer writing in the drop */
+	/* We actually do the trailer writing in the close */
 	if (writer->xref_max > 2)
 	{
 		int64_t t_pos;
@@ -269,7 +292,12 @@ pclm_drop_band_writer(fz_context *ctx, fz_band_writer *writer_)
 			fz_write_printf(ctx, out, "%010zd 00000 n \n", writer->xref[i]);
 		fz_write_printf(ctx, out, "trailer\n<<\n/Size %d\n/Root 1 0 R\n>>\nstartxref\n%ld\n%%%%EOF\n", writer->obj_num, t_pos);
 	}
+}
 
+static void
+pclm_drop_band_writer(fz_context *ctx, fz_band_writer *writer_)
+{
+	pclm_band_writer *writer = (pclm_band_writer *)writer_;
 	fz_free(ctx, writer->stripbuf);
 	fz_free(ctx, writer->compbuf);
 	fz_free(ctx, writer->page_obj);
@@ -283,6 +311,7 @@ fz_band_writer *fz_new_pclm_band_writer(fz_context *ctx, fz_output *out, const f
 	writer->super.header = pclm_write_header;
 	writer->super.band = pclm_write_band;
 	writer->super.trailer = pclm_write_trailer;
+	writer->super.close = pclm_close_band_writer;
 	writer->super.drop = pclm_drop_band_writer;
 
 	if (options)
@@ -359,9 +388,7 @@ pclm_close_writer(fz_context *ctx, fz_document_writer *wri_)
 {
 	fz_pclm_writer *wri = (fz_pclm_writer*)wri_;
 
-	fz_drop_band_writer(ctx, wri->bander);
-	wri->bander = NULL;
-
+	fz_close_band_writer(ctx, wri->bander);
 	fz_close_output(ctx, wri->out);
 }
 
@@ -378,10 +405,13 @@ pclm_drop_writer(fz_context *ctx, fz_document_writer *wri_)
 fz_document_writer *
 fz_new_pclm_writer_with_output(fz_context *ctx, fz_output *out, const char *options)
 {
-	fz_pclm_writer *wri = fz_new_derived_document_writer(ctx, fz_pclm_writer, pclm_begin_page, pclm_end_page, pclm_close_writer, pclm_drop_writer);
+	fz_pclm_writer *wri = NULL;
+
+	fz_var(wri);
 
 	fz_try(ctx)
 	{
+		wri = fz_new_derived_document_writer(ctx, fz_pclm_writer, pclm_begin_page, pclm_end_page, pclm_close_writer, pclm_drop_writer);
 		fz_parse_draw_options(ctx, &wri->draw, options);
 		fz_parse_pclm_options(ctx, &wri->pclm, options);
 		wri->out = out;
@@ -389,6 +419,7 @@ fz_new_pclm_writer_with_output(fz_context *ctx, fz_output *out, const char *opti
 	}
 	fz_catch(ctx)
 	{
+		fz_drop_output(ctx, out);
 		fz_free(ctx, wri);
 		fz_rethrow(ctx);
 	}
@@ -400,13 +431,5 @@ fz_document_writer *
 fz_new_pclm_writer(fz_context *ctx, const char *path, const char *options)
 {
 	fz_output *out = fz_new_output_with_path(ctx, path ? path : "out.pclm", 0);
-	fz_document_writer *wri = NULL;
-	fz_try(ctx)
-		wri = fz_new_pclm_writer_with_output(ctx, out, options);
-	fz_catch(ctx)
-	{
-		fz_drop_output(ctx, out);
-		fz_rethrow(ctx);
-	}
-	return wri;
+	return fz_new_pclm_writer_with_output(ctx, out, options);
 }

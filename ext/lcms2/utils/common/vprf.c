@@ -1,7 +1,7 @@
 //---------------------------------------------------------------------------------
 //
 //  Little Color Management System
-//  Copyright (c) 1998-2020 Marti Maria Saguer
+//  Copyright (c) 1998-2022 Marti Maria Saguer
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files (the "Software"),
@@ -142,7 +142,7 @@ void PrintBuiltins(void)
                      "\t*Gray22 - Monochrome of Gamma 2.2\n"
                      "\t*Gray30 - Monochrome of Gamma 3.0\n"
                      "\t*null   - Monochrome black for all input\n"
-                     "\t*Lin2222- CMYK linearization of gamma 2.2 on each channel\n");
+                     "\t*Lin2222- CMYK linearization of gamma 2.2 on each channel\n\n");
 }
 
 
@@ -231,7 +231,7 @@ void PrintRenderingIntents(cmsContext ContextID)
     char* Descriptions[200];
     cmsUInt32Number n, i;
 
-    fprintf(stderr, "%ct<n> rendering intent:\n\n", SW);
+    fprintf(stderr, "-t<n> rendering intent:\n\n");
 
     n = cmsGetSupportedIntents(ContextID, 200, Codes, Descriptions);
 

@@ -1,62 +1,139 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "utils/BaseUtil.h"
 #include "utils/Dpi.h"
-#include <mlang.h>
-
 #include "utils/BitManip.h"
-#include "utils/ScopedWin.h"
 #include "utils/FileUtil.h"
 #include "utils/WinDynCalls.h"
+#include "utils/ScopedWin.h"
 #include "utils/WinUtil.h"
-// TODO: move function that need Cmd to ResourceIds.h
-#include "Commands.h"
+
+#include <wintrust.h>
+#include <softpub.h>
+#include <bitset>
+#include <intrin.h>
+#include <mlang.h>
 
 #include "utils/Log.h"
-#include "utils/LogDbg.h"
 
-static HFONT gDefaultGuiFont = nullptr;
-static HFONT gDefaultGuiFontBold = nullptr;
-static HFONT gDefaultGuiFontItalic = nullptr;
-static HFONT gDefaultGuiFontBoldItalic = nullptr;
+static LONG gSubclassId = 0;
 
-int RectDx(const RECT& r) {
-    return r.right - r.left;
-}
-int RectDy(const RECT& r) {
-    return r.bottom - r.top;
+UINT_PTR NextSubclassId() {
+    LONG res = InterlockedIncrement(&gSubclassId);
+    return (UINT_PTR)res;
 }
 
-POINT MakePoint(long x, long y) {
-    POINT p = {x, y};
-    return p;
+bool ToBool(BOOL b) {
+    return b ? true : false;
 }
 
-SIZE MakeSize(long dx, long dy) {
-    SIZE sz = {dx, dy};
-    return sz;
+Size BlittableBitmap::GetSize() {
+    return size;
 }
 
-RECT MakeRect(long x, long y, long dx, long dy) {
-    RECT r;
-    r.left = x;
-    r.right = x + dx;
-    r.top = y;
-    r.bottom = y + dy;
-    return r;
+RenderedBitmap::RenderedBitmap(HBITMAP hbmp, Size size, HANDLE hMap) {
+    this->hbmp = hbmp;
+    this->hMap = hMap;
+    this->size = size;
 }
 
-void Edit_SelectAll(HWND hwnd) {
+RenderedBitmap::~RenderedBitmap() {
+    if (IsValidHandle(hbmp)) {
+        DeleteObject(hbmp);
+    }
+    if (IsValidHandle(hMap)) {
+        CloseHandle(hMap);
+    }
+}
+
+RenderedBitmap* RenderedBitmap::Clone() const {
+    HBITMAP hbmp2 = (HBITMAP)CopyImage(hbmp, IMAGE_BITMAP, size.dx, size.dy, 0);
+    return new RenderedBitmap(hbmp2, size);
+}
+
+bool RenderedBitmap::IsValid() {
+    return hbmp != nullptr;
+}
+
+// render the bitmap into the target rectangle (streching and skewing as requird)
+bool RenderedBitmap::Blit(HDC hdc, Rect target) {
+    return BlitHBITMAP(hbmp, hdc, target);
+}
+
+// callers must not delete this (use Clone if you have to modify it)
+HBITMAP RenderedBitmap::GetBitmap() const {
+    return hbmp;
+}
+
+void EditSelectAll(HWND hwnd) {
     Edit_SetSel(hwnd, 0, -1);
 }
 
-void ListBox_AppendString_NoSort(HWND hwnd, WCHAR* txt) {
+int EditIdealDy(HWND hwnd, bool hasBorder, int lines) {
+    ReportIf(lines < 1);
+    ReportIf(lines > 256);
+
+    HFONT hfont = HwndGetFont(hwnd);
+    Size s1 = HwndMeasureText(hwnd, "Minimal", hfont);
+    // logf("Edit::GetIdealSize: s1.dx=%d, s2.dy=%d\n", (int)s1.cx, (int)s1.cy);
+    char* txt = HwndGetTextTemp(hwnd);
+    Size s2 = HwndMeasureText(hwnd, txt, hfont);
+    int dy = std::min(s1.dy, s2.dy);
+    if (dy == 0) {
+        dy = std::max(s1.dy, s2.dy);
+    }
+    dy = dy * lines;
+    if (hasBorder) {
+        dy += DpiScale(hwnd, 8);
+    }
+    // logf("Edit::GetIdealSize(): dx=%d, dy=%d\n", int(res.cx), int(res.cy));
+    return dy;
+}
+
+// HWND should be Edit control
+// Should be called after user types Ctrl + Backspace to
+// delete word backwards from current cursor position
+void EditImplementCtrlBack(HWND hwnd) {
+    // we calc selection in WCHAR space because it's easier
+    WCHAR* text = HwndGetTextWTemp(hwnd);
+    int selStart = LOWORD(Edit_GetSel(hwnd)), selEnd = selStart;
+    // remove the rectangle produced by Ctrl+Backspace
+    if (selStart > 0 && text[selStart - 1] == '\x7F') {
+        memmove(text + selStart - 1, text + selStart, str::Len(text + selStart - 1) * sizeof(WCHAR));
+        TempStr s = ToUtf8Temp(text);
+        HwndSetText(hwnd, s);
+        selStart = selEnd = selStart - 1;
+    }
+    // remove the previous word (and any spacing after it)
+    for (; selStart > 0 && str::IsWs(text[selStart - 1]); selStart--) {
+        ;
+    }
+    for (; selStart > 0 && !str::IsWs(text[selStart - 1]); selStart--) {
+        ;
+    }
+    Edit_SetSel(hwnd, selStart, selEnd);
+    SendMessageW(hwnd, WM_CLEAR, 0, 0); // delete selected text
+}
+
+void ListBox_AppendString_NoSort(HWND hwnd, const WCHAR* txt) {
     ListBox_InsertString(hwnd, -1, txt);
 }
 
+// https://learn.microsoft.com/en-us/windows/win32/controls/lb-gettopindex
+int ListBoxGetTopIndex(HWND hwnd) {
+    auto res = ListBox_GetTopIndex(hwnd);
+    return res;
+}
+
+// https://learn.microsoft.com/en-us/windows/win32/controls/lb-settopindex
+bool ListBoxSetTopIndex(HWND hwnd, int idx) {
+    auto res = ListBox_SetTopIndex(hwnd, idx);
+    return res != LB_ERR;
+}
+
 void InitAllCommonControls() {
-    INITCOMMONCONTROLSEX cex = {0};
+    INITCOMMONCONTROLSEX cex{};
     cex.dwSize = sizeof(INITCOMMONCONTROLSEX);
     cex.dwICC = ICC_WIN95_CLASSES | ICC_DATE_CLASSES | ICC_USEREX_CLASSES | ICC_COOL_CLASSES;
     InitCommonControlsEx(&cex);
@@ -72,15 +149,15 @@ void FillWndClassEx(WNDCLASSEX& wcex, const WCHAR* clsName, WNDPROC wndproc) {
     wcex.lpfnWndProc = wndproc;
 }
 
-RECT GetClientRect(HWND hwnd) {
+RECT ClientRECT(HWND hwnd) {
     RECT r;
-    GetClientRect(hwnd, &r);
+    ::GetClientRect(hwnd, &r);
     return r;
 }
 
 Rect ClientRect(HWND hwnd) {
     RECT rc{};
-    GetClientRect(hwnd, &rc);
+    ::GetClientRect(hwnd, &rc);
     return Rect(rc);
 }
 
@@ -93,7 +170,35 @@ Rect WindowRect(HWND hwnd) {
 Rect MapRectToWindow(Rect rect, HWND hwndFrom, HWND hwndTo) {
     RECT rc = ToRECT(rect);
     MapWindowPoints(hwndFrom, hwndTo, (LPPOINT)&rc, 2);
-    return Rect::FromRECT(rc);
+    return ToRect(rc);
+}
+
+int MapWindowPoints(HWND hwndFrom, HWND hwndTo, Point* points, int nPoints) {
+    ReportIf(nPoints > 64);
+    POINT pnts[64];
+    for (int i = 0; i < nPoints; i++) {
+        pnts[i].x = points[i].x;
+        pnts[i].y = points[i].y;
+    }
+    int res = MapWindowPoints(hwndFrom, hwndTo, &pnts[0], (uint)nPoints);
+    for (int i = 0; i < nPoints; i++) {
+        points[i].x = pnts[i].x;
+        points[i].y = pnts[i].y;
+    }
+    return res;
+}
+
+void HwndScreenToClient(HWND hwnd, Point& p) {
+    POINT pt = {p.x, p.y};
+    ScreenToClient(hwnd, &pt);
+    p.x = pt.x;
+    p.y = pt.y;
+}
+
+// move window to top of Z order (i.e. make it visible to the user)
+// but without activation (i.e. capturing focus)
+void HwndMakeVisible(HWND hwnd) {
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
 }
 
 void MoveWindow(HWND hwnd, Rect rect) {
@@ -104,7 +209,7 @@ void MoveWindow(HWND hwnd, RECT* r) {
     MoveWindow(hwnd, r->left, r->top, RectDx(*r), RectDy(*r), TRUE);
 }
 
-void GetOsVersion(OSVERSIONINFOEX& ver) {
+bool GetOsVersion(OSVERSIONINFOEX& ver) {
     ZeroMemory(&ver, sizeof(ver));
     ver.dwOSVersionInfoSize = sizeof(ver);
 #pragma warning(push)
@@ -115,45 +220,101 @@ void GetOsVersion(OSVERSIONINFOEX& ver) {
     // unless the OS's GUID has been explicitly added to the compatibility manifest
     BOOL ok = GetVersionEx((OSVERSIONINFO*)&ver); // NOLINT
 #pragma warning(pop)
-    CrashIf(!ok);
+    return !!ok;
 }
 
-// For more versions see OsNameFromVer() in CrashHandler.cpp
-bool IsWin10() {
-    OSVERSIONINFOEX ver;
-    GetOsVersion(ver);
-    return ver.dwMajorVersion == 10;
+TempStr OsNameFromVerTemp(const OSVERSIONINFOEX& ver) {
+    if (VER_PLATFORM_WIN32_NT != ver.dwPlatformId) {
+        return str::DupTemp("9x");
+    }
+    if (ver.dwMajorVersion == 6 && ver.dwMinorVersion == 3) {
+        return str::DupTemp("8.1"); // or Server 2012 R2
+    }
+    if (ver.dwMajorVersion == 6 && ver.dwMinorVersion == 2) {
+        return str::DupTemp("8"); // or Server 2012
+    }
+    if (ver.dwMajorVersion == 6 && ver.dwMinorVersion == 1) {
+        return str::DupTemp("7"); // or Server 2008 R2
+    }
+    if (ver.dwMajorVersion == 6 && ver.dwMinorVersion == 0) {
+        return str::DupTemp("Vista"); // or Server 2008
+    }
+    if (ver.dwMajorVersion == 5 && ver.dwMinorVersion == 2) {
+        return str::DupTemp("Server 2003");
+    }
+    if (ver.dwMajorVersion == 5 && ver.dwMinorVersion == 1) {
+        return str::DupTemp("XP");
+    }
+    if (ver.dwMajorVersion == 5 && ver.dwMinorVersion == 0) {
+        return str::DupTemp("2000");
+    }
+    if (ver.dwMajorVersion == 10) {
+        // ver.dwMinorVersion seems to always be 0
+        int buildNo = (int)(ver.dwBuildNumber & 0xFFFF);
+        return str::FormatTemp("10.%d", buildNo);
+    }
+
+    // either a newer or an older NT version, neither of which we support
+    return str::FormatTemp("NT %u.%u", ver.dwMajorVersion, ver.dwMinorVersion);
 }
 
-bool IsWin7() {
-    OSVERSIONINFOEX ver;
-    GetOsVersion(ver);
-    return ver.dwMajorVersion == 6 && ver.dwMinorVersion == 1;
+TempStr GetWindowsVerTemp() {
+    OSVERSIONINFOEX ver{};
+    ver.dwOSVersionInfoSize = sizeof(ver);
+#pragma warning(push)
+#pragma warning(disable : 4996)  // 'GetVersionEx': was declared deprecated
+#pragma warning(disable : 28159) // Consider using 'IsWindows*' instead of 'GetVersionExW'
+    // see: https://msdn.microsoft.com/en-us/library/windows/desktop/dn424972(v=vs.85).aspx
+    // starting with Windows 8.1, GetVersionEx will report a wrong version number
+    // unless the OS's GUID has been explicitly added to the compatibility manifest
+    BOOL ok = GetVersionExW((OSVERSIONINFO*)&ver); // NOLINT
+#pragma warning(pop)
+    if (!ok) {
+        return str::DupTemp("uknown");
+    }
+    return OsNameFromVerTemp(ver);
 }
 
-/* Vista is major: 6, minor: 0 */
-bool IsVistaOrGreater() {
-    OSVERSIONINFOEX osver = {0};
-    ULONGLONG condMask = 0;
-    osver.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
-    osver.dwMajorVersion = 6;
-    VER_SET_CONDITION(condMask, VER_MAJORVERSION, VER_GREATER_EQUAL);
-    return VerifyVersionInfo(&osver, VER_MAJORVERSION, condMask);
+// returns nullptr if not set
+TempStr GetEnvVariableTemp(const char* name) {
+    WCHAR bufStatic[256];
+    WCHAR* buf = &bufStatic[0];
+    DWORD cchBufSize = dimof(bufStatic);
+    TempWStr nameW = ToWStrTemp(name);
+    DWORD res = GetEnvironmentVariableW(nameW, buf, cchBufSize);
+    if (res == 0) {
+        // env variable doesn't exist
+        return nullptr;
+    }
+    if (res >= cchBufSize) {
+        // buffer was too small
+        cchBufSize = res + 4; // +4 jic
+        buf = AllocArrayTemp<WCHAR>(cchBufSize);
+        res = GetEnvironmentVariableW(nameW, buf, cchBufSize);
+        ReportIf(res == 0 || res > cchBufSize);
+    }
+    return ToUtf8Temp(buf);
 }
 
+bool IsProcess64() {
+    return 8 == sizeof(void*);
+}
+
+bool IsProcess32() {
+    return 4 == sizeof(void*);
+}
+
+// https://learn.microsoft.com/en-us/windows/win32/api/wow64apiset/nf-wow64apiset-iswow64process
 bool IsRunningInWow64() {
-#ifndef _WIN64
+    if (IsProcess64()) {
+        // only 32-bit build can run under wow
+        return false;
+    }
     BOOL isWow = FALSE;
     if (DynIsWow64Process && DynIsWow64Process(GetCurrentProcess(), &isWow)) {
         return isWow == TRUE;
     }
-#endif
     return false;
-}
-
-// return true if this is 64-bit executable
-bool IsProcess64() {
-    return 8 == sizeof(void*);
 }
 
 // return true if running on a 64-bit OS
@@ -163,50 +324,62 @@ bool IsOs64() {
     return IsProcess64() || IsRunningInWow64();
 }
 
+bool IsArmBuild() {
+    return IS_ARM_64 == 1;
+}
+
 // return true if OS and our process have the same arch (i.e. both are 32bit
 // or both are 64bit)
 bool IsProcessAndOsArchSame() {
     return IsProcess64() == IsOs64();
 }
 
-void LogLastError(DWORD err) {
-    // allow to set a breakpoint in release builds
-    if (0 == err) {
+TempStr GetLastErrorStrTemp(DWORD err) {
+    if (err == 0) {
         err = GetLastError();
+    }
+    if (err == 0) {
+        return str::DupTemp("");
+    }
+    if (err == ERROR_INTERNET_EXTENDED_ERROR) {
+        char buf[4096]{};
+        DWORD bufSize = dimof(buf) - 1;
+        // TODO: ignoring a case where buffer is too small. 4 kB should be enough for everybody
+        InternetGetLastResponseInfoA(&err, buf, &bufSize);
+        buf[4095] = 0;
+        return str::DupTemp(buf);
     }
     char* msgBuf = nullptr;
     DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
     DWORD lang = MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT);
-    DWORD res = FormatMessageA(flags, nullptr, err, lang, (LPSTR)&msgBuf, 0, nullptr);
-    if (!res || !msgBuf) {
-        return;
+    DWORD ferr = FormatMessageA(flags, nullptr, err, lang, (LPSTR)&msgBuf, 0, nullptr);
+    if (!ferr || !msgBuf) {
+        return str::DupTemp("");
     }
-    logf("LogLastError: %s\n", msgBuf);
+    auto res = str::DupTemp(msgBuf);
     LocalFree(msgBuf);
+    return res;
+}
+
+void LogLastError(DWORD err) {
+    TempStr msg = GetLastErrorStrTemp(err);
+    if (msg == nullptr) {
+        msg = (TempStr) "";
+    }
+    str::TrimWSInPlace(msg, str::TrimOpt::Both);
+    logf("LogLastError: 0x%x (%d) '%s'\n", (int)err, (int)err, msg);
 }
 
 void DbgOutLastError(DWORD err) {
-    if (0 == err) {
-        err = GetLastError();
-    }
-    if (0 == err) {
-        return;
-    }
-    char* msgBuf = nullptr;
-    DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
-    DWORD lang = MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT);
-    DWORD res = FormatMessageA(flags, nullptr, err, lang, (LPSTR)&msgBuf, 0, nullptr);
-    if (!res || !msgBuf) {
-        return;
-    }
-    OutputDebugStringA(msgBuf);
-    LocalFree(msgBuf);
+    TempStr msg = GetLastErrorStrTemp(err);
+    OutputDebugStringA(msg);
 }
 
 // return true if a given registry key (path) exists
-bool RegKeyExists(HKEY keySub, const WCHAR* keyName) {
+bool RegKeyExists(HKEY hkey, const char* keyName) {
     HKEY hKey;
-    LONG res = RegOpenKey(keySub, keyName, &hKey);
+    WCHAR* keyNameW = ToWStrTemp(keyName);
+    LONG res = RegOpenKeyW(hkey, keyNameW, &hKey);
     if (ERROR_SUCCESS == res) {
         RegCloseKey(hKey);
         return true;
@@ -217,29 +390,30 @@ bool RegKeyExists(HKEY keySub, const WCHAR* keyName) {
     return ERROR_ACCESS_DENIED == res;
 }
 
-// called needs to free() the result
-WCHAR* ReadRegStr(HKEY keySub, const WCHAR* keyName, const WCHAR* valName) {
-    if (!keySub) {
+char* ReadRegStrTemp(HKEY hkey, const char* keyName, const char* valName) {
+    if (!hkey) {
         return nullptr;
     }
+    WCHAR* keyNameW = ToWStrTemp(keyName);
+    WCHAR* valNameW = ToWStrTemp(valName);
     WCHAR* val = nullptr;
     REGSAM access = KEY_READ;
     HKEY hKey;
 TryAgainWOW64:
-    LONG res = RegOpenKeyEx(keySub, keyName, 0, access, &hKey);
+    LONG res = RegOpenKeyEx(hkey, keyNameW, 0, access, &hKey);
     if (ERROR_SUCCESS == res) {
         DWORD valLen;
-        res = RegQueryValueEx(hKey, valName, nullptr, nullptr, nullptr, &valLen);
+        res = RegQueryValueEx(hKey, valNameW, nullptr, nullptr, nullptr, &valLen);
         if (ERROR_SUCCESS == res) {
             val = AllocArray<WCHAR>(valLen / sizeof(WCHAR) + 1);
-            res = RegQueryValueEx(hKey, valName, nullptr, nullptr, (LPBYTE)val, &valLen);
+            res = RegQueryValueEx(hKey, valNameW, nullptr, nullptr, (LPBYTE)val, &valLen);
             if (ERROR_SUCCESS != res) {
-                str::ReplacePtr(&val, nullptr);
+                str::FreePtr(&val);
             }
         }
         RegCloseKey(hKey);
     }
-    if (ERROR_FILE_NOT_FOUND == res && HKEY_LOCAL_MACHINE == keySub && KEY_READ == access) {
+    if (ERROR_FILE_NOT_FOUND == res && HKEY_LOCAL_MACHINE == hkey && KEY_READ == access) {
 // try the (non-)64-bit key as well, as HKLM\Software is not shared between 32-bit and
 // 64-bit applications per http://msdn.microsoft.com/en-us/library/aa384253(v=vs.85).aspx
 #ifdef _WIN64
@@ -249,50 +423,100 @@ TryAgainWOW64:
 #endif
         goto TryAgainWOW64;
     }
-    return val;
+    char* resv = ToUtf8Temp(val);
+    str::Free(val);
+    return resv;
 }
 
-// called needs to free() the result
-char* ReadRegStrUtf8(HKEY keySub, const WCHAR* keyName, const WCHAR* valName) {
-    WCHAR* ws = ReadRegStr(keySub, keyName, valName);
-    if (!ws) {
-        return nullptr;
-    }
-    auto s = strconv::WstrToUtf8(ws);
-    str::Free(ws);
-    return (char*)s.data();
+char* LoggedReadRegStrTemp(HKEY hkey, const char* keyName, const char* valName) {
+    auto res = ReadRegStrTemp(hkey, keyName, valName);
+    logf("ReadRegStrTemp(%s, %s, %s) => '%s'\n", RegKeyNameWTemp(hkey), keyName, valName, res);
+    return res;
 }
 
-WCHAR* ReadRegStr2(const WCHAR* keyName, const WCHAR* valName) {
-    HKEY keySub1 = HKEY_LOCAL_MACHINE;
-    HKEY keySub2 = HKEY_CURRENT_USER;
-    WCHAR* res = ReadRegStr(keySub1, keyName, valName);
+char* ReadRegStr2Temp(const char* keyName, const char* valName) {
+    char* res = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, valName);
     if (!res) {
-        res = ReadRegStr(keySub2, keyName, valName);
+        res = ReadRegStrTemp(HKEY_CURRENT_USER, keyName, valName);
     }
     return res;
 }
 
-bool WriteRegStr(HKEY keySub, const WCHAR* keyName, const WCHAR* valName, const WCHAR* value) {
-    DWORD cbData = (DWORD)(str::Len(value) + 1) * sizeof(WCHAR);
-    LSTATUS res = SHSetValueW(keySub, keyName, valName, REG_SZ, (const void*)value, cbData);
+char* LoggedReadRegStr2Temp(const char* keyName, const char* valName) {
+    char* res = LoggedReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, valName);
+    if (!res) {
+        res = LoggedReadRegStrTemp(HKEY_CURRENT_USER, keyName, valName);
+    }
+    return res;
+}
+
+bool WriteRegStr(HKEY hkey, const char* keyName, const char* valName, const char* value) {
+    WCHAR* keyNameW = ToWStrTemp(keyName);
+    WCHAR* valNameW = ToWStrTemp(valName);
+    WCHAR* valueW = ToWStrTemp(value);
+
+    DWORD cbData = (DWORD)(str::Len(valueW) + 1) * sizeof(WCHAR);
+    LSTATUS res = SHSetValueW(hkey, keyNameW, valNameW, REG_SZ, (const void*)valueW, cbData);
     return ERROR_SUCCESS == res;
 }
 
-bool ReadRegDWORD(HKEY keySub, const WCHAR* keyName, const WCHAR* valName, DWORD& value) {
+bool LoggedWriteRegStr(HKEY hkey, const char* keyName, const char* valName, const char* value) {
+    WCHAR* keyNameW = ToWStrTemp(keyName);
+    WCHAR* valNameW = ToWStrTemp(valName);
+    WCHAR* valueW = ToWStrTemp(value);
+
+    DWORD cbData = (DWORD)(str::Len(valueW) + 1) * sizeof(WCHAR);
+    LSTATUS res = SHSetValueW(hkey, keyNameW, valNameW, REG_SZ, (const void*)valueW, cbData);
+    if (res != ERROR_SUCCESS) {
+        logf("WriteRegStr(%s, %s, %s, %s) failed with '%d'\n", RegKeyNameWTemp(hkey), keyName, valName, value, res);
+        LogLastError();
+        return false;
+    }
+    logf("WriteRegStr(%s, %s, %s, %s) failed with '%d' ok!\n", RegKeyNameWTemp(hkey), keyName, valName, value);
+    return true;
+}
+
+bool ReadRegDWORD(HKEY hkey, const char* keyName, const char* valName, DWORD& value) {
+    WCHAR* keyNameW = ToWStrTemp(keyName);
+    WCHAR* valNameW = ToWStrTemp(valName);
     DWORD size = sizeof(DWORD);
-    LSTATUS res = SHGetValue(keySub, keyName, valName, nullptr, &value, &size);
+    LSTATUS res = SHGetValue(hkey, keyNameW, valNameW, nullptr, &value, &size);
     return ERROR_SUCCESS == res && sizeof(DWORD) == size;
 }
 
-bool WriteRegDWORD(HKEY keySub, const WCHAR* keyName, const WCHAR* valName, DWORD value) {
-    LSTATUS res = SHSetValueW(keySub, keyName, valName, REG_DWORD, (const void*)&value, sizeof(DWORD));
+bool WriteRegDWORD(HKEY hkey, const char* keyName, const char* valName, DWORD value) {
+    WCHAR* keyNameW = ToWStrTemp(keyName);
+    WCHAR* valNameW = ToWStrTemp(valName);
+    LSTATUS res = SHSetValueW(hkey, keyNameW, valNameW, REG_DWORD, (const void*)&value, sizeof(DWORD));
     return ERROR_SUCCESS == res;
 }
 
-bool CreateRegKey(HKEY keySub, const WCHAR* keyName) {
+bool LoggedWriteRegDWORD(HKEY hkey, const char* keyName, const char* valName, DWORD value) {
+    WCHAR* keyNameW = ToWStrTemp(keyName);
+    WCHAR* valNameW = ToWStrTemp(valName);
+    LSTATUS res = SHSetValueW(hkey, keyNameW, valNameW, REG_DWORD, (const void*)&value, sizeof(DWORD));
+    if (res != ERROR_SUCCESS) {
+        logf("WriteRegDWORD(%s, %s, %s, %d) failed with '%d'\n", RegKeyNameWTemp(hkey), keyName, valName, (int)value,
+             res);
+        LogLastError();
+        return false;
+    }
+    logf("WriteRegDWORD(%s, %s, %s, %d) => ok'\n", RegKeyNameWTemp(hkey), keyName, valName, (int)value);
+    return true;
+}
+
+bool LoggedWriteRegNone(HKEY hkey, const char* key, const char* valName) {
+    WCHAR* keyW = ToWStrTemp(key);
+    WCHAR* valNameW = ToWStrTemp(valName);
+    LSTATUS res = SHSetValueW(hkey, keyW, valNameW, REG_NONE, nullptr, 0);
+    logf("LoggedWriteRegNone(%s, %s, %s) => '%d'\n", RegKeyNameWTemp(hkey), key, valName, res);
+    return (ERROR_SUCCESS == res);
+}
+
+bool CreateRegKey(HKEY hkey, const char* keyName) {
+    WCHAR* keyNameW = ToWStrTemp(keyName);
     HKEY hKey;
-    LSTATUS res = RegCreateKeyEx(keySub, keyName, 0, nullptr, 0, KEY_WRITE, nullptr, &hKey, nullptr);
+    LSTATUS res = RegCreateKeyExW(hkey, keyNameW, 0, nullptr, 0, KEY_WRITE, nullptr, &hKey, nullptr);
     if (res != ERROR_SUCCESS) {
         return false;
     }
@@ -300,44 +524,126 @@ bool CreateRegKey(HKEY keySub, const WCHAR* keyName) {
     return true;
 }
 
-#pragma warning(push)
-#pragma warning(disable : 6248) // "Setting a SECURITY_DESCRIPTOR's DACL to nullptr will result in
-                                // an unprotected object"
-// try to remove any access restrictions on the key
-// by granting everybody all access to this key (nullptr DACL)
-static void ResetRegKeyAcl(HKEY keySub, const WCHAR* keyName) {
+const char* RegKeyNameTemp(HKEY key) {
+    if (key == HKEY_LOCAL_MACHINE) {
+        return "HKEY_LOCAL_MACHINE";
+    }
+    if (key == HKEY_CURRENT_USER) {
+        return "HKEY_CURRENT_USER";
+    }
+    if (key == HKEY_CLASSES_ROOT) {
+        return "HKEY_CLASSES_ROOT";
+    }
+    return "RegKeyName: unknown key";
+}
+
+const char* RegKeyNameWTemp(HKEY key) {
+    auto k = RegKeyNameTemp(key);
+    return str::Dup(k);
+}
+
+static void ResetRegKeyAcl(HKEY hkey, const char* keyName) {
+    WCHAR* keyNameW = ToWStrTemp(keyName);
     HKEY hKey;
-    LONG res = RegOpenKeyEx(keySub, keyName, 0, WRITE_DAC, &hKey);
+    LONG res = RegOpenKeyEx(hkey, keyNameW, 0, WRITE_DAC, &hKey);
     if (ERROR_SUCCESS != res) {
         return;
     }
     SECURITY_DESCRIPTOR secdesc;
     InitializeSecurityDescriptor(&secdesc, SECURITY_DESCRIPTOR_REVISION);
+
+#pragma warning(push)
+#pragma warning(disable : 6248)
+    // "Setting a SECURITY_DESCRIPTOR's DACL to nullptr will result in an unprotected object"
+    // https://docs.microsoft.com/en-us/cpp/code-quality/c6248?view=msvc-170
     SetSecurityDescriptorDacl(&secdesc, TRUE, nullptr, TRUE);
+#pragma warning(pop)
+
     RegSetKeySecurity(hKey, DACL_SECURITY_INFORMATION, &secdesc);
     RegCloseKey(hKey);
 }
-#pragma warning(pop)
 
-bool DeleteRegKey(HKEY keySub, const WCHAR* keyName, bool resetACLFirst) {
+bool DeleteRegKey(HKEY hkey, const char* keyName, bool resetACLFirst) {
     if (resetACLFirst) {
-        ResetRegKeyAcl(keySub, keyName);
+        ResetRegKeyAcl(hkey, keyName);
     }
-
-    LSTATUS res = SHDeleteKeyW(keySub, keyName);
+    WCHAR* keyNameW = ToWStrTemp(keyName);
+    LSTATUS res = SHDeleteKeyW(hkey, keyNameW);
     return ERROR_SUCCESS == res || ERROR_FILE_NOT_FOUND == res;
 }
 
-WCHAR* GetSpecialFolder(int csidl, bool createIfMissing) {
+bool LoggedDeleteRegKey(HKEY hkey, const char* keyName, bool resetACLFirst) {
+    if (resetACLFirst) {
+        ResetRegKeyAcl(hkey, keyName);
+    }
+    WCHAR* keyNameW = ToWStrTemp(keyName);
+    LSTATUS res = SHDeleteKeyW(hkey, keyNameW);
+    logf("LoggedDeleteRegKey(%s, %s, %d) => %d\n", RegKeyNameWTemp(hkey), keyName, resetACLFirst, res);
+    bool ok = (ERROR_SUCCESS == res) || (ERROR_FILE_NOT_FOUND == res);
+    if (!ok) {
+        LogLastError(res);
+    }
+    return ok;
+}
+
+bool DeleteRegValue(HKEY hkey, const char* keyName, const char* value) {
+    WCHAR* keyNameW = ToWStrTemp(keyName);
+    WCHAR* valueW = ToWStrTemp(value);
+
+    auto res = SHDeleteValueW(hkey, keyNameW, valueW);
+    return res == ERROR_SUCCESS;
+}
+
+bool LoggedDeleteRegValue(HKEY hkey, const char* keyName, const char* valName) {
+    WCHAR* keyNameW = ToWStrTemp(keyName);
+    WCHAR* valNameW = ToWStrTemp(valName);
+
+    auto res = SHDeleteValueW(hkey, keyNameW, valNameW);
+    bool ok = (ERROR_SUCCESS == res) || (ERROR_FILE_NOT_FOUND == res);
+    logf("LoggedDeleteRegValue(%s, %s, %s) => %d\n", RegKeyNameWTemp(hkey), keyName, valName, res);
+    if (!ok) {
+        LogLastError(res);
+    }
+    return ok;
+}
+
+HRESULT CLSIDFromString(const char* lpsz, LPCLSID pclsid) {
+    TempWStr ws = ToWStrTemp(lpsz);
+    return CLSIDFromString(ws, pclsid);
+}
+
+TempStr GetSpecialFolderTemp(int csidl, bool createIfMissing) {
     if (createIfMissing) {
         csidl = csidl | CSIDL_FLAG_CREATE;
     }
-    WCHAR path[MAX_PATH] = {0};
-    HRESULT res = SHGetFolderPath(nullptr, csidl, nullptr, 0, path);
+    WCHAR path[MAX_PATH]{};
+    HRESULT res = SHGetFolderPathW(nullptr, csidl, nullptr, 0, path);
     if (S_OK != res) {
         return nullptr;
     }
-    return str::Dup(path);
+    return ToUtf8Temp(path);
+}
+
+// temp directory
+TempStr GetTempDirTemp() {
+    WCHAR dir[MAX_PATH] = {0};
+#if 0 // TODO: only available in 20348, not yet present in SDK
+    DWORD cch = 0;
+    if (DynGetTempPath2W) {
+        cch = DynGetTempPath2W(dimof(dir), dir);
+    }
+    if (cch == 0) {
+        cch = GetTempPathW(dimof(dir), dir);
+    }
+#else
+    DWORD cch = GetTempPathW(dimof(dir), dir);
+#endif
+    if (cch == 0) {
+        return {};
+    }
+    // TODO: should handle this
+    ReportIf(cch >= dimof(dir));
+    return ToUtf8Temp(dir, cch);
 }
 
 void DisableDataExecution() {
@@ -355,95 +661,138 @@ void DisableDataExecution() {
     }
 }
 
-// Code from http://www.halcyon.com/~ast/dload/guicon.htm
-// See https://github.com/benvanik/xenia/issues/228 for the VS2015 fix
-void RedirectIOToConsole() {
-    CONSOLE_SCREEN_BUFFER_INFO coninfo;
+enum class ConsoleRedirectStatus {
+    NotRedirected,
+    RedirectedToExistingConsole,
+    RedirectedToAllocatedConsole,
+};
 
-    AllocConsole();
+static ConsoleRedirectStatus gConsoleRedirectStatus{ConsoleRedirectStatus::NotRedirected};
 
-    // make buffer big enough to allow scrolling
-    GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &coninfo);
-    coninfo.dwSize.Y = 500;
-    SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), coninfo.dwSize);
-
-// redirect STDIN, STDOUT and STDERR to the console
-#if _MSC_VER < 1900
-    int hConHandle = _open_osfhandle((intptr_t)GetStdHandle(STD_OUTPUT_HANDLE), _O_TEXT);
-    *stdout = *_fdopen(hConHandle, "w");
-
-    hConHandle = _open_osfhandle((intptr_t)GetStdHandle(STD_ERROR_HANDLE), _O_TEXT);
-    *stderr = *_fdopen(hConHandle, "w");
-
-    hConHandle = _open_osfhandle((intptr_t)GetStdHandle(STD_INPUT_HANDLE), _O_TEXT);
-    *stdin = *_fdopen(hConHandle, "r");
-#else
-    FILE* con;
-    freopen_s(&con, "CONOUT$", "w", stdout);
-    freopen_s(&con, "CONOUT$", "w", stderr);
+// https://www.tillett.info/2013/05/13/how-to-create-a-windows-program-that-works-as-both-as-a-gui-and-console-application/
+// TODO: see if https://github.com/apenwarr/fixconsole/blob/master/fixconsole_windows.go would improve things
+static void redirectIOToConsole() {
+    FILE* con{nullptr};
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h != INVALID_HANDLE_VALUE) {
+        freopen_s(&con, "CONOUT$", "w", stdout);
+        // make them unbuffered
+        setvbuf(stdin, nullptr, _IONBF, 0);
+    }
+    h = GetStdHandle(STD_ERROR_HANDLE);
+    if (h != INVALID_HANDLE_VALUE) {
+        freopen_s(&con, "CONOUT$", "w", stderr);
+        setvbuf(stderr, nullptr, _IONBF, 0);
+    }
+#if 0 // probably don't need stdin
     freopen_s(&con, "CONIN$", "r", stdin);
-#endif
-
-    // make them unbuffered
-    setvbuf(stdin, nullptr, _IONBF, 0);
     setvbuf(stdout, nullptr, _IONBF, 0);
-    setvbuf(stderr, nullptr, _IONBF, 0);
+#endif
 }
 
-/* Return the full exe path of my own executable.
-   Caller needs to free() the result. */
-WCHAR* GetExePath() {
-    WCHAR buf[MAX_PATH] = {0};
-    GetModuleFileName(nullptr, buf, dimof(buf));
-    // TODO: is normalization needed here at all?
-    return path::Normalize(buf);
-}
-
-/* Return directory where this executable is located.
-Caller needs to free()
-*/
-WCHAR* GetExeDir() {
-    AutoFreeWstr path = GetExePath();
-    WCHAR* dir = path::GetDir(path);
-    return dir;
-}
-
-/*
-Returns ${SystemRoot}\system32 directory.
-Caller has to free() the result.
-*/
-WCHAR* GetSystem32Dir() {
-    WCHAR buf[1024] = {0};
-    DWORD n = GetEnvironmentVariableW(L"SystemRoot", &buf[0], dimof(buf));
-    if ((n == 0) || (n >= dimof(buf))) {
-        CrashIf(true);
-        return str::Dup(L"c:\\windows\\system32");
+bool RedirectIOToExistingConsole() {
+    if (gConsoleRedirectStatus != ConsoleRedirectStatus::NotRedirected) {
+        return true;
     }
-    return path::Join(buf, L"system32");
+    BOOL ok = AttachConsole(ATTACH_PARENT_PROCESS);
+    if (!ok) {
+        return false;
+    }
+    gConsoleRedirectStatus = ConsoleRedirectStatus::RedirectedToExistingConsole;
+    redirectIOToConsole();
+    return true;
+}
+// returns true if had to allocate new console (i.e. show console window)
+// false if redirected to existing console, which means it was launched from a shell
+// TODO: also detect redirected i/o as described in
+// https://github.com/apenwarr/fixconsole/blob/master/fixconsole_windows.go
+bool RedirectIOToConsole() {
+    if (gConsoleRedirectStatus != ConsoleRedirectStatus::NotRedirected) {
+        return gConsoleRedirectStatus == ConsoleRedirectStatus::RedirectedToAllocatedConsole;
+    }
+
+    // first we try to attach to the console of the parent process
+    // which could be a cmd shell. If that succeeds, we'll print to
+    // shell's console like non-gui program
+    // if that fails, assume we were not launched from a shell and
+    // will allocate a console of our own
+    // TODO: this is not perfect because after Sumatra finishes,
+    // the cursor is not at end of text. Could be unsolvable
+    gConsoleRedirectStatus = ConsoleRedirectStatus::RedirectedToExistingConsole;
+    BOOL ok = AttachConsole(ATTACH_PARENT_PROCESS);
+    if (!ok) {
+        AllocConsole();
+        gConsoleRedirectStatus = ConsoleRedirectStatus::RedirectedToAllocatedConsole;
+        // make buffer big enough to allow scrolling
+        CONSOLE_SCREEN_BUFFER_INFO coninfo;
+        GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &coninfo);
+        coninfo.dwSize.Y = 500;
+        SetConsoleScreenBufferSize(GetStdHandle(STD_OUTPUT_HANDLE), coninfo.dwSize);
+    }
+    redirectIOToConsole();
+    return gConsoleRedirectStatus == ConsoleRedirectStatus::RedirectedToAllocatedConsole;
 }
 
-/*
-Returns current directory.
-Caller has to free() the result.
-*/
-WCHAR* GetCurrentDir() {
-    DWORD n = GetCurrentDirectoryW(0, nullptr);
-    if (0 == n) {
-        return nullptr;
-    }
-    WCHAR* buf = AllocArray<WCHAR>(n + 1);
-    DWORD res = GetCurrentDirectoryW(n, buf);
-    if (0 == res) {
-        return nullptr;
-    }
-    CrashIf(res > n);
-    return buf;
+static void SendEnterKeyToConsole() {
+    INPUT ip;
+    // Set up a generic keyboard event.
+    ip.type = INPUT_KEYBOARD;
+    ip.ki.wScan = 0; // hardware scan code for key
+    ip.ki.time = 0;
+    ip.ki.dwExtraInfo = 0;
+
+    // Send the "Enter" key
+    ip.ki.wVk = 0x0D;  // virtual-key code for the "Enter" key
+    ip.ki.dwFlags = 0; // 0 for key press
+    SendInput(1, &ip, sizeof(INPUT));
+
+    // Release the "Enter" key
+    ip.ki.dwFlags = KEYEVENTF_KEYUP; // KEYEVENTF_KEYUP for key release
+    SendInput(1, &ip, sizeof(INPUT));
 }
 
-void ChangeCurrDirToSystem32() {
-    auto sysDir = GetSystem32Dir();
-    SetCurrentDirectoryW(sysDir);
-    free(sysDir);
+void HandleRedirectedConsoleOnShutdown() {
+    switch (gConsoleRedirectStatus) {
+        case ConsoleRedirectStatus::NotRedirected:
+            return;
+        case ConsoleRedirectStatus::RedirectedToAllocatedConsole:
+            // wait for user to press any key to close the console window
+            system("pause");
+            break;
+        case ConsoleRedirectStatus::RedirectedToExistingConsole:
+            // simulate releasing console. the cursor still doesn't show up
+            // at the end of output, but it's better than nothing
+            SendEnterKeyToConsole();
+            break;
+    }
+}
+
+// Return the full exe path of my own executable
+TempStr GetSelfExePathTemp() {
+    WCHAR buf[MAX_PATH]{};
+    DWORD nSize = dimof(buf) - 1;
+    auto h = GetInstance();
+    DWORD res = GetModuleFileNameW(h, buf, nSize);
+    if (res < nSize) {
+        return ToUtf8Temp(buf);
+    }
+    nSize = res + 2;
+    WCHAR* buf2 = Allocator::AllocArray<WCHAR>(nullptr, (size_t)nSize);
+    res = GetModuleFileNameW(h, buf, nSize);
+    ReportIf(res < nSize);
+    return ToUtf8Temp(buf2);
+}
+
+// Return directory where our executable is located
+TempStr GetSelfExeDirTemp() {
+    TempStr path = GetSelfExePathTemp();
+    return path::GetDirTemp(path);
+}
+
+void ChangeCurrDirToDocuments() {
+    TempStr dir = GetSpecialFolderTemp(CSIDL_MYDOCUMENTS);
+    WCHAR* dirW = ToWStrTemp(dir);
+    SetCurrentDirectoryW(dirW);
 }
 
 static ULARGE_INTEGER FileTimeToLargeInteger(const FILETIME& ft) {
@@ -463,8 +812,9 @@ int FileTimeDiffInSecs(const FILETIME& ft1, const FILETIME& ft2) {
     return (int)diff;
 }
 
-WCHAR* ResolveLnk(const WCHAR* path) {
-    ScopedMem<OLECHAR> olePath(str::Dup(path));
+char* ResolveLnkTemp(const char* path) {
+    WCHAR* pathW = ToWStr(path);
+    ScopedMem<OLECHAR> olePath(pathW);
     if (!olePath) {
         return nullptr;
     }
@@ -489,17 +839,18 @@ WCHAR* ResolveLnk(const WCHAR* path) {
         return nullptr;
     }
 
-    WCHAR newPath[MAX_PATH] = {0};
+    WCHAR newPath[MAX_PATH]{};
     hRes = lnk->GetPath(newPath, MAX_PATH, nullptr, 0);
     if (FAILED(hRes)) {
         return nullptr;
     }
 
-    return str::Dup(newPath);
+    return ToUtf8Temp(newPath);
 }
 
-bool CreateShortcut(const WCHAR* shortcutPath, const WCHAR* exePath, const WCHAR* args, const WCHAR* description,
+bool CreateShortcut(const char* shortcutPath, const char* exePath, const char* args, const char* description,
                     int iconIndex) {
+    TempWStr ws;
     ScopedCom com;
 
     ScopedComPtr<IShellLink> lnk;
@@ -512,58 +863,63 @@ bool CreateShortcut(const WCHAR* shortcutPath, const WCHAR* exePath, const WCHAR
         return false;
     }
 
-    HRESULT hr = lnk->SetPath(exePath);
+    ws = ToWStrTemp(exePath);
+    HRESULT hr = lnk->SetPath(ws);
     if (FAILED(hr)) {
         return false;
     }
 
-    lnk->SetWorkingDirectory(AutoFreeWstr(path::GetDir(exePath)));
+    lnk->SetWorkingDirectory(path::GetDirTemp(ws));
     // lnk->SetShowCmd(SW_SHOWNORMAL);
     // lnk->SetHotkey(0);
-    lnk->SetIconLocation(exePath, iconIndex);
+    lnk->SetIconLocation(ws, iconIndex);
     if (args) {
-        lnk->SetArguments(args);
+        ws = ToWStrTemp(args);
+        lnk->SetArguments(ws);
     }
     if (description) {
-        lnk->SetDescription(description);
+        ws = ToWStrTemp(description);
+        lnk->SetDescription(ws);
     }
 
-    hr = file->Save(shortcutPath, TRUE);
+    ws = ToWStrTemp(shortcutPath);
+    hr = file->Save(ws, TRUE);
     return SUCCEEDED(hr);
 }
 
 /* adapted from http://blogs.msdn.com/oldnewthing/archive/2004/09/20/231739.aspx */
-IDataObject* GetDataObjectForFile(const WCHAR* filePath, HWND hwnd) {
+IDataObject* GetDataObjectForFile(const char* filePath, HWND hwnd) {
     ScopedComPtr<IShellFolder> pDesktopFolder;
     HRESULT hr = SHGetDesktopFolder(&pDesktopFolder);
     if (FAILED(hr)) {
         return nullptr;
     }
 
-    IDataObject* pDataObject = nullptr;
-    AutoFreeWstr lpWPath(str::Dup(filePath));
+    WCHAR* lpWPath = ToWStrTemp(filePath);
     LPITEMIDLIST pidl;
     hr = pDesktopFolder->ParseDisplayName(nullptr, nullptr, lpWPath, nullptr, &pidl, nullptr);
-    if (SUCCEEDED(hr)) {
-        ScopedComPtr<IShellFolder> pShellFolder;
-        LPCITEMIDLIST pidlChild;
-        hr = SHBindToParent(pidl, IID_IShellFolder, (void**)&pShellFolder, &pidlChild);
-        if (SUCCEEDED(hr)) {
-            hr = pShellFolder->GetUIObjectOf(hwnd, 1, &pidlChild, IID_IDataObject, nullptr, (void**)&pDataObject);
-            if (FAILED(hr)) {
-                pDataObject = nullptr;
-            }
-        }
-        CoTaskMemFree(pidl);
+    if (FAILED(hr)) {
+        return nullptr;
     }
-
+    ScopedComPtr<IShellFolder> pShellFolder;
+    LPCITEMIDLIST pidlChild;
+    hr = SHBindToParent(pidl, IID_IShellFolder, (void**)&pShellFolder, &pidlChild);
+    CoTaskMemFree(pidl);
+    if (FAILED(hr)) {
+        return nullptr;
+    }
+    IDataObject* pDataObject = nullptr;
+    hr = pShellFolder->GetUIObjectOf(hwnd, 1, &pidlChild, IID_IDataObject, nullptr, (void**)&pDataObject);
+    if (FAILED(hr)) {
+        return nullptr;
+    }
     return pDataObject;
 }
 
 bool IsKeyPressed(int key) {
     SHORT state = GetKeyState(key);
     SHORT isDown = state & 0x8000;
-    return isDown ? true : false;
+    return isDown != 0;
 }
 
 bool IsShiftPressed() {
@@ -578,6 +934,7 @@ bool IsCtrlPressed() {
     return IsKeyPressed(VK_CONTROL);
 }
 
+#if 0
 // The result value contains major and minor version in the high resp. the low WORD
 DWORD GetFileVersion(const WCHAR* path) {
     DWORD fileVersion = 0;
@@ -594,35 +951,56 @@ DWORD GetFileVersion(const WCHAR* path) {
 
     return fileVersion;
 }
+#endif
 
-bool LaunchFile(const WCHAR* path, const WCHAR* params, const WCHAR* verb, bool hidden) {
-    if (!path) {
+bool LaunchFileShell(const char* path, const char* params, const char* verb, bool hidden) {
+    if (str::IsEmpty(path)) {
         return false;
     }
 
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_FLAG_NO_UI;
-    sei.lpVerb = verb;
-    sei.lpFile = path;
-    sei.lpParameters = params;
+    sei.lpVerb = ToWStrTemp(verb);
+    sei.lpFile = ToWStrTemp(path);
+    sei.lpParameters = ToWStrTemp(params);
     sei.nShow = hidden ? SW_HIDE : SW_SHOWNORMAL;
-    return !!ShellExecuteExW(&sei);
+    BOOL ok = ShellExecuteExW(&sei);
+    if (!ok) {
+        DWORD err = GetLastError();
+        logf("LaunchFile: ShellExecuteExW path: '%s' params: '%s' verb: '%s'\n", path, params, verb);
+        LogLastError(err);
+        return false;
+    }
+    return true;
 }
 
-bool LaunchBrowser(const WCHAR* url) {
-    return LaunchFile(url, nullptr, L"open");
+bool LaunchBrowser(const char* url) {
+    return LaunchFileShell(url, nullptr, "open");
 }
 
-HANDLE LaunchProcess(const WCHAR* cmdLine, const WCHAR* currDir, DWORD flags) {
-    PROCESS_INFORMATION pi = {0};
-    STARTUPINFOW si = {0};
+void OpenPathInExplorer(const char* path) {
+    if (!path) {
+        return;
+    }
+    const char* process = "explorer.exe";
+    TempStr args = str::FormatTemp("/select,\"%s\"", path);
+    CreateProcessHelper(process, args);
+}
+
+HANDLE LaunchProcessWithCmdLine(const char* exe, const char* cmdLine) {
+    PROCESS_INFORMATION pi = {nullptr};
+    STARTUPINFOW si{};
     si.cb = sizeof(si);
 
-    // CreateProcess() might modify cmd line argument, so make a copy
-    // in case caller provides a read-only string
-    AutoFreeWstr cmdLineCopy(str::Dup(cmdLine));
-    if (!CreateProcessW(nullptr, cmdLineCopy, nullptr, nullptr, FALSE, flags, nullptr, currDir, &si, &pi)) {
+    // first cmd-line argument should be the exe name
+    TempStr cmd = str::FormatTemp("\"%s\" %s", exe, cmdLine);
+    WCHAR* cmdLineW = ToWStrTemp(cmd);
+
+    WCHAR* exeW = ToWStrTemp(exe);
+    // note: cmdLineW is modified by CreateProcessW so must be writeable
+    BOOL ok = CreateProcessW(exeW, cmdLineW, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
+    if (!ok) {
         return nullptr;
     }
 
@@ -630,40 +1008,52 @@ HANDLE LaunchProcess(const WCHAR* cmdLine, const WCHAR* currDir, DWORD flags) {
     return pi.hProcess;
 }
 
-bool CreateProcessHelper(const WCHAR* exe, const WCHAR* args) {
-    if (!args) {
-        args = L"";
+// cmdLine must contain quoted exe path as first argument
+HANDLE LaunchProcessInDir(const char* cmdLine, const char* currDir, DWORD flags) {
+    PROCESS_INFORMATION pi = {nullptr};
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+
+    // CreateProcess() might modify cmd line argument, so make a copy
+    // in case caller provides a read-only string
+    WCHAR* cmdLineW = ToWStrTemp(cmdLine);
+    WCHAR* dirW = ToWStrTemp(currDir);
+    if (!CreateProcessW(nullptr, cmdLineW, nullptr, nullptr, FALSE, flags, nullptr, dirW, &si, &pi)) {
+        return nullptr;
     }
-    AutoFreeWstr cmd = str::Format(L"\"%s\" %s", exe, args);
-    AutoCloseHandle process = LaunchProcess(cmd);
+
+    CloseHandle(pi.hThread);
+    return pi.hProcess;
+}
+
+bool CreateProcessHelper(const char* exe, const char* args) {
+    if (!args) {
+        args = "";
+    }
+    TempStr cmd = str::FormatTemp("\"%s\" %s", exe, args);
+    AutoCloseHandle process = LaunchProcessInDir(cmd);
     return process != nullptr;
 }
 
 // return true if the app is running in elevated (as admin)
-// TODO: on Vista+ use GetTokenInformation linked
-// https://social.msdn.microsoft.com/Forums/vstudio/en-US/f64ff4cb-d21b-4d72-b513-fb8eb39f4a3a/how-to-determine-if-a-user-that-created-a-process-doesnt-belong-to-administrators-group?forum=windowssecurity
+// TODO: on Vista+ use GetTokenInformation:
+// https://social.msdn.microsoft.com/Forums/vstudio/en-US/f64ff4cb-d21b-4d72-b513-fb8eb39f4a3a/how-to-determine-if-a-user-that-created-a-process-doesnt-belong-to-administrators-group
 bool IsProcessRunningElevated() {
-    BOOL isAdmin = FALSE;
-    PSID administratorsGroup = NULL;
+    PSID adminsGroup = nullptr;
 
     // Allocate and initialize a SID of the administrators group
     SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
     DWORD sub1 = SECURITY_BUILTIN_DOMAIN_RID;
     DWORD sub2 = DOMAIN_ALIAS_RID_ADMINS;
-    if (!AllocateAndInitializeSid(&NtAuthority, 2, sub1, sub2, 0, 0, 0, 0, 0, 0, &administratorsGroup)) {
-        goto Cleanup;
+    if (!AllocateAndInitializeSid(&NtAuthority, 2, sub1, sub2, 0, 0, 0, 0, 0, 0, &adminsGroup)) {
+        return false;
     }
 
     // Determine whether the SID of administrators group is enabled in
     // the primary access token of the process
-    if (!CheckTokenMembership(nullptr, administratorsGroup, &isAdmin)) {
-        goto Cleanup;
-    }
-
-Cleanup:
-    if (administratorsGroup) {
-        FreeSid(administratorsGroup);
-    }
+    BOOL isAdmin = FALSE;
+    CheckTokenMembership(nullptr, adminsGroup, &isAdmin);
+    FreeSid(adminsGroup);
     return tobool(isAdmin);
 }
 
@@ -681,14 +1071,107 @@ bool CanTalkToProcess(DWORD procId) {
     return false;
 }
 
-bool LaunchElevated(const WCHAR* path, const WCHAR* cmdline) {
-    return LaunchFile(path, cmdline, L"runas");
+static const DWORD groupsToCheck[] = {
+    DOMAIN_ALIAS_RID_USERS,
+    // every user belongs to the users group, hence users come before guests
+    DOMAIN_ALIAS_RID_GUESTS,
+    DOMAIN_ALIAS_RID_POWER_USERS,
+    DOMAIN_ALIAS_RID_ADMINS,
+};
+
+// return true if the account has admin privileges
+// https://github.com/kichik/nsis/blob/de09827b5b651b1d467c17be17bc7e5a98dae70f/Contrib/UserInfo/UserInfo.c#L70
+static DWORD GetAccountTypeHelper(bool checkTokenForGroupDeny) {
+    HANDLE hToken = nullptr;
+    BOOL isMember = FALSE;
+    DWORD highestGroup = 0;
+    BOOL validTokenGroups = FALSE;
+    TOKEN_GROUPS* ptg = NULL;
+    DWORD cbTokenGroups;
+
+    BOOL ok = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &hToken) ||
+              OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken);
+    if (!ok) {
+        return false;
+    }
+
+    // Use "old school" membership check?
+    if (!checkTokenForGroupDeny) {
+        // We must query the size of the group information associated with
+        // the token. Note that we expect a FALSE result from GetTokenInformation
+        // because we've given it a NULL buffer. On exit cbTokenGroups will tell
+        // the size of the group information.
+        if (!GetTokenInformation(hToken, TokenGroups, NULL, 0, &cbTokenGroups) &&
+            GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+            // Allocate buffer and ask for the group information again.
+            // This may fail if an administrator has added this account
+            // to an additional group between our first call to
+            // GetTokenInformation and this one.
+            ptg = (TOKEN_GROUPS*)GlobalAlloc(GPTR, cbTokenGroups);
+            if (ptg && GetTokenInformation(hToken, TokenGroups, ptg, cbTokenGroups, &cbTokenGroups)) {
+                validTokenGroups = TRUE;
+            }
+        }
+    }
+
+    SID_IDENTIFIER_AUTHORITY systemSid = {SECURITY_NT_AUTHORITY};
+    if (validTokenGroups || checkTokenForGroupDeny) {
+        PSID psid = nullptr;
+        for (size_t i = 0; i < dimof(groupsToCheck); i++) {
+            // Create a SID for the local group and then check if it exists in our token
+            DWORD sub1 = SECURITY_BUILTIN_DOMAIN_RID;
+            DWORD groupID = groupsToCheck[i];
+            ok = AllocateAndInitializeSid(&systemSid, 2, sub1, groupID, 0, 0, 0, 0, 0, 0, &psid);
+            if (!ok) {
+                continue;
+            }
+
+            if (checkTokenForGroupDeny) {
+                CheckTokenMembership(0, psid, &isMember);
+            } else if (validTokenGroups) {
+                isMember = FALSE;
+                for (DWORD j = 0; !isMember && (j < ptg->GroupCount); j++) {
+                    if (EqualSid(ptg->Groups[j].Sid, psid)) {
+                        isMember = TRUE;
+                    }
+                }
+            }
+            if (isMember) {
+                highestGroup = groupID;
+            }
+            FreeSid(psid);
+        }
+    }
+
+    if (ptg) {
+        GlobalFree(ptg);
+    }
+    CloseHandle(hToken);
+    return highestGroup;
+}
+
+// Get highest account type based on current elevation level i.e. the
+// account is admin (DOMAIN_ALIAS_RID_ADMINS) only if the user is running elevated
+// see groupsToCheck for possible values
+DWORD GetAccountType() {
+    return GetAccountTypeHelper(true);
+}
+
+// Get highest account type of the user. Can return admin (DOMAIN_ALIAS_RID_ADMINS)
+// when not running elevated but the account belong to administrator group
+// see groupsToCheck for possible values
+DWORD GetOriginalAccountType() {
+    return GetAccountTypeHelper(false);
+}
+
+bool LaunchElevated(const char* path, const char* cmdline) {
+    return LaunchFileShell(path, cmdline, "runas");
 }
 
 /* Ensure that the rectangle is at least partially in the work area on a
    monitor. The rectangle is shifted into the work area if necessary. */
-Rect ShiftRectToWorkArea(Rect rect, bool bFully) {
-    Rect monitor = GetWorkAreaRect(rect);
+Rect ShiftRectToWorkArea(Rect rect, HWND hwnd, bool bFully) {
+    Rect monitor = GetWorkAreaRect(rect, hwnd);
 
     if (rect.y + rect.dy <= monitor.y || bFully && rect.y < monitor.y) {
         /* Rectangle is too far above work area */
@@ -712,7 +1195,7 @@ Rect ShiftRectToWorkArea(Rect rect, bool bFully) {
 // Limits size to max available work area (screen size - taskbar)
 void LimitWindowSizeToScreen(HWND hwnd, SIZE& size) {
     HMONITOR hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi = {0};
+    MONITORINFO mi{};
     mi.cbSize = sizeof mi;
     BOOL ok = GetMonitorInfo(hmon, &mi);
     if (!ok) {
@@ -729,33 +1212,35 @@ void LimitWindowSizeToScreen(HWND hwnd, SIZE& size) {
 }
 
 // returns available area of the screen i.e. screen minus taskbar area
-Rect GetWorkAreaRect(Rect rect) {
+Rect GetWorkAreaRect(Rect rect, HWND hwnd) {
     RECT tmpRect = ToRECT(rect);
     HMONITOR hmon = MonitorFromRect(&tmpRect, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi = {0};
+    if (hwnd) {
+        hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+    }
+    MONITORINFO mi{};
     mi.cbSize = sizeof mi;
     BOOL ok = GetMonitorInfo(hmon, &mi);
     if (!ok) {
         SystemParametersInfo(SPI_GETWORKAREA, 0, &mi.rcWork, 0);
     }
-    return Rect::FromRECT(mi.rcWork);
+    return ToRect(mi.rcWork);
 }
 
 // returns the dimensions the given window has to have in order to be a fullscreen window
 Rect GetFullscreenRect(HWND hwnd) {
-    MONITORINFO mi = {0};
+    MONITORINFO mi{};
     mi.cbSize = sizeof(mi);
     if (GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
-        return Rect::FromRECT(mi.rcMonitor);
+        return ToRect(mi.rcMonitor);
     }
     // fall back to the primary monitor
     return Rect(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
 }
 
-static BOOL CALLBACK GetMonitorRectProc([[maybe_unused]] HMONITOR hMonitor, [[maybe_unused]] HDC hdc, LPRECT rcMonitor,
-                                        LPARAM data) {
+static BOOL CALLBACK GetMonitorRectProc(HMONITOR, HDC, LPRECT rcMonitor, LPARAM data) {
     Rect* rcAll = (Rect*)data;
-    *rcAll = rcAll->Union(Rect::FromRECT(*rcMonitor));
+    *rcAll = rcAll->Union(ToRect(*rcMonitor));
     return TRUE;
 }
 
@@ -766,7 +1251,7 @@ Rect GetVirtualScreenRect() {
     return result;
 }
 
-void PaintRect(HDC hdc, const Rect rect) {
+void DrawRect(HDC hdc, const Rect& rect) {
     MoveToEx(hdc, rect.x, rect.y, nullptr);
     LineTo(hdc, rect.x + rect.dx - 1, rect.y);
     LineTo(hdc, rect.x + rect.dx - 1, rect.y + rect.dy - 1);
@@ -774,70 +1259,28 @@ void PaintRect(HDC hdc, const Rect rect) {
     LineTo(hdc, rect.x, rect.y);
 }
 
-void PaintLine(HDC hdc, const Rect rect) {
+void FillRect(HDC hdc, const Rect& rect, HBRUSH br) {
+    RECT r = ToRECT(rect);
+    FillRect(hdc, &r, br);
+}
+
+void FillRect(HDC hdc, const Rect& rect, COLORREF col) {
+    AutoDeleteBrush br(CreateSolidBrush(col));
+    RECT r = ToRECT(rect);
+    FillRect(hdc, &r, br);
+}
+
+void DrawLine(HDC hdc, const Rect& rect) {
     MoveToEx(hdc, rect.x, rect.y, nullptr);
     LineTo(hdc, rect.x + rect.dx, rect.y + rect.dy);
 }
 
-void DrawCenteredText(HDC hdc, const Rect r, const WCHAR* txt, bool isRTL) {
-    SetBkMode(hdc, TRANSPARENT);
-    RECT tmpRect = ToRECT(r);
-    uint format = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
-    if (isRTL) {
-        format |= DT_RTLREADING;
-    }
-    DrawTextW(hdc, txt, -1, &tmpRect, format);
+// returns previously focused window
+HWND HwndSetFocus(HWND hwnd) {
+    return SetFocus(hwnd);
 }
 
-void DrawCenteredText(HDC hdc, const RECT& r, const WCHAR* txt, bool isRTL) {
-    Rect rc = Rect::FromRECT(r);
-    DrawCenteredText(hdc, rc, txt, isRTL);
-}
-
-/* Return size of a text <txt> in a given <hwnd>, taking into account its font */
-Size TextSizeInHwnd(HWND hwnd, const WCHAR* txt, HFONT font) {
-    SIZE sz{};
-    size_t txtLen = str::Len(txt);
-    HDC dc = GetWindowDC(hwnd);
-    /* GetWindowDC() returns dc with default state, so we have to first set
-       window's current font into dc */
-    if (font == nullptr) {
-        font = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
-    }
-    HGDIOBJ prev = SelectObject(dc, font);
-    GetTextExtentPoint32W(dc, txt, (int)txtLen, &sz);
-    SelectObject(dc, prev);
-    ReleaseDC(hwnd, dc);
-    return Size(sz.cx, sz.cy);
-}
-
-// TODO: unify with TextSizeInHwnd
-/* Return size of a text <txt> in a given <hwnd>, taking into account its font */
-SIZE TextSizeInHwnd2(HWND hwnd, const WCHAR* txt, HFONT font) {
-    SIZE sz{};
-    size_t txtLen = str::Len(txt);
-    HDC dc = GetWindowDC(hwnd);
-    /* GetWindowDC() returns dc with default state, so we have to first set
-    window's current font into dc */
-    if (font == nullptr) {
-        font = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
-    }
-    HGDIOBJ prev = SelectObject(dc, font);
-    GetTextExtentPoint32W(dc, txt, (int)txtLen, &sz);
-    SelectObject(dc, prev);
-    ReleaseDC(hwnd, dc);
-    return sz;
-}
-
-/* Return size of a text <txt> in a given <hdc>, taking into account its font */
-Size TextSizeInDC(HDC hdc, const WCHAR* txt) {
-    SIZE sz;
-    size_t txtLen = str::Len(txt);
-    GetTextExtentPoint32(hdc, txt, (int)txtLen, &sz);
-    return Size(sz.cx, sz.cy);
-}
-
-bool IsFocused(HWND hwnd) {
+bool HwndIsFocused(HWND hwnd) {
     return GetFocus() == hwnd;
 }
 
@@ -848,16 +1291,31 @@ bool IsCursorOverWindow(HWND hwnd) {
     return rcWnd.Contains({pt.x, pt.y});
 }
 
-bool GetCursorPosInHwnd(HWND hwnd, Point& posOut) {
+HWND HwndGetParent(HWND hwnd) {
+    return ::GetParent(hwnd);
+}
+
+TempStr HwndGetClassName(HWND hwnd) {
+    WCHAR buf[512] = {0};
+    int n = GetClassNameW(hwnd, buf, dimof(buf));
+    ReportIf(n == 0);
+    return ToUtf8Temp(buf);
+}
+
+Point HwndGetCursorPos(HWND hwnd) {
     POINT pt;
     if (!GetCursorPos(&pt)) {
-        return false;
+        return {};
     }
     if (!ScreenToClient(hwnd, &pt)) {
-        return false;
+        return {};
     }
-    posOut = {pt.x, pt.y};
-    return true;
+    return {pt.x, pt.y};
+}
+
+bool IsMouseOverRect(HWND hwnd, const Rect& r) {
+    Point curPos = HwndGetCursorPos(hwnd);
+    return r.Contains(curPos);
 }
 
 void CenterDialog(HWND hDlg, HWND hParent) {
@@ -875,24 +1333,27 @@ void CenterDialog(HWND hDlg, HWND hParent) {
     rcDialog.Offset(rcOwner.x + (rcRect.x - rcDialog.x + rcRect.dx - rcDialog.dx) / 2,
                     rcOwner.y + (rcRect.y - rcDialog.y + rcRect.dy - rcDialog.dy) / 2);
     // ensure that the dialog is fully visible on one monitor
-    rcDialog = ShiftRectToWorkArea(rcDialog, true);
+    rcDialog = ShiftRectToWorkArea(rcDialog, hParent, true);
 
-    SetWindowPos(hDlg, 0, rcDialog.x, rcDialog.y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+    SetWindowPos(hDlg, nullptr, rcDialog.x, rcDialog.y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
 }
 
-/* Get the name of default printer or nullptr if not exists.
-   The caller needs to free() the result */
-WCHAR* GetDefaultPrinterName() {
+void SetDlgItemFont(HWND hDlg, int nIDDlgItem, HFONT fnt) {
+    HWND hwnd = GetDlgItem(hDlg, nIDDlgItem);
+    HwndSetFont(hwnd, fnt);
+}
+
+// Get the name of default printer or nullptr if not exists.
+char* GetDefaultPrinterNameTemp() {
     WCHAR buf[512] = {0};
     DWORD bufSize = dimof(buf);
     if (GetDefaultPrinter(buf, &bufSize)) {
-        return str::Dup(buf);
+        return ToUtf8Temp(buf);
     }
     return nullptr;
 }
 
-bool CopyTextToClipboard(const WCHAR* text, bool appendOnly) {
-    CrashIf(!text);
+static bool CopyOrAppendTextToClipboard(const WCHAR* text, bool appendOnly) {
     if (!text) {
         return false;
     }
@@ -904,7 +1365,7 @@ bool CopyTextToClipboard(const WCHAR* text, bool appendOnly) {
         EmptyClipboard();
     }
 
-    size_t n = str::Len(text) + 1;
+    int n = str::Leni(text) + 1;
     HGLOBAL handle = GlobalAlloc(GMEM_MOVEABLE, n * sizeof(WCHAR));
     if (handle) {
         WCHAR* globalText = (WCHAR*)GlobalLock(handle);
@@ -921,6 +1382,19 @@ bool CopyTextToClipboard(const WCHAR* text, bool appendOnly) {
     }
 
     return handle != nullptr;
+}
+
+static bool CopyOrAppendTextToClipboard(const char* s, bool appendOnly) {
+    TempWStr ws = ToWStrTemp(s);
+    return CopyOrAppendTextToClipboard(ws, appendOnly);
+}
+
+bool CopyTextToClipboard(const char* s) {
+    return CopyOrAppendTextToClipboard(s, false);
+}
+
+bool AppendTextToClipboard(const char* s) {
+    return CopyOrAppendTextToClipboard(s, true);
 }
 
 static bool SetClipboardImage(HBITMAP hbmp) {
@@ -982,12 +1456,12 @@ bool IsWindowStyleExSet(HWND hwnd, DWORD flags) {
     return (style != flags) != 0;
 }
 
-bool IsRtl(HWND hwnd) {
+bool HwndIsRtl(HWND hwnd) {
     DWORD style = GetWindowLong(hwnd, GWL_EXSTYLE);
     return bit::IsMaskSet<DWORD>(style, WS_EX_LAYOUTRTL);
 }
 
-void SetRtl(HWND hwnd, bool isRtl) {
+void HwndSetRtl(HWND hwnd, bool isRtl) {
     SetWindowExStyle(hwnd, WS_EX_LAYOUTRTL | WS_EX_NOINHERITLAYOUT, isRtl);
 }
 
@@ -1007,66 +1481,183 @@ Rect ChildPosWithinParent(HWND hwnd) {
     return rc;
 }
 
-// don't delete the font
-HFONT GetDefaultGuiFont() {
-    if (gDefaultGuiFont) {
-        return gDefaultGuiFont;
+constexpr u16 kFontFlagItalic = 0x01;
+constexpr u16 kFontFlagBold = 0x02;
+
+struct CreatedFontInfo {
+    CreatedFontInfo* next = nullptr;
+    const char* name = nullptr; // if nullptr, default gui font
+    HFONT font = nullptr;
+    u16 size = 0;
+    u16 flags = 0;
+    u16 weightOffset = 0;
+};
+
+// those are cached for the lifetime of the app
+static CreatedFontInfo* gFonts = nullptr;
+static HFONT gMenuFont = nullptr;
+
+static CreatedFontInfo* FindCreatedFont(const char* name, int size, u16 flags, u16 weightOffset) {
+    CreatedFontInfo* curr = gFonts;
+    while (curr) {
+        if (curr->size == (u16)size && curr->flags == flags && curr->weightOffset == weightOffset &&
+            str::Eq(curr->name, name)) {
+            name = name ? name : "";
+            /* logf("FindCreatedFont: found font '%s', size: %d, flags: %x, weightOffset: %d\n", name, (int)size,
+                 (int)flags, (int)weightOffset); */
+            return curr;
+        }
+        curr = curr->next;
     }
-    NONCLIENTMETRICS ncm = {0};
-    ncm.cbSize = sizeof(ncm);
-    SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-    gDefaultGuiFont = CreateFontIndirectW(&ncm.lfMessageFont);
-    return gDefaultGuiFont;
+    return nullptr;
+}
+
+void DeleteCreatedFonts() {
+    CreatedFontInfo* curr = gFonts;
+    while (curr) {
+        auto next = curr->next;
+        free((void*)curr->name);
+        DeleteFont(&curr->font);
+        delete curr;
+        curr = next;
+    }
+    gFonts = nullptr;
+
+    DeleteFont(gMenuFont);
+    gMenuFont = nullptr;
+}
+
+static HFONT RememberCreatedFont(HFONT font, const char* name, int size, u16 flags, u16 weightOffset) {
+    auto cf = new CreatedFontInfo();
+    cf->name = str::Dup(name);
+    cf->font = font;
+    cf->size = (u16)size;
+    cf->flags = flags;
+    cf->weightOffset = weightOffset;
+    ListInsertFront(&gFonts, cf);
+    int n = ListLen(gFonts);
+    name = name ? name : "";
+    /* logf("RememberCreatedFont: added font '%s', size: %d, flags: %x, weightOffset: %d\n", name, size, (int)flags,
+         (int)weightOffset);  */
+    return font;
+}
+
+HFONT GetMenuFont() {
+    if (!gMenuFont) {
+        NONCLIENTMETRICS ncm{};
+        ncm.cbSize = sizeof(ncm);
+        SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+        gMenuFont = CreateFontIndirectW(&ncm.lfMenuFont);
+    }
+    return gMenuFont;
+}
+
+HFONT CreateSimpleFont(HDC hdc, const char* fontName, int fontSizePt) {
+    int realSize = MulDiv(fontSizePt, GetDeviceCaps(hdc, LOGPIXELSY), USER_DEFAULT_SCREEN_DPI);
+
+    u16 flags = 0;
+    auto f = FindCreatedFont(fontName, realSize, flags, 0);
+    if (f) {
+        return f->font;
+    }
+
+    WCHAR* fontNameW = ToWStrTemp(fontName);
+    LOGFONTW lf{};
+
+    lf.lfWidth = 0;
+    lf.lfHeight = -realSize;
+    lf.lfItalic = FALSE;
+    lf.lfUnderline = FALSE;
+    lf.lfStrikeOut = FALSE;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfOutPrecision = OUT_TT_PRECIS;
+    lf.lfQuality = DEFAULT_QUALITY;
+    lf.lfPitchAndFamily = DEFAULT_PITCH;
+    str::BufSet(lf.lfFaceName, dimof(lf.lfFaceName), fontNameW);
+    lf.lfWeight = FW_DONTCARE;
+    lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
+    lf.lfEscapement = 0;
+    lf.lfOrientation = 0;
+
+    HFONT res = CreateFontIndirectW(&lf);
+    return RememberCreatedFont(res, fontName, realSize, flags, 0);
 }
 
 HFONT GetDefaultGuiFontOfSize(int size) {
-    NONCLIENTMETRICS ncm = {0};
+    auto f = FindCreatedFont(nullptr, size, 0, 0);
+    if (f) {
+        return f->font;
+    }
+
+    NONCLIENTMETRICS ncm = {};
     ncm.cbSize = sizeof(ncm);
-    SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
     ncm.lfMessageFont.lfHeight = -size;
-    HFONT fnt = CreateFontIndirectW(&ncm.lfMessageFont);
-    return fnt;
+    HFONT res = CreateFontIndirectW(&ncm.lfMessageFont);
+    return RememberCreatedFont(res, nullptr, size, 0, 0);
 }
 
-// TODO: lfUnderline? lfStrikeOut?
-HFONT GetDefaultGuiFont(bool bold, bool italic) {
-    HFONT* dest = &gDefaultGuiFont;
-    if (bold && !italic) {
-        dest = &gDefaultGuiFontBold;
-    } else if (!bold && italic) {
-        dest = &gDefaultGuiFontItalic;
-    } else if (bold && italic) {
-        dest = &gDefaultGuiFontBoldItalic;
+HFONT GetUserGuiFont(const char* fontName, int size) {
+    if (str::EqI(fontName, "automatic") || str::EqI(fontName, "auto")) {
+        fontName = nullptr;
     }
-    HFONT existing = *dest;
-    if (existing != nullptr) {
-        return existing;
+    auto f = FindCreatedFont(fontName, size, 0, (u16)0);
+    if (f) {
+        return f->font;
     }
-    NONCLIENTMETRICS ncm{0};
+
+    NONCLIENTMETRICS ncm = {};
     ncm.cbSize = sizeof(ncm);
-    SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    if (fontName) {
+        WCHAR* dest = ncm.lfMessageFont.lfFaceName;
+        int cchDestBufSize = dimof(ncm.lfMessageFont.lfFaceName);
+        TempWStr nameW = ToWStrTemp(fontName);
+        str::BufSet(dest, cchDestBufSize, nameW);
+    }
+    ncm.lfMessageFont.lfHeight = -size;
+    HFONT res = CreateFontIndirectW(&ncm.lfMessageFont);
+    return RememberCreatedFont(res, fontName, size, 0, 0);
+}
+
+HFONT GetDefaultGuiFont(bool bold, bool italic) {
+    u16 flags = 0;
+    if (bold) {
+        flags |= kFontFlagBold;
+    }
+    if (italic) {
+        flags |= kFontFlagItalic;
+    }
+
+    NONCLIENTMETRICS ncm = {};
+    ncm.cbSize = sizeof(ncm);
+    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    int size = (int)std::abs(ncm.lfMessageFont.lfHeight);
+
+    auto f = FindCreatedFont(nullptr, size, flags, 0);
+    if (f) {
+        return f->font;
+    }
+
     if (bold) {
         ncm.lfMessageFont.lfWeight = FW_BOLD;
     }
     if (italic) {
         ncm.lfMessageFont.lfItalic = true;
     }
-    *dest = CreateFontIndirect(&ncm.lfMessageFont);
-    return *dest;
+    HFONT res = CreateFontIndirectW(&ncm.lfMessageFont);
+    return RememberCreatedFont(res, nullptr, size, flags, 0);
 }
 
 int GetSizeOfDefaultGuiFont() {
-    NONCLIENTMETRICS ncm = {0};
+    NONCLIENTMETRICS ncm{};
     ncm.cbSize = sizeof(ncm);
-    SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-    int res = -ncm.lfMessageFont.lfHeight;
-    CrashIf(res <= 0);
+    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    int res = std::abs(ncm.lfMessageFont.lfHeight);
     return res;
 }
 
-DoubleBuffer::DoubleBuffer(HWND hwnd, Rect rect) : hTarget(hwnd), rect(rect) {
-    hdcCanvas = ::GetDC(hwnd);
-
+DoubleBuffer::DoubleBuffer(HWND hwnd, Rect rect) : hTarget(hwnd), hdcCanvas(::GetDC(hwnd)), rect(rect) {
     if (rect.IsEmpty()) {
         return;
     }
@@ -1102,15 +1693,14 @@ HDC DoubleBuffer::GetDC() const {
     return hdcCanvas;
 }
 
-void DoubleBuffer::Flush(HDC hdc) {
-    CrashIf(hdc == hdcBuffer);
+void DoubleBuffer::Flush(HDC hdc) const {
+    ReportIf(hdc == hdcBuffer);
     if (hdcBuffer) {
         BitBlt(hdc, rect.x, rect.y, rect.dx, rect.dy, hdcBuffer, 0, 0, SRCCOPY);
     }
 }
 
-DeferWinPosHelper::DeferWinPosHelper() {
-    hdwp = ::BeginDeferWindowPos(32);
+DeferWinPosHelper::DeferWinPosHelper() : hdwp(::BeginDeferWindowPos(32)) {
 }
 
 DeferWinPosHelper::~DeferWinPosHelper() {
@@ -1138,87 +1728,67 @@ void DeferWinPosHelper::MoveWindow(HWND hWnd, int x, int y, int cx, int cy, BOOL
     if (!bRepaint) {
         uFlags |= SWP_NOREDRAW;
     }
-    this->SetWindowPos(hWnd, 0, x, y, cx, cy, uFlags);
+    this->SetWindowPos(hWnd, nullptr, x, y, cx, cy, uFlags);
 }
 
 void DeferWinPosHelper::MoveWindow(HWND hWnd, Rect r) {
     this->MoveWindow(hWnd, r.x, r.y, r.dx, r.dy);
 }
 
-namespace win {
-namespace menu {
-
-void SetChecked(HMENU m, int id, bool isChecked) {
-    CrashIf(id < 0);
-    CheckMenuItem(m, (uint)id, MF_BYCOMMAND | (isChecked ? MF_CHECKED : MF_UNCHECKED));
+void MenuSetChecked(HMENU m, int id, bool isChecked) {
+    ReportIf(id < 0);
+    CheckMenuItem(m, (UINT)id, MF_BYCOMMAND | (isChecked ? MF_CHECKED : MF_UNCHECKED));
 }
 
-bool SetEnabled(HMENU m, int id, bool isEnabled) {
-    CrashIf(id < 0);
-    BOOL ret = EnableMenuItem(m, (uint)id, MF_BYCOMMAND | (isEnabled ? MF_ENABLED : MF_GRAYED));
+bool MenuSetEnabled(HMENU m, int id, bool isEnabled) {
+    ReportIf(id < 0);
+    BOOL ret = EnableMenuItem(m, (UINT)id, MF_BYCOMMAND | (isEnabled ? MF_ENABLED : MF_GRAYED));
     return ret != -1;
 }
 
-void Remove(HMENU m, int id) {
-    CrashIf(id < 0);
-    RemoveMenu(m, (uint)id, MF_BYCOMMAND);
+void MenuRemove(HMENU m, int id) {
+    ReportIf(id < 0);
+    RemoveMenu(m, (UINT)id, MF_BYCOMMAND);
 }
 
-void Empty(HMENU m) {
+void MenuEmpty(HMENU m) {
     while (RemoveMenu(m, 0, MF_BYPOSITION)) {
         // no-op
     }
 }
 
-void SetText(HMENU m, int id, const WCHAR* s) {
-    CrashIf(id < 0);
-    MENUITEMINFOW mii = {0};
+void MenuSetText(HMENU m, int id, const WCHAR* s) {
+    ReportIf(id < 0);
+    MENUITEMINFOW mii{};
     mii.cbSize = sizeof(mii);
     mii.fMask = MIIM_STRING;
     mii.fType = MFT_STRING;
     mii.dwTypeData = (WCHAR*)s;
     mii.cch = (uint)str::Len(s);
     BOOL ok = SetMenuItemInfoW(m, id, FALSE, &mii);
-    CrashIf(!ok);
+    if (!ok) {
+        const char* tmp = s ? ToUtf8Temp(s) : "(null)";
+        logf("MenuSetText(): id=%d, s='%s'\n", id, tmp);
+        LogLastError();
+        ReportIf(true);
+    }
+}
+
+void MenuSetText(HMENU m, int id, const char* s) {
+    TempWStr ws = ToWStrTemp(s);
+    MenuSetText(m, id, ws);
 }
 
 /* Make a string safe to be displayed as a menu item
    (preserving all & so that they don't get swallowed)
    if no change is needed, the string is returned as is,
    else it's also saved in newResult for automatic freeing */
-const WCHAR* ToSafeString(AutoFreeWstr& s) {
-    auto str = s.Get();
-    if (!str::FindChar(str, '&')) {
-        return str;
-    }
-    s.Set(str::Replace(str, L"&", L"&&"));
-    return s.Get();
-}
-} // namespace menu
-} // namespace win
-
-HFONT CreateSimpleFont(HDC hdc, const WCHAR* fontName, int fontSize) {
-    LOGFONTW lf = {0};
-
-    lf.lfWidth = 0;
-    lf.lfHeight = -MulDiv(fontSize, GetDeviceCaps(hdc, LOGPIXELSY), USER_DEFAULT_SCREEN_DPI);
-    lf.lfItalic = FALSE;
-    lf.lfUnderline = FALSE;
-    lf.lfStrikeOut = FALSE;
-    lf.lfCharSet = DEFAULT_CHARSET;
-    lf.lfOutPrecision = OUT_TT_PRECIS;
-    lf.lfQuality = DEFAULT_QUALITY;
-    lf.lfPitchAndFamily = DEFAULT_PITCH;
-    str::BufSet(lf.lfFaceName, dimof(lf.lfFaceName), fontName);
-    lf.lfWeight = FW_DONTCARE;
-    lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
-    lf.lfEscapement = 0;
-    lf.lfOrientation = 0;
-
-    return CreateFontIndirectW(&lf);
+TempStr MenuToSafeStringTemp(const char* s) {
+    TempStr safe = str::ReplaceTemp(s, "&", "&&");
+    return safe;
 }
 
-IStream* CreateStreamFromData(std::span<u8> d) {
+IStream* CreateStreamFromData(const ByteSlice& d) {
     if (d.empty()) {
         return nullptr;
     }
@@ -1235,7 +1805,7 @@ IStream* CreateStreamFromData(std::span<u8> d) {
         return nullptr;
     }
 
-    LARGE_INTEGER zero = {0};
+    LARGE_INTEGER zero{};
     stream->Seek(zero, STREAM_SEEK_SET, nullptr);
 
     stream->AddRef();
@@ -1265,7 +1835,7 @@ static HRESULT GetDataFromStream(IStream* stream, void** data, ULONG* len) {
     }
 
     ULONG read;
-    LARGE_INTEGER zero = {0};
+    LARGE_INTEGER zero{};
     stream->Seek(zero, STREAM_SEEK_SET, nullptr);
     res = stream->Read(d, stat.cbSize.LowPart, &read);
     if (FAILED(res) || read != n) {
@@ -1278,7 +1848,7 @@ static HRESULT GetDataFromStream(IStream* stream, void** data, ULONG* len) {
     return S_OK;
 }
 
-std::span<u8> GetDataFromStream(IStream* stream, HRESULT* resOpt) {
+ByteSlice GetDataFromStream(IStream* stream, HRESULT* resOpt) {
     void* data = nullptr;
     ULONG size = 0;
     HRESULT res = GetDataFromStream(stream, &data, &size);
@@ -1292,7 +1862,7 @@ std::span<u8> GetDataFromStream(IStream* stream, HRESULT* resOpt) {
     return {(u8*)data, (size_t)size};
 }
 
-std::span<u8> GetStreamOrFileData(IStream* stream, const WCHAR* filePath) {
+ByteSlice GetStreamOrFileData(IStream* stream, const char* filePath) {
     if (stream) {
         return GetDataFromStream(stream, nullptr);
     }
@@ -1333,7 +1903,7 @@ uint GuessTextCodepage(const char* data, size_t len, uint defVal) {
 
     int ilen = std::min((int)len, INT_MAX);
     int count = 1;
-    DetectEncodingInfo info = {0};
+    DetectEncodingInfo info{};
     HRESULT hr = pMLang->DetectInputCodepage(MLDETECTCP_NONE, CP_ACP, (char*)data, &ilen, &info, &count);
     if (FAILED(hr) || count != 1) {
         return defVal;
@@ -1341,27 +1911,27 @@ uint GuessTextCodepage(const char* data, size_t len, uint defVal) {
     return info.nCodePage;
 }
 
-WCHAR* NormalizeString(const WCHAR* str, int /* NORM_FORM */ form) {
+char* NormalizeString(const char* strA, int /* NORM_FORM */ form) {
     if (!DynNormalizeString) {
         return nullptr;
     }
+    WCHAR* str = ToWStrTemp(strA);
     int sizeEst = DynNormalizeString(form, str, -1, nullptr, 0);
     if (sizeEst <= 0) {
         return nullptr;
     }
     // according to MSDN the estimate may be off somewhat:
     // http://msdn.microsoft.com/en-us/library/windows/desktop/dd319093(v=vs.85).aspx
-    sizeEst = sizeEst * 3 / 2 + 1;
-    AutoFreeWstr res(AllocArray<WCHAR>(sizeEst));
+    sizeEst = sizeEst * 2;
+    AutoFreeWStr res(AllocArray<WCHAR>(sizeEst));
     sizeEst = DynNormalizeString(form, str, -1, res, sizeEst);
     if (sizeEst <= 0) {
         return nullptr;
     }
-    return res.StealData();
+    return ToUtf8(res.Get());
 }
 
-// http://support.microsoft.com/default.aspx?scid=kb;en-us;207132
-bool RegisterOrUnregisterServerDLL(const WCHAR* dllPath, bool install, const WCHAR* args) {
+bool RegisterOrUnregisterServerDLL(const char* dllPath, bool install, const char* args) {
     if (FAILED(OleInitialize(nullptr))) {
         return false;
     }
@@ -1369,8 +1939,9 @@ bool RegisterOrUnregisterServerDLL(const WCHAR* dllPath, bool install, const WCH
     // make sure that the DLL can find any DLLs it depends on and
     // which reside in the same directory (in this case: libmupdf.dll)
     if (DynSetDllDirectoryW) {
-        AutoFreeWstr dllDir = path::GetDir(dllPath);
-        DynSetDllDirectoryW(dllDir);
+        TempStr dllDir = path::GetDirTemp(dllPath);
+        TempWStr dllDirW = ToWStrTemp(dllDir);
+        DynSetDllDirectoryW(dllDirW);
     }
 
     defer {
@@ -1380,7 +1951,7 @@ bool RegisterOrUnregisterServerDLL(const WCHAR* dllPath, bool install, const WCH
         OleUninitialize();
     };
 
-    HMODULE lib = LoadLibraryW(dllPath);
+    HMODULE lib = LoadLibraryA(dllPath);
     if (!lib) {
         return false;
     }
@@ -1394,7 +1965,8 @@ bool RegisterOrUnregisterServerDLL(const WCHAR* dllPath, bool install, const WCH
     if (args) {
         DllInstallProc DllInstall = (DllInstallProc)GetProcAddress(lib, "DllInstall");
         if (DllInstall) {
-            ok = SUCCEEDED(DllInstall(install, args));
+            WCHAR* argsW = ToWStrTemp(args);
+            ok = SUCCEEDED(DllInstall(install, argsW));
         } else {
             args = nullptr;
         }
@@ -1410,72 +1982,61 @@ bool RegisterOrUnregisterServerDLL(const WCHAR* dllPath, bool install, const WCH
     return ok;
 }
 
-bool RegisterServerDLL(const WCHAR* dllPath, const WCHAR* args) {
+bool RegisterServerDLL(const char* dllPath, const char* args) {
     return RegisterOrUnregisterServerDLL(dllPath, true, args);
 }
 
-bool UnRegisterServerDLL(const WCHAR* dllPath, const WCHAR* args) {
+bool UnRegisterServerDLL(const char* dllPath, const char* args) {
     if (!file::Exists(dllPath)) {
         return true;
     }
     return RegisterOrUnregisterServerDLL(dllPath, false, args);
 }
 
-namespace win {
-
-void ToForeground(HWND hwnd) {
+void HwndToForeground(HWND hwnd) {
     if (IsIconic(hwnd)) {
         ShowWindow(hwnd, SW_RESTORE);
     }
     SetForegroundWindow(hwnd);
 }
 
-/* return text of window or edit control, nullptr in case of an error.
-caller needs to free() the result */
-WCHAR* GetText(HWND hwnd) {
-    size_t cchTxtLen = GetTextLen(hwnd);
-    WCHAR* txt = AllocArray<WCHAR>(cchTxtLen + 1);
-    if (nullptr == txt) {
-        return nullptr;
-    }
-    SendMessageW(hwnd, WM_GETTEXT, cchTxtLen + 1, (LPARAM)txt);
-    txt[cchTxtLen] = 0;
-    return txt;
-}
-
-str::Str GetTextUtf8(HWND hwnd) {
-    size_t cchTxtLen = GetTextLen(hwnd);
-    WCHAR* txt = AllocArray<WCHAR>(cchTxtLen + 1);
-    if (nullptr == txt) {
-        return str::Str();
-    }
-    SendMessageW(hwnd, WM_GETTEXT, cchTxtLen + 1, (LPARAM)txt);
-    txt[cchTxtLen] = 0;
-    AutoFreeStr od = strconv::WstrToUtf8(txt, cchTxtLen);
-    free(txt);
-    return {od.AsView()};
-}
-
-size_t GetTextLen(HWND hwnd) {
+size_t HwndGetTextLen(HWND hwnd) {
     return (size_t)SendMessageW(hwnd, WM_GETTEXTLENGTH, 0, 0);
 }
 
-void SetText(HWND hwnd, const WCHAR* txt) {
-    SendMessageW(hwnd, WM_SETTEXT, 0, (LPARAM)txt);
+// return text of window or edit control, nullptr in case of an error
+TempWStr HwndGetTextWTemp(HWND hwnd) {
+    size_t cch = HwndGetTextLen(hwnd);
+    WCHAR* txt = AllocArrayTemp<WCHAR>(cch + 2); // +2 for extra room
+    if (nullptr == txt) {
+        return nullptr;
+    }
+    SendMessageW(hwnd, WM_GETTEXT, cch + 1, (LPARAM)txt);
+    return txt;
 }
 
-void SetVisibility(HWND hwnd, bool visible) {
-    ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE);
+// return text of window or edit control, nullptr in case of an error
+TempStr HwndGetTextTemp(HWND hwnd) {
+    size_t cch = HwndGetTextLen(hwnd);
+    WCHAR* txt = AllocArrayTemp<WCHAR>(cch + 2); // +2 jic
+    if (nullptr == txt) {
+        return nullptr;
+    }
+    SendMessageW(hwnd, WM_GETTEXT, cch + 1, (LPARAM)txt);
+    return ToUtf8Temp(txt);
 }
 
-bool HasFrameThickness(HWND hwnd) {
+bool HwndHasFrameThickness(HWND hwnd) {
     return bit::IsMaskSet(GetWindowLong(hwnd, GWL_STYLE), WS_THICKFRAME);
 }
 
-bool HasCaption(HWND hwnd) {
+bool HwndHasCaption(HWND hwnd) {
     return bit::IsMaskSet(GetWindowLong(hwnd, GWL_STYLE), WS_CAPTION);
 }
-} // namespace win
+
+void HwndSetVisibility(HWND hwnd, bool visible) {
+    ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE);
+}
 
 Size GetBitmapSize(HBITMAP hbmp) {
     BITMAP bmpInfo;
@@ -1505,8 +2066,8 @@ static bool IsPalettedBitmap(DIBSECTION& info, int nBytes) {
 }
 
 COLORREF GetPixel(BitmapPixels* bitmap, int x, int y) {
-    CrashIf(x < 0 || x >= bitmap->size.dx);
-    CrashIf(y < 0 || y >= bitmap->size.dy);
+    ReportIf(x < 0 || x >= bitmap->size.dx);
+    ReportIf(y < 0 || y >= bitmap->size.dy);
     u8* pixels = bitmap->pixels;
     u8* pixel = pixels + y * bitmap->nBytesPerRow + x * bitmap->nBytesPerPixel;
     // color order in DIB is blue-green-red-alpha
@@ -1516,7 +2077,7 @@ COLORREF GetPixel(BitmapPixels* bitmap, int x, int y) {
     } else if (4 == bitmap->nBytesPerPixel) {
         c = RGB(pixel[3], pixel[2], pixel[1]);
     } else {
-        CrashIf(true);
+        ReportIf(true);
     }
     return c;
 }
@@ -1524,9 +2085,9 @@ COLORREF GetPixel(BitmapPixels* bitmap, int x, int y) {
 BitmapPixels* GetBitmapPixels(HBITMAP hbmp) {
     BitmapPixels* res = AllocStruct<BitmapPixels>();
 
-    DIBSECTION info = {0};
+    DIBSECTION info{};
     int nBytes = GetObject(hbmp, sizeof(info), &info);
-    CrashIf(nBytes < sizeof(info.dsBm));
+    ReportIf(nBytes < sizeof(info.dsBm));
     Size size(info.dsBm.bmWidth, info.dsBm.bmHeight);
 
     res->size = size;
@@ -1558,7 +2119,7 @@ BitmapPixels* GetBitmapPixels(HBITMAP hbmp) {
         return nullptr;
     }
 
-    BITMAPINFO bmi = {0};
+    BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
     bmi.bmiHeader.biWidth = size.dx;
     bmi.bmiHeader.biHeight = size.dy;
@@ -1569,7 +2130,7 @@ BitmapPixels* GetBitmapPixels(HBITMAP hbmp) {
     HDC hdc = CreateCompatibleDC(nullptr);
     int bmpBytes = size.dx * size.dy * 4;
     ScopedMem<u8> bmpData((u8*)malloc(bmpBytes));
-    CrashIf(!bmpData);
+    ReportIf(!bmpData);
 
     if (!GetDIBits(hdc, hbmp, 0, size.dy, bmpData, &bmi, DIB_RGB_COLORS)) {
         DeleteDC(hdc);
@@ -1587,15 +2148,15 @@ void UpdateBitmapColors(HBITMAP hbmp, COLORREF textColor, COLORREF bgColor) {
 
     // color order in DIB is blue-green-red-alpha
     byte rt, gt, bt;
-    UnpackRgb(textColor, rt, gt, bt);
-    int base[4] = {bt, gt, rt, 0};
+    UnpackColor(textColor, rt, gt, bt);
+    const int base[4] = {bt, gt, rt, 0};
     byte rb, gb, bb;
-    UnpackRgb(bgColor, rb, gb, bb);
-    int diff[4] = {(int)bb - base[0], (int)gb - base[1], (int)rb - base[2], 255};
+    UnpackColor(bgColor, rb, gb, bb);
+    int const diff[4] = {(int)bb - base[0], (int)gb - base[1], (int)rb - base[2], 255};
 
-    DIBSECTION info = {0};
+    DIBSECTION info{};
     int ret = GetObject(hbmp, sizeof(info), &info);
-    CrashIf(ret < sizeof(info.dsBm));
+    ReportIf(ret < sizeof(info.dsBm));
     Size size(info.dsBm.bmWidth, info.dsBm.bmHeight);
 
     // for mapped 32-bit DI bitmaps: directly access the pixel data
@@ -1626,7 +2187,7 @@ void UpdateBitmapColors(HBITMAP hbmp, COLORREF textColor, COLORREF bgColor) {
 
     // for paletted DI bitmaps: only update the color palette
     if (sizeof(info) == ret && info.dsBmih.biBitCount && info.dsBmih.biBitCount <= 8) {
-        CrashIf(info.dsBmih.biBitCount != 8);
+        ReportIf(info.dsBmih.biBitCount != 8);
         RGBQUAD palette[256];
         HDC hDC = CreateCompatibleDC(nullptr);
         DeleteObject(SelectObject(hDC, hbmp));
@@ -1643,7 +2204,7 @@ void UpdateBitmapColors(HBITMAP hbmp, COLORREF textColor, COLORREF bgColor) {
         return;
     }
 
-    BITMAPINFO bmi = {0};
+    BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
     bmi.bmiHeader.biWidth = size.dx;
     bmi.bmiHeader.biHeight = size.dy;
@@ -1654,7 +2215,7 @@ void UpdateBitmapColors(HBITMAP hbmp, COLORREF textColor, COLORREF bgColor) {
     HDC hDC = CreateCompatibleDC(nullptr);
     int bmpBytes = size.dx * size.dy * 4;
     ScopedMem<u8> bmpData((u8*)malloc(bmpBytes));
-    CrashIf(!bmpData);
+    ReportIf(!bmpData);
 
     if (GetDIBits(hDC, hbmp, 0, size.dy, bmpData, &bmi, DIB_RGB_COLORS)) {
         for (int i = 0; i < bmpBytes; i++) {
@@ -1670,7 +2231,7 @@ void UpdateBitmapColors(HBITMAP hbmp, COLORREF textColor, COLORREF bgColor) {
 // create data for a .bmp file from this bitmap (if saved to disk, the HBITMAP
 // can be deserialized with LoadImage(nullptr, ..., LD_LOADFROMFILE) and its
 // dimensions determined again with GetBitmapSize(...))
-std::span<u8> SerializeBitmap(HBITMAP hbmp) {
+ByteSlice SerializeBitmap(HBITMAP hbmp) {
     Size size = GetBitmapSize(hbmp);
     DWORD bmpHeaderLen = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFO);
     DWORD bmpBytes = ((size.dx * 3 + 3) / 4) * 4 * size.dy + bmpHeaderLen;
@@ -1703,7 +2264,7 @@ std::span<u8> SerializeBitmap(HBITMAP hbmp) {
 }
 
 HBITMAP CreateMemoryBitmap(Size size, HANDLE* hDataMapping) {
-    BITMAPINFO bmi = {0};
+    BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = size.dx;
     bmi.bmiHeader.biHeight = -size.dy;
@@ -1771,15 +2332,19 @@ double GetProcessRunningTime() {
     return timeInMs;
 }
 
+bool IsValidHandle(HANDLE h) {
+    return !(h == nullptr || h == INVALID_HANDLE_VALUE);
+}
+
 // This is just to satisfy /analyze. CloseHandle(nullptr) works perfectly fine
 // but /analyze complains anyway
-BOOL SafeCloseHandle(HANDLE* h) {
-    if (!*h) {
-        return TRUE;
+bool SafeCloseHandle(HANDLE* h) {
+    if (IsValidHandle(*h)) {
+        return false;
     }
     BOOL ok = CloseHandle(*h);
     *h = nullptr;
-    return ok;
+    return !!ok;
 }
 
 // based on http://mdb-blog.blogspot.com/2013/01/nsis-lunch-program-as-user-from-uac.html
@@ -1793,29 +2358,36 @@ BOOL SafeCloseHandle(HANDLE* h) {
 // - using CreateProcessAsUser() with hand-crafted token
 // It'll always run the process, might fail to run non-elevated if fails to find explorer.exe
 // Also, if explorer.exe is running elevated, it'll probably run elevated as well.
-void RunNonElevated(const WCHAR* exePath) {
-    AutoFreeWstr cmd, explorerPath;
+void RunNonElevated(const char* exePath) {
+    if (!file::Exists(exePath)) {
+        logf("RunNonElevated: file '%s' doesn't exist\n", exePath);
+        return;
+    }
+    logf("RunNonElevated: '%s'\n", exePath);
+    TempStr cmd = nullptr;
+    char* explorerPath = nullptr;
     WCHAR buf[MAX_PATH] = {0};
-    uint res = GetWindowsDirectory(buf, dimof(buf));
+    uint res = GetWindowsDirectoryW(buf, dimof(buf));
     if (0 == res || res >= dimof(buf)) {
         goto Run;
     }
-    explorerPath.Set(path::Join(buf, L"explorer.exe"));
+    explorerPath = ToUtf8Temp(buf);
+    explorerPath = path::JoinTemp(explorerPath, "explorer.exe");
     if (!file::Exists(explorerPath)) {
         goto Run;
     }
-    cmd.Set(str::Format(L"\"%s\" \"%s\"", explorerPath.Get(), exePath));
+    cmd = str::FormatTemp("\"%s\" \"%s\"", explorerPath, exePath);
 Run:
-    HANDLE h = LaunchProcess(cmd ? cmd.Get() : exePath);
+    HANDLE h = LaunchProcessInDir(cmd ? cmd : exePath);
     SafeCloseHandle(&h);
 }
 
 void ResizeHwndToClientArea(HWND hwnd, int dx, int dy, bool hasMenu) {
-    WINDOWINFO wi = {0};
+    WINDOWINFO wi{};
     wi.cbSize = sizeof(wi);
-    GetWindowInfo(hwnd, &wi);
+    ::GetWindowInfo(hwnd, &wi);
 
-    RECT r = {0};
+    RECT r{};
     r.right = dx;
     r.bottom = dy;
     DWORD style = wi.dwStyle;
@@ -1857,49 +2429,36 @@ void MessageBoxNYI(HWND hwnd) {
     MessageBoxWarningSimple(hwnd, L"Not Yet Implemented!", L"NYI");
 }
 
-void ScheduleRepaint(HWND hwnd) {
-    InvalidateRect(hwnd, nullptr, FALSE);
-}
-
-// do WM_PAINT immediately
-void RepaintNow(HWND hwnd) {
-    InvalidateRect(hwnd, nullptr, FALSE);
-    UpdateWindow(hwnd);
-}
-
 void VariantInitBstr(VARIANT& urlVar, const WCHAR* s) {
     VariantInit(&urlVar);
     urlVar.vt = VT_BSTR;
     urlVar.bstrVal = SysAllocString(s);
 }
 
-std::span<u8> LoadDataResource(int resId) {
-    HRSRC resSrc = FindResource(nullptr, MAKEINTRESOURCE(resId), RT_RCDATA);
-    CrashIf(!resSrc);
+StrSpan LoadDataResource(int resId) {
+    HRSRC resSrc = FindResourceW(nullptr, MAKEINTRESOURCE(resId), RT_RCDATA);
+    ReportIf(!resSrc);
     if (!resSrc) {
         return {};
     }
     HGLOBAL res = LoadResource(nullptr, resSrc);
-    CrashIf(!res);
+    ReportIf(!res);
     if (!res) {
         return {};
     }
     DWORD size = SizeofResource(nullptr, resSrc);
     const char* resData = (const char*)LockResource(res);
-    CrashIf(!resData);
+    ReportIf(!resData);
     if (!resData) {
         return {};
     }
-    char* s = str::DupN(resData, size);
+    char* s = str::Dup(resData, size);
     UnlockResource(res);
-    return {(u8*)s, size};
+    return {s, (int)size};
 }
 
-static HDDEDATA CALLBACK DdeCallback([[maybe_unused]] UINT uType, [[maybe_unused]] UINT uFmt,
-                                     [[maybe_unused]] HCONV hconv, [[maybe_unused]] HSZ hsz1, [[maybe_unused]] HSZ hsz2,
-                                     [[maybe_unused]] HDDEDATA hdata, [[maybe_unused]] ULONG_PTR dwData1,
-                                     [[maybe_unused]] ULONG_PTR dwData2) {
-    return 0;
+static HDDEDATA CALLBACK DdeCallback(UINT, UINT, HCONV, HSZ, HSZ, HDDEDATA, ULONG_PTR, ULONG_PTR) {
+    return nullptr;
 }
 
 bool DDEExecute(const WCHAR* server, const WCHAR* topic, const WCHAR* command) {
@@ -1911,21 +2470,21 @@ bool DDEExecute(const WCHAR* server, const WCHAR* topic, const WCHAR* command) {
     DWORD cbLen = 0;
     HDDEDATA answer;
 
-    CrashIf(str::Len(command) >= INT_MAX - 1);
+    ReportIf(str::Len(command) >= INT_MAX - 1);
     if (str::Len(command) >= INT_MAX - 1) {
         return false;
     }
 
-    result = DdeInitialize(&inst, DdeCallback, APPCMD_CLIENTONLY, 0);
+    result = DdeInitializeW(&inst, DdeCallback, APPCMD_CLIENTONLY, 0);
     if (result != DMLERR_NO_ERROR) {
         return false;
     }
 
-    hszServer = DdeCreateStringHandle(inst, server, CP_WINNEUTRAL);
+    hszServer = DdeCreateStringHandleW(inst, server, CP_WINNEUTRAL);
     if (!hszServer) {
         goto Exit;
     }
-    hszTopic = DdeCreateStringHandle(inst, topic, CP_WINNEUTRAL);
+    hszTopic = DdeCreateStringHandleW(inst, topic, CP_WINNEUTRAL);
     if (!hszTopic) {
         goto Exit;
     }
@@ -1935,7 +2494,7 @@ bool DDEExecute(const WCHAR* server, const WCHAR* topic, const WCHAR* command) {
     }
 
     cbLen = ((DWORD)str::Len(command) + 1) * sizeof(WCHAR);
-    answer = DdeClientTransaction((BYTE*)command, cbLen, hconv, 0, CF_UNICODETEXT, XTYP_EXECUTE, 10000, nullptr);
+    answer = DdeClientTransaction((BYTE*)command, cbLen, hconv, nullptr, CF_UNICODETEXT, XTYP_EXECUTE, 10000, nullptr);
     if (answer) {
         DdeFreeDataHandle(answer);
         ok = true;
@@ -1986,7 +2545,7 @@ void RectInflateTB(RECT& r, int top, int bottom) {
 static LPWSTR knownCursorIds[] = {IDC_ARROW,  IDC_IBEAM,  IDC_HAND, IDC_SIZEALL,
                                   IDC_SIZEWE, IDC_SIZENS, IDC_NO,   IDC_CROSS};
 
-static HCURSOR cachedCursors[dimof(knownCursorIds)] = {};
+static HCURSOR cachedCursors[dimof(knownCursorIds)]{};
 
 static int GetCursorIndex(LPWSTR cursorId) {
     int n = (int)dimof(knownCursorIds);
@@ -2013,7 +2572,7 @@ static const char* GetCursorName(LPWSTR cursorId) {
 static void LogCursor(LPWSTR cursorId) {
     static int n = 0;
     const char* name = GetCursorName(cursorId);
-    dbglogf("SetCursor %s 0x%x %d\n", name, (int)(intptr_t)cursorId, n);
+    logf("SetCursor %s 0x%x %d\n", name, (int)(intptr_t)cursorId, n);
     n++;
 }
 #else
@@ -2024,13 +2583,13 @@ static void LogCursor(LPWSTR) {
 
 HCURSOR GetCachedCursor(LPWSTR cursorId) {
     int i = GetCursorIndex(cursorId);
-    CrashIf(i < 0);
+    ReportIf(i < 0);
     if (i < 0) {
         return nullptr;
     }
     if (nullptr == cachedCursors[i]) {
         cachedCursors[i] = LoadCursor(nullptr, cursorId);
-        CrashIf(cachedCursors[i] == nullptr);
+        ReportIf(cachedCursors[i] == nullptr);
     }
     return cachedCursors[i];
 }
@@ -2050,7 +2609,7 @@ void DeleteCachedCursors() {
         HCURSOR cur = cachedCursors[i];
         if (cur) {
             DestroyCursor(cur);
-            cachedCursors[i] = NULL;
+            cachedCursors[i] = nullptr;
         }
     }
 }
@@ -2060,7 +2619,7 @@ void DeleteCachedCursors() {
 // this triggers drmemory. Force no inlining so that it's easy to write a
 // localized suppression
 __declspec(noinline) int GetMeasurementSystem() {
-    WCHAR unitSystem[2] = {0};
+    WCHAR unitSystem[2]{};
     GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_IMEASURE, unitSystem, dimof(unitSystem));
     if (unitSystem[0] == '0') {
         return 0;
@@ -2071,7 +2630,7 @@ __declspec(noinline) int GetMeasurementSystem() {
 // ask for getting WM_MOUSELEAVE for the window
 // returns true if started tracking
 bool TrackMouseLeave(HWND hwnd) {
-    TRACKMOUSEEVENT tme = {0};
+    TRACKMOUSEEVENT tme{};
     tme.cbSize = sizeof(TRACKMOUSEEVENT);
     tme.dwFlags = TME_QUERY;
     tme.hwndTrack = hwnd;
@@ -2086,19 +2645,7 @@ bool TrackMouseLeave(HWND hwnd) {
     return true;
 }
 
-void TriggerRepaint(HWND hwnd) {
-    InvalidateRect(hwnd, nullptr, FALSE);
-}
-
-POINT GetCursorPosInHwnd(HWND hwnd) {
-    POINT pt = {0, 0};
-    if (GetCursorPos(&pt)) {
-        ScreenToClient(hwnd, &pt);
-    }
-    return pt;
-}
-
-// cf. http://blogs.msdn.com/b/oldnewthing/archive/2004/10/25/247180.aspx
+// http://blogs.msdn.com/b/oldnewthing/archive/2004/10/25/247180.aspx
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
 // A convenient way to grab the same value as HINSTANCE passed to WinMain
@@ -2106,49 +2653,41 @@ HINSTANCE GetInstance() {
     return (HINSTANCE)&__ImageBase;
 }
 
-void HwndDpiAdjust(HWND hwnd, float* x, float* y) {
-    auto dpi = DpiGet(hwnd);
-
-    if (x != nullptr) {
-        float dpiFactor = (float)dpi / 96.f;
-        *x = *x * dpiFactor;
-    }
-
-    if (y != nullptr) {
-        float dpiFactor = (float)dpi / 96.f;
-        *y = *y * dpiFactor;
-    }
-}
-
 Size ButtonGetIdealSize(HWND hwnd) {
     // adjust to real size and position to the right
     SIZE s{};
     Button_GetIdealSize(hwnd, &s);
     // add padding
-    float xPadding = 8 * 2;
-    float yPadding = 2 * 2;
-    HwndDpiAdjust(hwnd, &xPadding, &yPadding);
-    s.cx += (int)xPadding;
-    s.cy += (int)yPadding;
+    int xPadding = DpiScale(hwnd, 8 * 2);
+    int yPadding = DpiScale(hwnd, 2 * 2);
+    s.cx += xPadding;
+    s.cy += yPadding;
     Size res = {s.cx, s.cy};
     return res;
 }
 
-std::tuple<const u8*, DWORD, HGLOBAL> LockDataResource(int id) {
-    auto h = GetModuleHandleW(nullptr);
-    WCHAR* name = MAKEINTRESOURCEW(id);
-    HRSRC resSrc = FindResourceW(h, name, RT_RCDATA);
-    if (!resSrc) {
-        return {nullptr, 0, 0};
-    }
-    HGLOBAL res = LoadResource(nullptr, resSrc);
-    if (!res) {
-        return {nullptr, 0, 0};
+constexpr int kResourceNotFound = -1;
+
+bool LockDataResource(int resId, LoadedDataResource* res) {
+    if (res->dataSize != 0) {
+        return res->dataSize != kResourceNotFound;
     }
 
-    auto* data = (const u8*)LockResource(res);
-    DWORD dataSize = SizeofResource(nullptr, resSrc);
-    return {data, dataSize, res};
+    auto h = GetModuleHandleW(nullptr);
+    WCHAR* name = MAKEINTRESOURCEW(resId);
+    HRSRC resSrc = FindResourceW(h, name, RT_RCDATA);
+    if (!resSrc) {
+        res->dataSize = kResourceNotFound;
+        return false;
+    }
+    HGLOBAL hres = LoadResource(nullptr, resSrc);
+    if (!hres) {
+        res->dataSize = kResourceNotFound;
+        return false;
+    }
+    res->data = (const u8*)LockResource(hres);
+    res->dataSize = (int)SizeofResource(nullptr, resSrc);
+    return true;
 }
 
 bool IsValidDelayType(int type) {
@@ -2162,17 +2701,33 @@ bool IsValidDelayType(int type) {
     return false;
 }
 
-void HwndSetText(HWND hwnd, std::string_view sv) {
+void HwndSetText(HWND hwnd, const char* sv) {
     // can be called before a window is created
     if (!hwnd) {
         return;
     }
-    if (sv.empty()) {
+    if (str::IsEmpty(sv)) {
         SendMessageW(hwnd, WM_SETTEXT, 0, (LPARAM)L"");
         return;
     }
-    AutoFreeWstr ws = strconv::Utf8ToWstr(sv);
-    SendMessageW(hwnd, WM_SETTEXT, 0, (LPARAM)ws.Get());
+    TempWStr ws = ToWStrTemp(sv);
+    SendMessageW(hwnd, WM_SETTEXT, 0, (LPARAM)ws);
+}
+
+void HwndSetDlgItemText(HWND hDlg, int itemID, const char* s) {
+    TempWStr ws = ToWStrTemp(s);
+    SetDlgItemTextW(hDlg, itemID, ws);
+}
+
+// hwnd should be Combo Box control
+void CbAddString(HWND hwnd, const char* s) {
+    TempWStr ws = ToWStrTemp(s);
+    SendMessageW(hwnd, CB_ADDSTRING, 0, (LPARAM)ws);
+}
+
+// hwnd should be Combo Box control
+void CbSetCurrentSelection(HWND hwnd, int selIdx) {
+    SendMessageW(hwnd, CB_SETCURSEL, (WPARAM)selIdx, 0);
 }
 
 // https://docs.microsoft.com/en-us/windows/win32/winmsg/wm-seticon
@@ -2190,10 +2745,22 @@ HICON HwndGetIcon(HWND hwnd) {
     return res;
 }
 
-void HwndInvalidate(HWND hwnd) {
-    if (hwnd) {
-        InvalidateRect(hwnd, nullptr, FALSE);
+// schedule WM_PAINT at window's leasure
+void HwndScheduleRepaint(HWND hwnd) {
+    if (!hwnd || !::IsWindow(hwnd)) {
+        return;
     }
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// do WM_PAINT immediately
+void HwndRepaintNow(HWND hwnd) {
+    if (!hwnd || !::IsWindow(hwnd)) {
+        return;
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+    // send WM_PAINT right away (normally would wait for empty msg queue)
+    UpdateWindow(hwnd);
 }
 
 void HwndSetFont(HWND hwnd, HFONT font) {
@@ -2211,26 +2778,20 @@ HFONT HwndGetFont(HWND hwnd) {
     return res;
 }
 
-/* Return size of a text <txt> in a given <hwnd>, taking into account its font */
-Size HwndMeasureText(HWND hwnd, const WCHAR* txt, HFONT font) {
-    SIZE sz{};
-    size_t txtLen = str::Len(txt);
-    HDC dc = GetWindowDC(hwnd);
-    /* GetWindowDC() returns dc with default state, so we have to first set
-       window's current font into dc */
-    if (font == nullptr) {
-        font = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
-    }
-    HGDIOBJ prev = SelectObject(dc, font);
-
-    RECT r{};
-    uint fmt = DT_CALCRECT | DT_LEFT | DT_NOCLIP | DT_EDITCONTROL;
-    DrawTextExW(dc, (WCHAR*)txt, (int)txtLen, &r, fmt, nullptr);
-    SelectObject(dc, prev);
-    ReleaseDC(hwnd, dc);
-    int dx = RectDx(r);
-    int dy = RectDy(r);
-    return {dx, dy};
+// change size of the window to have a given client size
+void HwndResizeClientSize(HWND hwnd, int dx, int dy) {
+    Rect rc = WindowRect(hwnd);
+    int x = rc.x;
+    int y = rc.y;
+    DWORD style = GetWindowStyle(hwnd);
+    DWORD exStyle = GetWindowExStyle(hwnd);
+    RECT r = {x, y, x + dx, y + dy};
+    BOOL ok = AdjustWindowRectEx(&r, style, false, exStyle);
+    ReportIf(!ok);
+    int dx2 = RectDx(r);
+    int dy2 = RectDy(r);
+    ok = SetWindowPos(hwnd, nullptr, 0, 0, dx2, dy2, SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOREPOSITION);
+    ReportIf(!ok);
 }
 
 // position hwnd on the right of hwndRelative
@@ -2244,17 +2805,38 @@ void HwndPositionToTheRightOf(HWND hwnd, HWND hwndRelative) {
     if (dyDiff > 0) {
         rHwnd.y += dyDiff / 2;
     }
-    Rect r = ShiftRectToWorkArea(rHwnd, true);
-    SetWindowPos(hwnd, 0, r.x, r.y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+    Rect r = ShiftRectToWorkArea(rHwnd, hwndRelative, true);
+    SetWindowPos(hwnd, nullptr, r.x, r.y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+}
+
+void HwndPositionInCenterOf(HWND hwnd, HWND hwndRelative) {
+    Rect rRelative = WindowRect(hwndRelative);
+    Rect r = WindowRect(hwnd);
+    int x = rRelative.x + (rRelative.dx / 2) - (r.dx / 2);
+    int y = rRelative.y + (rRelative.dy / 2) - (r.dy / 2);
+
+    Rect r2 = {x, y, r.dx, r.dy};
+    r = ShiftRectToWorkArea(r2, hwndRelative, true);
+    SetWindowPos(hwnd, nullptr, r.x, r.y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
 }
 
 void HwndSendCommand(HWND hwnd, int cmdId) {
     SendMessageW(hwnd, WM_COMMAND, (WPARAM)cmdId, 0);
 }
 
+void HwndDestroyWindowSafe(HWND* hwndPtr) {
+    auto hwnd = *hwndPtr;
+    *hwndPtr = nullptr;
+
+    if (!hwnd || !::IsWindow(hwnd)) {
+        return;
+    }
+    ::DestroyWindow(hwnd);
+}
+
 void TbSetButtonInfo(HWND hwnd, int buttonId, TBBUTTONINFO* info) {
     auto res = SendMessageW(hwnd, TB_SETBUTTONINFO, buttonId, (LPARAM)info);
-    CrashIf(0 == res);
+    ReportDebugIf(0 == res);
 }
 
 void TbGetPadding(HWND hwnd, int* padX, int* padY) {
@@ -2266,13 +2848,13 @@ void TbGetPadding(HWND hwnd, int* padX, int* padY) {
 void TbSetPadding(HWND hwnd, int padX, int padY) {
     LPARAM lp = MAKELPARAM(padX, padY);
     auto res = SendMessageW(hwnd, TB_SETPADDING, 0, lp);
-    CrashIf(0 == res);
+    ReportIf(0 == res);
 }
 
 // https://docs.microsoft.com/en-us/windows/win32/controls/tb-getrect
 void TbGetRect(HWND hwnd, int buttonId, RECT* rc) {
     auto res = SendMessageW(hwnd, TB_GETRECT, buttonId, (LPARAM)rc);
-    CrashIf(res == 0);
+    ReportIf(res == 0);
 }
 
 void TbGetMetrics(HWND hwnd, TBMETRICS* metrics) {
@@ -2283,4 +2865,323 @@ void TbGetMetrics(HWND hwnd, TBMETRICS* metrics) {
 void TbSetMetrics(HWND hwnd, TBMETRICS* metrics) {
     LPARAM lp = (LPARAM)metrics;
     SendMessageW(hwnd, TB_SETMETRICS, 0, lp);
+}
+
+bool DeleteObjectSafe(HGDIOBJ* h) {
+    if (!h || !*h) {
+        return false;
+    }
+    auto res = ::DeleteObject(*h);
+    *h = nullptr;
+    return ToBool(res);
+}
+
+bool DeleteBrushSafe(HBRUSH* br) {
+    return DeleteObjectSafe((HGDIOBJ*)br);
+}
+
+bool DestroyIconSafe(HICON* h) {
+    if (!h || !*h) {
+        return false;
+    }
+    auto res = ::DestroyIcon(*h);
+    *h = nullptr;
+    return ToBool(res);
+}
+
+int HdcDrawText(HDC hdc, const char* s, RECT* r, uint fmt, HFONT font) {
+    if (!s) {
+        return 0;
+    }
+    TempWStr ws = ToWStrTemp(s);
+    if (!ws) {
+        return 0;
+    }
+    int cch = (int)str::Len(ws);
+    ScopedSelectFont f(hdc, font);
+    return DrawTextW(hdc, ws, cch, r, fmt);
+}
+
+int HdcDrawText(HDC hdc, const char* s, const Rect& r, uint fmt, HFONT font) {
+    RECT r2 = ToRECT(r);
+    return HdcDrawText(hdc, s, &r2, fmt, font);
+}
+
+int HdcDrawText(HDC hdc, const char* s, const Point& pos, uint fmt, HFONT font) {
+    Rect r = {pos.x, pos.y, 0, 0};
+    RECT r2 = ToRECT(r);
+    return HdcDrawText(hdc, s, &r2, fmt, font);
+}
+
+// uses the same logic as HdcDrawText
+Size HdcMeasureText(HDC hdc, const char* s, uint fmt, HFONT font) {
+    fmt |= DT_CALCRECT;
+    TempWStr ws = ToWStrTemp(s);
+    if (!ws) {
+        return {};
+    }
+
+    ScopedSelectFont f(hdc, font);
+    HGDIOBJ origFont = nullptr;
+    if (font) {
+        origFont = SelectObject(hdc, font);
+    }
+    int sLen = (int)str::Len(ws);
+    // pick a very large area
+    // TODO: allow limiting by dx
+    RECT rc{0, 0, 4096, 4096};
+    int dy = DrawTextW(hdc, ws, sLen, &rc, fmt);
+    if (font) {
+        SelectObject(hdc, origFont);
+    }
+    if (0 == dy) {
+        return {};
+    }
+    int dx = RectDx(rc);
+    int dy2 = RectDy(rc);
+    if (dy2 > dy) {
+        dy = dy2;
+    }
+    return Size(dx, dy);
+}
+
+Size HdcMeasureText(HDC hdc, const char* s, HFONT font) {
+    // DT_LEFT - left-aligned
+    // DT_NOCLIP - is faster, no clipping
+    // DT_NOPREFIX - doesn't process & to underline next char
+    uint fmt = DT_LEFT | DT_NOCLIP | DT_NOPREFIX;
+    return HdcMeasureText(hdc, s, fmt, font);
+}
+
+void DrawCenteredText(HDC hdc, const Rect r, const char* txt, bool isRTL) {
+    TempWStr ws = ToWStrTemp(txt);
+    int prevMode = SetBkMode(hdc, TRANSPARENT);
+    RECT tmpRect = ToRECT(r);
+    uint format = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
+    if (isRTL) {
+        format |= DT_RTLREADING;
+    }
+    DrawTextW(hdc, ws, -1, &tmpRect, format);
+    if (prevMode != 0) {
+        SetBkMode(hdc, prevMode);
+    }
+}
+
+/* Return size of a text <txt> in a given <hwnd>, taking into account its font */
+static Size HwndMeasureText(HWND hwnd, const WCHAR* txt, HFONT font) {
+    if (!txt || !*txt) {
+        return Size{};
+    }
+    AutoReleaseDC dc(hwnd);
+    /* GetWindowDC() returns dc with default state, so we have to first set
+       window's current font into dc */
+    if (font == nullptr) {
+        font = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
+    }
+    ScopedSelectFont prev(dc, font);
+
+    RECT r{};
+    // TODO: DT_EDITCONTROL is probably not correct here
+    // TODO: what about DT_NOPREFIX?
+    uint fmt = DT_CALCRECT | DT_LEFT | DT_NOCLIP | DT_EDITCONTROL;
+    size_t txtLen = str::Len(txt);
+    DrawTextExW(dc, (WCHAR*)txt, (int)txtLen, &r, fmt, nullptr);
+
+    int dx = RectDx(r);
+    int dy = RectDy(r);
+    return {dx, dy};
+}
+
+/* Return size of a text <txt> in a given <hwnd>, taking into account its font */
+Size HwndMeasureText(HWND hwnd, const char* txt, HFONT font) {
+    if (!txt || !*txt) {
+        return Size{};
+    }
+    TempWStr sw = ToWStrTemp(txt);
+    return HwndMeasureText(hwnd, sw, font);
+}
+
+// return approximate height of font in pixels
+int FontDyPx(HWND hwnd, HFONT hfont) {
+    Size s = HwndMeasureText(hwnd, "A", hfont);
+    return s.dy;
+}
+
+void TreeViewExpandRecursively(HWND hTree, HTREEITEM hItem, uint flag, bool subtree) {
+    while (hItem) {
+        TreeView_Expand(hTree, hItem, flag);
+        HTREEITEM child = TreeView_GetChild(hTree, hItem);
+        if (child) {
+            TreeViewExpandRecursively(hTree, child, flag, false);
+        }
+        if (subtree) {
+            break;
+        }
+        hItem = TreeView_GetNextSibling(hTree, hItem);
+    }
+}
+
+void AddPathToRecentDocs(const char* path) {
+    WCHAR* pathW = ToWStrTemp(path);
+    SHAddToRecentDocs(SHARD_PATH, pathW);
+}
+
+TempStr HGLOBALToStrTemp(HGLOBAL h, bool isUnicode) {
+    void* mem = GlobalLock(h);
+    if (!mem) {
+        return nullptr;
+    }
+
+    TempStr res;
+    if (isUnicode) {
+        res = ToUtf8Temp((WCHAR*)mem);
+    } else {
+        res = str::DupTemp((char*)mem);
+    }
+    GlobalUnlock(h);
+    return res;
+}
+
+HGLOBAL MemToHGLOBAL(void* src, int n, UINT flags) {
+    HGLOBAL h = GlobalAlloc(flags, n);
+    if (!h) {
+        return 0;
+    }
+    void* d = GlobalLock(h);
+    if (d) {
+        memcpy(d, src, n);
+    }
+    GlobalUnlock(h);
+    return h;
+}
+
+HGLOBAL StrToHGLOBAL(const char* s, UINT flags) {
+    int cb = (int)str::Len(s) + 1;
+    return MemToHGLOBAL((void*)s, cb, flags);
+}
+
+TempStr AtomToStrTemp(ATOM a) {
+    WCHAR buf[1024];
+    UINT cch = GlobalGetAtomNameW(a, buf, dimofi(buf));
+    if (cch == 0) {
+        return nullptr;
+    }
+    return ToUtf8Temp(buf, cch);
+}
+
+int MsgBox(HWND hwnd, const char* text, const char* caption, UINT flags) {
+    TempWStr textW = ToWStrTemp(text);
+    TempWStr captionW = ToWStrTemp(caption);
+    return MessageBoxW(hwnd, textW, captionW, flags);
+}
+
+// https://learn.microsoft.com/en-us/cpp/intrinsics/cpuid-cpuidex?view=msvc-170
+u32 CpuID() {
+#if IS_ARM_64
+    return 0;
+#else
+    std::bitset<32> f_1_ECX_;
+    std::bitset<32> f_1_EDX_;
+    std::bitset<32> f_7_EBX_;
+    std::bitset<32> f_7_ECX_;
+
+    u32 res = 0;
+    int cpuInfo[4]{};
+    __cpuid(cpuInfo, 0);
+    int nIds = cpuInfo[0];
+    if (nIds >= 1) {
+        __cpuid(cpuInfo, 1);
+        f_1_ECX_ = cpuInfo[2];
+        f_1_EDX_ = cpuInfo[3];
+    }
+    if (nIds >= 7) {
+        __cpuid(cpuInfo, 7);
+        f_7_EBX_ = cpuInfo[1];
+        f_7_ECX_ = cpuInfo[2];
+    }
+
+    if (f_1_EDX_[23]) {
+        res = res | kCpuMMX;
+    }
+    if (f_1_EDX_[25]) {
+        res = res | kCpuSSE;
+    }
+    if (f_1_EDX_[26]) {
+        res = res | kCpuSSE2;
+    }
+    if (f_1_ECX_[0]) {
+        res = res | kCpuSSE3;
+    }
+    if (f_1_ECX_[9]) {
+        res = res | kCpuSSE3;
+    }
+    if (f_1_ECX_[19]) {
+        res = res | kCpuSSE41;
+    }
+    if (f_1_ECX_[20]) {
+        res = res | kCpuSSE42;
+    }
+    if (f_1_ECX_[28]) {
+        res = res | kCpuAVX;
+    }
+    if (f_7_EBX_[5]) {
+        res = res | kCpuAVX2;
+    }
+    return res;
+#endif
+}
+
+LARGE_INTEGER TimeNow() {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return now;
+}
+
+double TimeDiffSecs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    auto diff = end.QuadPart - start.QuadPart;
+    double res = (double)(diff) / (double)(freq.QuadPart);
+    return res;
+}
+
+double TimeDiffMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    auto diff = end.QuadPart - start.QuadPart;
+    double res = (double)(diff) / (double)(freq.QuadPart);
+    return res * 1000;
+}
+
+bool IsPEFileSigned(const char* filePath) {
+    TempWStr ws = ToWStrTemp(filePath);
+    WINTRUST_FILE_INFO fileInfo = {0};
+    fileInfo.cbStruct = sizeof(WINTRUST_FILE_INFO);
+    fileInfo.pcwszFilePath = ws;
+    fileInfo.hFile = NULL;
+    fileInfo.pgKnownSubject = NULL;
+
+    GUID actionGUID = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    WINTRUST_DATA trustData = {0};
+
+    trustData.cbStruct = sizeof(WINTRUST_DATA);
+    trustData.pPolicyCallbackData = NULL;
+    trustData.pSIPClientData = NULL;
+    trustData.dwUIChoice = WTD_UI_NONE;
+    trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trustData.dwUnionChoice = WTD_CHOICE_FILE;
+    trustData.dwStateAction = WTD_STATEACTION_IGNORE;
+    trustData.hWVTStateData = NULL;
+    trustData.pwszURLReference = NULL;
+    trustData.dwProvFlags = WTD_SAFER_FLAG;
+    trustData.dwUIContext = 0;
+    trustData.pFile = &fileInfo;
+
+    LONG status = WinVerifyTrust(NULL, &actionGUID, &trustData);
+
+    if (status == ERROR_SUCCESS) {
+        return true; // File is signed and signature is valid
+    } else {
+        return false; // File is not signed or signature is not valid
+    }
 }

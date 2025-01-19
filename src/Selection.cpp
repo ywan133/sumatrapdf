@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 #include "utils/BaseUtil.h"
@@ -8,14 +8,14 @@
 #include "utils/Dpi.h"
 #include "utils/WinUtil.h"
 
-#include "wingui/TreeModel.h"
+#include "utils/Log.h"
 
-#include "Annotation.h"
+#include "wingui/UIModels.h"
+
+#include "Settings.h"
+#include "DocController.h"
 #include "EngineBase.h"
-#include "EngineCreate.h"
-#include "DisplayMode.h"
-#include "SettingsStructs.h"
-#include "Controller.h"
+#include "EngineAll.h"
 #include "GlobalPrefs.h"
 #include "ChmModel.h"
 #include "DisplayModel.h"
@@ -24,14 +24,14 @@
 #include "Notifications.h"
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
-#include "WindowInfo.h"
-#include "TabInfo.h"
+#include "MainWindow.h"
+#include "WindowTab.h"
 #include "Selection.h"
 #include "Toolbar.h"
 #include "Translations.h"
 #include "uia/Provider.h"
 
-SelectionOnPage::SelectionOnPage(int pageNo, RectF* rect) {
+SelectionOnPage::SelectionOnPage(int pageNo, const RectF* const rect) {
     this->pageNo = pageNo;
     if (rect) {
         this->rect = *rect;
@@ -40,7 +40,7 @@ SelectionOnPage::SelectionOnPage(int pageNo, RectF* rect) {
     }
 }
 
-Rect SelectionOnPage::GetRect(DisplayModel* dm) {
+Rect SelectionOnPage::GetRect(DisplayModel* dm) const {
     // if the page is not visible, we return an empty rectangle
     PageInfo* pageInfo = dm->GetPageInfo(pageNo);
     if (!pageInfo || pageInfo->visibleRatio <= 0.0) {
@@ -55,7 +55,7 @@ Vec<SelectionOnPage>* SelectionOnPage::FromRectangle(DisplayModel* dm, Rect rect
 
     for (int pageNo = dm->GetEngine()->PageCount(); pageNo >= 1; --pageNo) {
         PageInfo* pageInfo = dm->GetPageInfo(pageNo);
-        CrashIf(!(!pageInfo || 0.0 == pageInfo->visibleRatio || pageInfo->shown));
+        ReportIf(!(!pageInfo || 0.0 == pageInfo->visibleRatio || pageInfo->shown));
         if (!pageInfo || !pageInfo->shown) {
             continue;
         }
@@ -82,7 +82,7 @@ Vec<SelectionOnPage>* SelectionOnPage::FromTextSelect(TextSel* textSel) {
     Vec<SelectionOnPage>* sel = new Vec<SelectionOnPage>(textSel->len);
 
     for (int i = textSel->len - 1; i >= 0; i--) {
-        RectF rect = ToRectFl(textSel->rects[i]);
+        RectF rect = ToRectF(textSel->rects[i]);
         sel->Append(SelectionOnPage(textSel->pages[i], &rect));
     }
     sel->Reverse();
@@ -94,10 +94,10 @@ Vec<SelectionOnPage>* SelectionOnPage::FromTextSelect(TextSel* textSel) {
     return sel;
 }
 
-void DeleteOldSelectionInfo(WindowInfo* win, bool alsoTextSel) {
+void DeleteOldSelectionInfo(MainWindow* win, bool alsoTextSel) {
     win->showSelection = false;
     win->selectionMeasure = SizeF();
-    TabInfo* tab = win->currentTab;
+    WindowTab* tab = win->CurrentTab();
     if (!tab) {
         return;
     }
@@ -124,7 +124,7 @@ void PaintTransparentRectangles(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLORR
     // fill path (and draw optional outline margin)
     Gdiplus::Graphics gs(hdc);
     u8 r, g, b;
-    UnpackRgb(selectionColor, r, g, b);
+    UnpackColor(selectionColor, r, g, b);
     Gdiplus::Color c(alpha, r, g, b);
     Gdiplus::SolidBrush tmpBrush(c);
     gs.FillPath(&tmpBrush, &path);
@@ -135,8 +135,8 @@ void PaintTransparentRectangles(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLORR
     }
 }
 
-void PaintSelection(WindowInfo* win, HDC hdc) {
-    CrashIf(!win->AsFixed());
+void PaintSelection(MainWindow* win, HDC hdc) {
+    ReportIf(!win->AsFixed());
 
     Vec<Rect> rects;
 
@@ -157,33 +157,35 @@ void PaintSelection(WindowInfo* win, HDC hdc) {
         // during text selection or after selection is done
         if (MouseAction::SelectingText == win->mouseAction) {
             UpdateTextSelection(win);
-            if (!win->currentTab->selectionOnPage) {
+            if (!win->CurrentTab()->selectionOnPage) {
                 // prevent the selection from disappearing while the
                 // user is still at it (OnSelectionStop removes it
                 // if it is still empty at the end)
-                win->currentTab->selectionOnPage = new Vec<SelectionOnPage>();
+                win->CurrentTab()->selectionOnPage = new Vec<SelectionOnPage>();
                 win->showSelection = true;
             }
         }
 
-        CrashIf(!win->currentTab->selectionOnPage);
-        if (!win->currentTab->selectionOnPage) {
+        ReportDebugIf(!win->CurrentTab()->selectionOnPage);
+        if (!win->CurrentTab()->selectionOnPage) {
             return;
         }
 
-        for (SelectionOnPage& sel : *win->currentTab->selectionOnPage) {
+        for (SelectionOnPage& sel : *win->CurrentTab()->selectionOnPage) {
             rects.Append(sel.GetRect(win->AsFixed()));
         }
     }
 
-    PaintTransparentRectangles(hdc, win->canvasRc, rects, gGlobalPrefs->fixedPageUI.selectionColor);
+    ParsedColor* parsedCol = GetPrefsColor(gGlobalPrefs->fixedPageUI.selectionColor);
+    PaintTransparentRectangles(hdc, win->canvasRc, rects, parsedCol->col);
 }
 
-void UpdateTextSelection(WindowInfo* win, bool select) {
+void UpdateTextSelection(MainWindow* win, bool select) {
     if (!win->AsFixed()) {
         return;
     }
 
+    // logf("UpdateTextSelection: select: %d\n", (int)select);
     DisplayModel* dm = win->AsFixed();
     if (select) {
         int pageNo = dm->GetPageNoByPoint(win->selectionRect.BR());
@@ -194,74 +196,27 @@ void UpdateTextSelection(WindowInfo* win, bool select) {
     }
 
     DeleteOldSelectionInfo(win);
-    win->currentTab->selectionOnPage = SelectionOnPage::FromTextSelect(&dm->textSelection->result);
-    win->showSelection = win->currentTab->selectionOnPage != nullptr;
+    win->CurrentTab()->selectionOnPage = SelectionOnPage::FromTextSelect(&dm->textSelection->result);
+    win->showSelection = win->CurrentTab()->selectionOnPage != nullptr;
 
     if (win->uiaProvider) {
         win->uiaProvider->OnSelectionChanged();
     }
-}
-
-void ZoomToSelection(WindowInfo* win, float factor, bool scrollToFit, bool relative) {
-    if (!win->IsDocLoaded()) {
-        return;
-    }
-
-    Point pt;
-    bool zoomToPt = false;
-
-    if (win->AsFixed()) {
-        DisplayModel* dm = win->AsFixed();
-        // when not zooming to fit (which contradicts zooming to a specific point), ...
-        if (!relative && (ZOOM_FIT_PAGE == factor || ZOOM_FIT_CONTENT == factor) && scrollToFit) {
-            zoomToPt = false;
-        }
-        // either scroll towards the center of the current selection (if there is any) ...
-        else if (win->showSelection && win->currentTab->selectionOnPage) {
-            Rect selRect;
-            for (SelectionOnPage& sel : *win->currentTab->selectionOnPage) {
-                selRect = selRect.Union(sel.GetRect(dm));
-            }
-
-            Rect rc = ClientRect(win->hwndCanvas);
-            pt.x = 2 * selRect.x + selRect.dx - rc.dx / 2;
-            pt.y = 2 * selRect.y + selRect.dy - rc.dy / 2;
-            pt.x = limitValue(pt.x, selRect.x, selRect.x + selRect.dx);
-            pt.y = limitValue(pt.y, selRect.y, selRect.y + selRect.dy);
-
-            int pageNo = dm->GetPageNoByPoint(pt);
-            zoomToPt = dm->ValidPageNo(pageNo) && dm->PageVisible(pageNo);
-        }
-        // or towards the top-left-most part of the first visible page
-        else {
-            int page = dm->FirstVisiblePageNo();
-            PageInfo* pageInfo = dm->GetPageInfo(page);
-            if (pageInfo) {
-                Rect visible = pageInfo->pageOnScreen.Intersect(win->canvasRc);
-                pt = visible.TL();
-
-                int pageNo = dm->GetPageNoByPoint(pt);
-                zoomToPt = !visible.IsEmpty() && dm->ValidPageNo(pageNo) && dm->PageVisible(pageNo);
-            }
-        }
-    }
-
-    win->ctrl->SetZoomVirtual(factor * (relative ? win->ctrl->GetZoomVirtual(true) : 1), zoomToPt ? &pt : nullptr);
-    UpdateToolbarState(win);
+    ToolbarUpdateStateForWindow(win, false);
 }
 
 // isTextSelectionOut is set to true if this is text-only selection (as opposed to
 // rectangular selection)
 // caller needs to str::Free() the result
-WCHAR* GetSelectedText(WindowInfo* win, const WCHAR* lineSep, bool& isTextOnlySelectionOut) {
-    if (!win->currentTab || !win->currentTab->selectionOnPage) {
+TempStr GetSelectedTextTemp(WindowTab* tab, const char* lineSep, bool& isTextOnlySelectionOut) {
+    if (!tab || !tab->selectionOnPage) {
         return nullptr;
     }
-    if (win->currentTab->selectionOnPage->size() == 0) {
+    if (tab->selectionOnPage->size() == 0) {
         return nullptr;
     }
-    DisplayModel* dm = win->AsFixed();
-    CrashIf(!dm);
+    DisplayModel* dm = tab->AsFixed();
+    ReportIf(!dm);
     if (!dm) {
         return nullptr;
     }
@@ -272,24 +227,28 @@ WCHAR* GetSelectedText(WindowInfo* win, const WCHAR* lineSep, bool& isTextOnlySe
     isTextOnlySelectionOut = dm->textSelection->result.len > 0;
     if (isTextOnlySelectionOut) {
         WCHAR* s = dm->textSelection->ExtractText(lineSep);
-        return s;
+        TempStr res = ToUtf8Temp(s);
+        str::Free(s);
+        return res;
     }
-    WStrVec selections;
-    for (SelectionOnPage& sel : *win->currentTab->selectionOnPage) {
-        WCHAR* text = dm->GetTextInRegion(sel.pageNo, sel.rect);
+    StrVec selections;
+    for (SelectionOnPage& sel : *tab->selectionOnPage) {
+        char* text = dm->GetTextInRegion(sel.pageNo, sel.rect);
         if (!str::IsEmpty(text)) {
             selections.Append(text);
         }
+        str::Free(text);
     }
-    if (selections.size() == 0) {
+    if (selections.Size() == 0) {
         return nullptr;
     }
-    WCHAR* s = selections.Join(lineSep);
+    TempStr s = JoinTemp(&selections, lineSep);
     return s;
 }
 
-void CopySelectionToClipboard(WindowInfo* win) {
-    CrashIf(win->currentTab->selectionOnPage->size() == 0 && win->mouseAction != MouseAction::SelectingText);
+void CopySelectionToClipboard(MainWindow* win) {
+    WindowTab* tab = win->CurrentTab();
+    ReportIf(tab->selectionOnPage->size() == 0 && win->mouseAction != MouseAction::SelectingText);
 
     if (!OpenClipboard(nullptr)) {
         return;
@@ -299,29 +258,32 @@ void CopySelectionToClipboard(WindowInfo* win) {
         CloseClipboard();
     };
 
-    WCHAR* selText = nullptr;
+    DisplayModel* dm = win->AsFixed();
+    TempStr selText = nullptr;
     bool isTextOnlySelectionOut = false;
-    if (!gDisableDocumentRestrictions && !win->AsFixed()->GetEngine()->AllowsCopyingText()) {
-        win->ShowNotification(_TR("Copying text was denied (copying as image only)"));
+    if (!gDisableDocumentRestrictions && (dm && !dm->GetEngine()->AllowsCopyingText())) {
+        NotificationCreateArgs args;
+        args.hwndParent = win->hwndCanvas;
+        args.msg = _TRA("Copying text was denied (copying as image only)");
+        ShowNotification(args);
     } else {
-        selText = GetSelectedText(win, L"\r\n", isTextOnlySelectionOut);
+        selText = GetSelectedTextTemp(tab, "\r\n", isTextOnlySelectionOut);
     }
 
-    // don't copy empty text
     if (!str::IsEmpty(selText)) {
-        CopyTextToClipboard(selText, true);
+        AppendTextToClipboard(selText);
     }
+
     if (isTextOnlySelectionOut) {
         // don't also copy the first line of a text selection as an image
         return;
     }
 
-    DisplayModel* dm = win->AsFixed();
-    if (!dm || !win->currentTab->selectionOnPage || win->currentTab->selectionOnPage->size() == 0) {
+    if (!dm || !tab->selectionOnPage || tab->selectionOnPage->size() == 0) {
         return;
     }
     /* also copy a screenshot of the current selection to the clipboard */
-    SelectionOnPage* selOnPage = &win->currentTab->selectionOnPage->at(0);
+    SelectionOnPage* selOnPage = &tab->selectionOnPage->at(0);
     float zoom = dm->GetZoomReal(selOnPage->pageNo);
     int rotation = dm->GetRotation();
     RenderPageArgs args(selOnPage->pageNo, zoom, rotation, &selOnPage->rect, RenderTarget::Export);
@@ -332,13 +294,13 @@ void CopySelectionToClipboard(WindowInfo* win) {
     delete bmp;
 }
 
-void OnSelectAll(WindowInfo* win, bool textOnly) {
-    if (!HasPermission(Perm_CopySelection)) {
+void OnSelectAll(MainWindow* win, bool textOnly) {
+    if (!HasPermission(Perm::CopySelection)) {
         return;
     }
 
-    if (IsFocused(win->hwndFindBox) || IsFocused(win->hwndPageBox)) {
-        Edit_SelectAll(GetFocus());
+    if (HwndIsFocused(win->hwndFindEdit) || HwndIsFocused(win->hwndPageEdit)) {
+        EditSelectAll(GetFocus());
         return;
     }
 
@@ -366,22 +328,22 @@ void OnSelectAll(WindowInfo* win, bool textOnly) {
     } else {
         DeleteOldSelectionInfo(win, true);
         win->selectionRect = Rect::FromXY(INT_MIN / 2, INT_MIN / 2, INT_MAX, INT_MAX);
-        win->currentTab->selectionOnPage = SelectionOnPage::FromRectangle(dm, win->selectionRect);
+        win->CurrentTab()->selectionOnPage = SelectionOnPage::FromRectangle(dm, win->selectionRect);
     }
 
-    win->showSelection = win->currentTab->selectionOnPage != nullptr;
-    RepaintAsync(win, 0);
+    win->showSelection = win->CurrentTab()->selectionOnPage != nullptr;
+    ScheduleRepaint(win, 0);
 }
 
 #define SELECT_AUTOSCROLL_AREA_WIDTH DpiScale(win->hwndFrame, 15)
 #define SELECT_AUTOSCROLL_STEP_LENGTH DpiScale(win->hwndFrame, 10)
 
-bool NeedsSelectionEdgeAutoscroll(WindowInfo* win, int x, int y) {
+bool NeedsSelectionEdgeAutoscroll(MainWindow* win, int x, int y) {
     return x < SELECT_AUTOSCROLL_AREA_WIDTH || x > win->canvasRc.dx - SELECT_AUTOSCROLL_AREA_WIDTH ||
            y < SELECT_AUTOSCROLL_AREA_WIDTH || y > win->canvasRc.dy - SELECT_AUTOSCROLL_AREA_WIDTH;
 }
 
-void OnSelectionEdgeAutoscroll(WindowInfo* win, int x, int y) {
+void OnSelectionEdgeAutoscroll(MainWindow* win, int x, int y) {
     int dx = 0, dy = 0;
 
     if (x < SELECT_AUTOSCROLL_AREA_WIDTH) {
@@ -395,9 +357,9 @@ void OnSelectionEdgeAutoscroll(WindowInfo* win, int x, int y) {
         dy = SELECT_AUTOSCROLL_STEP_LENGTH;
     }
 
-    CrashIf(NeedsSelectionEdgeAutoscroll(win, x, y) != (dx != 0 || dy != 0));
+    ReportIf(NeedsSelectionEdgeAutoscroll(win, x, y) != (dx != 0 || dy != 0));
     if (dx != 0 || dy != 0) {
-        CrashIf(!win->AsFixed());
+        ReportIf(!win->AsFixed());
         DisplayModel* dm = win->AsFixed();
         Point oldOffset = dm->GetViewPort().TL();
         win->MoveDocBy(dx, dy);
@@ -411,8 +373,8 @@ void OnSelectionEdgeAutoscroll(WindowInfo* win, int x, int y) {
     }
 }
 
-void OnSelectionStart(WindowInfo* win, int x, int y, [[maybe_unused]] WPARAM key) {
-    CrashIf(!win->AsFixed());
+void OnSelectionStart(MainWindow* win, int x, int y, WPARAM) {
+    ReportIf(!win->AsFixed());
     DeleteOldSelectionInfo(win, true);
 
     win->selectionRect = Rect(x, y, 0, 0);
@@ -435,10 +397,10 @@ void OnSelectionStart(WindowInfo* win, int x, int y, [[maybe_unused]] WPARAM key
 
     SetCapture(win->hwndCanvas);
     SetTimer(win->hwndCanvas, SMOOTHSCROLL_TIMER_ID, SMOOTHSCROLL_DELAY_IN_MS, nullptr);
-    RepaintAsync(win, 0);
+    ScheduleRepaint(win, 0);
 }
 
-void OnSelectionStop(WindowInfo* win, int x, int y, bool aborted) {
+void OnSelectionStop(MainWindow* win, int x, int y, bool aborted) {
     if (GetCapture() == win->hwndCanvas) {
         ReleaseCapture();
     }
@@ -451,11 +413,11 @@ void OnSelectionStop(WindowInfo* win, int x, int y, bool aborted) {
 
     win->selectionRect = Rect::FromXY(win->selectionRect.x, win->selectionRect.y, x, y);
     if (aborted || (MouseAction::Selecting == win->mouseAction ? win->selectionRect.IsEmpty()
-                                                               : !win->currentTab->selectionOnPage)) {
+                                                               : !win->CurrentTab()->selectionOnPage)) {
         DeleteOldSelectionInfo(win, true);
     } else if (win->mouseAction == MouseAction::Selecting) {
-        win->currentTab->selectionOnPage = SelectionOnPage::FromRectangle(win->AsFixed(), win->selectionRect);
-        win->showSelection = win->currentTab->selectionOnPage != nullptr;
+        win->CurrentTab()->selectionOnPage = SelectionOnPage::FromRectangle(win->AsFixed(), win->selectionRect);
+        win->showSelection = win->CurrentTab()->selectionOnPage != nullptr;
     }
-    RepaintAsync(win, 0);
+    ScheduleRepaint(win, 0);
 }

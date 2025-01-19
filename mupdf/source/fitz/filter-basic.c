@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2022 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include <string.h>
@@ -7,7 +29,7 @@
 struct null_filter
 {
 	fz_stream *chain;
-	size_t remain;
+	uint64_t remain;
 	int64_t offset;
 	unsigned char buffer[4096];
 };
@@ -16,7 +38,7 @@ static int
 next_null(fz_context *ctx, fz_stream *stm, size_t max)
 {
 	struct null_filter *state = stm->state;
-	size_t n;
+	uint64_t n;
 
 	if (state->remain == 0)
 		return EOF;
@@ -49,7 +71,7 @@ close_null(fz_context *ctx, void *state_)
 }
 
 fz_stream *
-fz_open_null_filter(fz_context *ctx, fz_stream *chain, int len, int64_t offset)
+fz_open_null_filter(fz_context *ctx, fz_stream *chain, uint64_t len, int64_t offset)
 {
 	struct null_filter *state = fz_malloc_struct(ctx, struct null_filter);
 	state->chain = fz_keep_stream(ctx, chain);
@@ -157,7 +179,8 @@ fz_open_range_filter(fz_context *ctx, fz_stream *chain, fz_range *ranges, int nr
 struct endstream_filter
 {
 	fz_stream *chain;
-	size_t remain, extras, size;
+	uint64_t remain;
+	size_t extras, size;
 	int64_t offset;
 	int warned;
 	unsigned char buffer[4096];
@@ -270,12 +293,9 @@ close_endstream(fz_context *ctx, void *state_)
 }
 
 fz_stream *
-fz_open_endstream_filter(fz_context *ctx, fz_stream *chain, int len, int64_t offset)
+fz_open_endstream_filter(fz_context *ctx, fz_stream *chain, uint64_t len, int64_t offset)
 {
 	struct endstream_filter *state;
-
-	if (len < 0)
-		len = 0;
 
 	state = fz_malloc_struct(ctx, struct endstream_filter);
 	state->chain = fz_keep_stream(ctx, chain);
@@ -377,7 +397,7 @@ fz_concat_push_drop(fz_context *ctx, fz_stream *concat, fz_stream *chain)
 	if (state->count == state->max)
 	{
 		fz_drop_stream(ctx, chain);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Concat filter size exceeded");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "concatenated more streams than promised");
 	}
 
 	state->chain[state->count++] = chain;
@@ -463,7 +483,7 @@ next_ahxd(fz_context *ctx, fz_stream *stm, size_t max)
 		}
 		else if (!iswhite(c))
 		{
-			fz_throw(ctx, FZ_ERROR_GENERIC, "bad data in ahxd: '%c'", c);
+			fz_throw(ctx, FZ_ERROR_FORMAT, "bad data in ahxd: '%c'", c);
 		}
 	}
 	stm->rp = state->buffer;
@@ -590,7 +610,7 @@ next_a85d(fz_context *ctx, fz_stream *stm, size_t max)
 
 		else if (!iswhite(c))
 		{
-			fz_throw(ctx, FZ_ERROR_GENERIC, "bad data in a85d: '%c'", c);
+			fz_throw(ctx, FZ_ERROR_FORMAT, "bad data in a85d: '%c'", c);
 		}
 	}
 
@@ -664,7 +684,7 @@ next_rld(fz_context *ctx, fz_stream *stm, size_t max)
 				state->n = 257 - state->run;
 				state->c = fz_read_byte(ctx, state->chain);
 				if (state->c < 0)
-					fz_throw(ctx, FZ_ERROR_GENERIC, "premature end of data in run length decode");
+					fz_throw(ctx, FZ_ERROR_FORMAT, "premature end of data in run length decode");
 			}
 		}
 
@@ -674,7 +694,7 @@ next_rld(fz_context *ctx, fz_stream *stm, size_t max)
 			{
 				int c = fz_read_byte(ctx, state->chain);
 				if (c < 0)
-					fz_throw(ctx, FZ_ERROR_GENERIC, "premature end of data in run length decode");
+					fz_throw(ctx, FZ_ERROR_FORMAT, "premature end of data in run length decode");
 				*p++ = c;
 				state->n--;
 			}
@@ -711,12 +731,23 @@ close_rld(fz_context *ctx, void *state_)
 fz_stream *
 fz_open_rld(fz_context *ctx, fz_stream *chain)
 {
+	fz_stream *stm;
 	fz_rld *state = fz_malloc_struct(ctx, fz_rld);
 	state->chain = fz_keep_stream(ctx, chain);
 	state->run = 0;
 	state->n = 0;
 	state->c = 0;
-	return fz_new_stream(ctx, state, next_rld, close_rld);
+
+	stm = fz_new_stream(ctx, state, next_rld, close_rld);
+
+	/* Don't explode RLE compression bombs. */
+	if (chain->next == next_rld)
+	{
+		fz_warn(ctx, "RLE bomb defused");
+		stm->eof = 1;
+	}
+
+	return stm;
 }
 
 /* RC4 Filter */
@@ -793,7 +824,7 @@ next_aesd(fz_context *ctx, fz_stream *stm, size_t max)
 	{
 		int c = fz_read_byte(ctx, state->chain);
 		if (c < 0)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "premature end in aes filter");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "premature end in aes filter");
 		state->iv[state->ivcount++] = c;
 	}
 
@@ -806,7 +837,7 @@ next_aesd(fz_context *ctx, fz_stream *stm, size_t max)
 		if (n == 0)
 			break;
 		else if (n < 16)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "partial block in aes filter");
+			fz_throw(ctx, FZ_ERROR_FORMAT, "partial block in aes filter");
 
 		fz_aes_crypt_cbc(&state->aes, FZ_AES_DECRYPT, 16, state->iv, state->bp, state->bp);
 		state->rp = state->bp;
@@ -817,7 +848,7 @@ next_aesd(fz_context *ctx, fz_stream *stm, size_t max)
 		{
 			int pad = state->bp[15];
 			if (pad < 1 || pad > 16)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "aes padding out of range: %d", pad);
+				fz_throw(ctx, FZ_ERROR_FORMAT, "aes padding out of range: %d", pad);
 			state->wp -= pad;
 		}
 
@@ -850,7 +881,7 @@ fz_open_aesd(fz_context *ctx, fz_stream *chain, unsigned char *key, unsigned key
 	if (fz_aes_setkey_dec(&state->aes, key, keylen * 8))
 	{
 		fz_free(ctx, state);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "AES key init failed (keylen=%d)", keylen * 8);
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "aes invalid key size (%d)", keylen * 8);
 	}
 	state->ivcount = 0;
 	state->rp = state->bp;

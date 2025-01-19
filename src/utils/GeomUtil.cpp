@@ -1,4 +1,4 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2024 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "BaseUtil.h"
@@ -10,6 +10,10 @@ Point::Point(int x, int y) : x(x), y(y) {
 
 bool Point::IsEmpty() const {
     return x == 0 && y == 0;
+}
+
+bool Point::Eq(int x, int y) const {
+    return x == this->x && y == this->y;
 }
 
 bool Point::operator==(const Point& other) const {
@@ -123,21 +127,26 @@ Rect Rect::FromXY(Point TL, Point BR) {
     return FromXY(TL.x, TL.y, BR.x, BR.y);
 }
 
+bool Rect::IsZero() const {
+    return x == 0 && y == 0 && dx == 0 && dy == 0;
+}
+
 bool Rect::IsEmpty() const {
     return dx == 0 || dy == 0;
 }
 
+// endpoint-exclusive, like RECT: https://devblogs.microsoft.com/oldnewthing/20040218-00/?p=40563
 bool Rect::Contains(int x, int y) const {
     if (x < this->x) {
         return false;
     }
-    if (x > this->x + this->dx) {
+    if (x >= this->x + this->dx) {
         return false;
     }
     if (y < this->y) {
         return false;
     }
-    if (y > this->y + this->dy) {
+    if (y >= this->y + this->dy) {
         return false;
     }
     return true;
@@ -147,6 +156,7 @@ bool Rect::Contains(Point pt) const {
     return Contains(pt.x, pt.y);
 }
 
+// TODO: check that it's endpoint-exclusive https://devblogs.microsoft.com/oldnewthing/20040218-00/?p=40563
 /* Returns an empty rectangle if there's no intersection (see IsEmpty). */
 Rect Rect::Intersect(Rect other) const {
     /* The intersection starts with the larger of the start coordinates
@@ -163,6 +173,7 @@ Rect Rect::Intersect(Rect other) const {
     return {_x, _y, _dx, _dy};
 }
 
+// TODO: check that it's endpoint-exclusive https://devblogs.microsoft.com/oldnewthing/20040218-00/?p=40563
 Rect Rect::Union(Rect other) const {
     if (this->dx <= 0 && this->dy <= 0) {
         return other;
@@ -193,6 +204,18 @@ void Rect::Inflate(int _x, int _y) {
     dy += 2 * _y;
 }
 
+void Rect::SubTB(int t, int b) {
+    y += t;
+    dy -= t;
+    dy -= b;
+}
+
+void Rect::SubLR(int l, int r) {
+    x += l;
+    dx -= l;
+    dx -= r;
+}
+
 Point Rect::TL() const {
     return Point(x, y);
 }
@@ -205,8 +228,14 @@ Size Rect::Size() const {
     return {dx, dy};
 }
 
-Rect Rect::FromRECT(const RECT& rect) {
-    return FromXY(rect.left, rect.top, rect.right, rect.bottom);
+void Rect::SetSize(const struct Size& sz) {
+    dx = sz.dx;
+    dy = sz.dy;
+}
+
+void Rect::SetPos(const Point& pos) {
+    x = pos.x;
+    y = pos.y;
 }
 
 bool Rect::Equals(const Rect& other) const {
@@ -251,7 +280,7 @@ RectF::RectF(PointF pt, SizeF size) : x(pt.x), y(pt.y), dx(size.dx), dy(size.dy)
 RectF::RectF(PointF min, PointF max) : x(min.x), y(min.y), dx(max.x - min.x), dy(max.y - min.y) {
 }
 
-bool RectF::EqSize(float otherDx, float otherDy) {
+bool RectF::EqSize(float otherDx, float otherDy) const {
     return (dx == otherDx) && (dy == otherDy);
 }
 
@@ -286,24 +315,26 @@ bool RectF::IsEmpty() const {
     return dx == 0 || dy == 0;
 }
 
-bool RectF::Contains(PointF pt) {
+// endpoint-exclusive, like RECT: https://devblogs.microsoft.com/oldnewthing/20040218-00/?p=40563
+bool RectF::Contains(PointF pt) const {
     if (pt.x < this->x) {
         return false;
     }
-    if (pt.x > this->x + this->dx) {
+    if (pt.x >= this->x + this->dx) {
         return false;
     }
     if (pt.y < this->y) {
         return false;
     }
-    if (pt.y > this->y + this->dy) {
+    if (pt.y >= this->y + this->dy) {
         return false;
     }
     return true;
 }
 
+// TODO: check that it's endpoint-exclusive https://devblogs.microsoft.com/oldnewthing/20040218-00/?p=40563
 /* Returns an empty rectangle if there's no intersection (see IsEmpty). */
-RectF RectF::Intersect(RectF other) {
+RectF RectF::Intersect(RectF other) const {
     /* The intersection starts with the larger of the start coordinates
         and ends with the smaller of the end coordinates */
     float _x = std::max(this->x, other.x);
@@ -318,6 +349,7 @@ RectF RectF::Intersect(RectF other) {
     return {_x, _y, _dx, _dy};
 }
 
+// TODO: check that it's endpoint-exclusive https://devblogs.microsoft.com/oldnewthing/20040218-00/?p=40563
 RectF RectF::Union(RectF other) {
     if (this->dx <= 0 && this->dy <= 0) {
         return other;
@@ -360,10 +392,6 @@ SizeF RectF::Size() const {
     return SizeF(dx, dy);
 }
 
-RectF RectF::FromRECT(const RECT& rect) {
-    return FromXY((float)rect.left, (float)rect.top, (float)rect.right, (float)rect.bottom);
-}
-
 bool RectF::operator==(const RectF& other) const {
     return this->x == other.x && this->y == other.y && this->dx == other.dx && this->dy == other.dy;
 }
@@ -386,6 +414,10 @@ Point ToPoint(const PointF p) {
     return Point{(int)p.x, (int)p.y};
 }
 
+POINT ToPOINT(const Point& p) {
+    return {p.x, p.y};
+}
+
 Gdiplus::PointF ToGdipPointF(const PointF p) {
     return Gdiplus::PointF(p.x, p.y);
 }
@@ -404,31 +436,27 @@ Size ToSize(const SizeF s) {
     return Size(dx, dy);
 }
 
-RectF ToRectFl(const Rect r) {
+RectF ToRectF(const Rect& r) {
     return {(float)r.x, (float)r.y, (float)r.dx, (float)r.dy};
 }
 
-RECT RECTFromRect(Gdiplus::Rect r) {
-    return {r.GetLeft(), r.GetTop(), r.GetRight(), r.GetBottom()};
-}
-
-RECT ToRECT(const Rect r) {
+RECT ToRECT(const Rect& r) {
     return {r.x, r.y, r.x + r.dx, r.y + r.dy};
 }
 
-Gdiplus::Rect ToGdipRect(const Rect r) {
+Gdiplus::Rect ToGdipRect(const Rect& r) {
     return Gdiplus::Rect(r.x, r.y, r.dx, r.dy);
 }
 
-Gdiplus::RectF ToGdipRectF(const Rect r) {
+Gdiplus::RectF ToGdipRectF(const Rect& r) {
     return Gdiplus::RectF((float)r.x, (float)r.y, (float)r.dx, (float)r.dy);
 }
 
-RECT ToRECT(const RectF r) {
+RECT ToRECT(const RectF& r) {
     return {(int)r.x, (int)r.y, (int)(r.x + r.dx), (int)(r.y + r.dy)};
 }
 
-Rect ToRect(const RectF r) {
+Rect ToRect(const RectF& r) {
     int x = (int)floor(r.x + 0.5);
     int y = (int)floor(r.y + 0.5);
     int dx = (int)floor(r.dx + 0.5);
@@ -436,11 +464,37 @@ Rect ToRect(const RectF r) {
     return Rect(x, y, dx, dy);
 }
 
-Gdiplus::Rect ToGdipRect(const RectF r) {
+int RectDx(const RECT& r) {
+    return r.right - r.left;
+}
+int RectDy(const RECT& r) {
+    return r.bottom - r.top;
+}
+
+Rect ToRect(const RECT& r) {
+    Rect r2 = {r.left, r.top, RectDx(r), RectDy(r)};
+    return r2;
+}
+
+Gdiplus::Rect ToGdipRect(const RectF& r) {
     Rect rect = ToRect(r);
     return Gdiplus::Rect(rect.x, rect.y, rect.dx, rect.dy);
 }
 
-Gdiplus::RectF ToGdipRectF(const RectF r) {
+Gdiplus::RectF ToGdipRectF(const RectF& r) {
     return Gdiplus::RectF(r.x, r.y, r.dx, r.dy);
+}
+
+int NormalizeRotation(int rotation) {
+    while (rotation < 0) {
+        rotation += 360;
+    }
+    while (rotation >= 360) {
+        rotation -= 360;
+    }
+    if ((rotation % 90) != 0) {
+        ReportIf(true);
+        return 0;
+    }
+    return rotation;
 }

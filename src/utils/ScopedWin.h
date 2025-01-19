@@ -1,3 +1,6 @@
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
+   License: Simplified BSD (see COPYING.BSD) */
+
 struct ScopedCritSec {
     CRITICAL_SECTION* cs = nullptr;
 
@@ -15,8 +18,7 @@ class AutoCloseHandle {
   public:
     AutoCloseHandle() = default;
 
-    AutoCloseHandle(HANDLE h) {
-        handle = h;
+    AutoCloseHandle(HANDLE h) : handle(h) {
     }
 
     ~AutoCloseHandle() {
@@ -26,18 +28,18 @@ class AutoCloseHandle {
     }
 
     AutoCloseHandle& operator=(HANDLE h) {
-        CrashIf(handle != nullptr);
-        CrashIf(h == nullptr);
+        ReportIf(handle != nullptr);
+        ReportIf(h == nullptr);
         handle = h;
         return *this;
     }
 
-    operator HANDLE() const {
+    operator HANDLE() const { // NOLINT
         return handle;
     }
 
     bool IsValid() const {
-        return handle != NULL && handle != INVALID_HANDLE_VALUE;
+        return handle != nullptr && handle != INVALID_HANDLE_VALUE;
     }
 };
 
@@ -57,7 +59,7 @@ class ScopedComPtr {
         }
     }
     bool Create(const CLSID clsid) {
-        CrashIf(ptr);
+        ReportIf(ptr);
         if (ptr) {
             return false;
         }
@@ -67,7 +69,7 @@ class ScopedComPtr {
     T* Get() const {
         return ptr;
     }
-    operator T*() const {
+    operator T*() const { // NOLINT
         return ptr;
     }
     T** operator&() {
@@ -76,11 +78,12 @@ class ScopedComPtr {
     T* operator->() const {
         return ptr;
     }
-    T* operator=(T* newPtr) {
+    ScopedComPtr<T>& operator=(T* newPtr) {
         if (ptr) {
             ptr->Release();
         }
-        return (ptr = newPtr);
+        ptr = newPtr;
+        return *this;
     }
 };
 
@@ -104,7 +107,7 @@ class ScopedComQIPtr {
         }
     }
     bool Create(const CLSID clsid) {
-        CrashIf(ptr);
+        ReportIf(ptr);
         if (ptr)
             return false;
         HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&ptr));
@@ -118,7 +121,7 @@ class ScopedComQIPtr {
             ptr = nullptr;
         return ptr;
     }
-    operator T*() const {
+    operator T*() const { // NOLINT
         return ptr;
     }
     T** operator&() {
@@ -134,17 +137,35 @@ class ScopedComQIPtr {
     }
 };
 
-class AutoDeleteDC {
+struct AutoDeleteDC {
     HDC hdc = nullptr;
 
-  public:
     explicit AutoDeleteDC(HDC hdc) {
         this->hdc = hdc;
     }
+    AutoDeleteDC() = default;
+
     ~AutoDeleteDC() {
         DeleteDC(hdc);
     }
-    operator HDC() const {
+    operator HDC() const { // NOLINT
+        return hdc;
+    }
+};
+
+struct AutoReleaseDC {
+    HWND hwnd = nullptr;
+    HDC hdc = nullptr;
+
+    explicit AutoReleaseDC(HWND hwnd) {
+        hdc = GetWindowDC(hwnd);
+    }
+    AutoReleaseDC() = default;
+
+    ~AutoReleaseDC() {
+        ReleaseDC(hwnd, hdc);
+    }
+    operator HDC() const { // NOLINT
         return hdc;
     }
 };
@@ -154,19 +175,18 @@ class ScopedGdiObj {
     T obj;
 
   public:
-    ScopedGdiObj(T obj) {
+    ScopedGdiObj(T obj) { // NOLINT
         this->obj = obj;
     }
     ~ScopedGdiObj() {
         DeleteObject(obj);
     }
-    operator T() const {
+    operator T() const { // NOLINT
         return obj;
     }
 };
-typedef ScopedGdiObj<HFONT> AutoDeleteFont;
-typedef ScopedGdiObj<HPEN> AutoDeletePen;
-typedef ScopedGdiObj<HBRUSH> AutoDeleteBrush;
+using AutoDeletePen = ScopedGdiObj<HPEN>;
+using AutoDeleteBrush = ScopedGdiObj<HBRUSH>;
 
 class ScopedGetDC {
     HDC hdc = nullptr;
@@ -180,43 +200,57 @@ class ScopedGetDC {
     ~ScopedGetDC() {
         ReleaseDC(hwnd, hdc);
     }
-    operator HDC() const {
+    operator HDC() const { // NOLINT
         return hdc;
     }
 };
 
 class ScopedSelectObject {
     HDC hdc = nullptr;
+    HGDIOBJ obj = nullptr;
     HGDIOBJ prev = nullptr;
 
   public:
-    ScopedSelectObject(HDC hdc, HGDIOBJ obj) : hdc(hdc) {
-        prev = SelectObject(hdc, obj);
+    ScopedSelectObject(HDC hdc, HGDIOBJ obj, bool alsoDelete = false) {
+        this->hdc = hdc;
+        this->prev = SelectObject(hdc, obj);
+        if (alsoDelete) {
+            this->obj = obj;
+        }
     }
+
     ~ScopedSelectObject() {
         SelectObject(hdc, prev);
+        if (obj) {
+            DeleteObject(obj);
+        }
     }
 };
 
 class ScopedSelectFont {
     HDC hdc = nullptr;
-    HFONT prevFont = nullptr;
+    HGDIOBJ prev = nullptr;
 
   public:
+    // font can be nullptr
     explicit ScopedSelectFont(HDC hdc, HFONT font) {
-        prevFont = (HFONT)SelectObject(hdc, font);
+        this->hdc = hdc;
+        if (font) {
+            prev = (HFONT)SelectObject(hdc, font);
+        }
     }
 
     ~ScopedSelectFont() {
-        SelectObject(hdc, prevFont);
+        if (prev) {
+            SelectObject(hdc, prev);
+        }
     }
 };
 
-class ScopedSelectPen {
+struct ScopedSelectPen {
     HDC hdc = nullptr;
     HPEN prevPen = nullptr;
 
-  public:
     explicit ScopedSelectPen(HDC hdc, HPEN pen) {
         prevPen = (HPEN)SelectObject(hdc, pen);
     }
@@ -261,9 +295,10 @@ class ScopedOle {
 
 class ScopedGdiPlus {
   protected:
-    Gdiplus::GdiplusStartupInput si;
-    Gdiplus::GdiplusStartupOutput so;
-    ULONG_PTR token, hookToken = 0;
+    Gdiplus::GdiplusStartupInput si{};
+    Gdiplus::GdiplusStartupOutput so{};
+    ULONG_PTR token = 0;
+    ULONG_PTR hookToken = 0;
     bool noBgThread = false;
 
   public:

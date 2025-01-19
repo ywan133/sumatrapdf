@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
 #include "color-imp.h"
@@ -123,7 +145,7 @@ prepare_vertex(fz_context *ctx, void *arg_, fz_vertex *v, const float *color)
 	struct shadearg *arg = arg_;
 	fz_test_device *dev = arg->dev;
 	fz_shade *shade = arg->shade;
-	if (!shade->use_function)
+	if (shade->function_stride == 0)
 		fz_test_color(ctx, dev, shade->colorspace, color, arg->color_params);
 }
 
@@ -148,11 +170,12 @@ fz_test_fill_shade(fz_context *ctx, fz_device *dev_, fz_shade *shade, fz_matrix 
 		}
 		else
 		{
-			if (shade->use_function)
+			int stride = shade->function_stride;
+			if (stride)
 			{
 				int i;
 				for (i = 0; i < 256; i++)
-					fz_test_color(ctx, dev, shade->colorspace, shade->function[i], color_params);
+					fz_test_color(ctx, dev, shade->colorspace, &shade->function[i*stride], color_params);
 			}
 			else
 			{
@@ -196,7 +219,7 @@ static void fz_test_fill_compressed_8bpc_image(fz_context *ctx, fz_test_device *
 		fz_color_converter cc;
 		unsigned int n = (unsigned int)image->n;
 
-		fz_init_cached_color_converter(ctx, &cc, image->colorspace, fz_device_rgb(ctx), NULL, color_params);
+		fz_init_cached_color_converter(ctx, &cc, image->colorspace, fz_device_rgb(ctx), NULL, NULL, color_params);
 
 		fz_try(ctx)
 		{
@@ -266,7 +289,7 @@ fz_test_fill_other_image(fz_context *ctx, fz_test_device *dev, fz_pixmap *pix, f
 		fz_color_converter cc;
 		unsigned int n = (unsigned int)pix->n-1;
 
-		fz_init_cached_color_converter(ctx, &cc, pix->colorspace, fz_device_rgb(ctx), NULL, color_params);
+		fz_init_cached_color_converter(ctx, &cc, pix->colorspace, fz_device_rgb(ctx), NULL, NULL, color_params);
 
 		fz_try(ctx)
 		{
@@ -445,12 +468,12 @@ fz_test_begin_mask(fz_context *ctx, fz_device *dev_, fz_rect rect, int luminosit
 }
 
 static void
-fz_test_end_mask(fz_context *ctx, fz_device *dev_)
+fz_test_end_mask(fz_context *ctx, fz_device *dev_, fz_function *tr)
 {
 	fz_test_device *dev = (fz_test_device*)dev_;
 
 	if (dev->passthrough)
-		fz_end_mask(ctx, dev->passthrough);
+		fz_end_mask_tr(ctx, dev->passthrough, tr);
 }
 
 static void

@@ -1,4 +1,28 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
+
+#include "pixmap-imp.h"
 
 #ifdef HAVE_JPEGXR
 
@@ -155,7 +179,7 @@ jxr_unpack_sample(fz_context *ctx, struct info *info, jxr_image_t image, int *sp
 	{
 		switch (bpc)
 		{
-		default: fz_throw(ctx, FZ_ERROR_GENERIC, "unknown sample type: %d", bpc);
+		default: fz_throw(ctx, FZ_ERROR_FORMAT, "unknown sample type: %d", bpc);
 		case JXR_BD1WHITE1: dp[k] = sp[k] ? 255 : 0; break;
 		case JXR_BD1BLACK1: dp[k] = sp[k] ? 0 : 255; break;
 		case JXR_BD5: dp[k] = sp[k] << 3; break;
@@ -191,7 +215,7 @@ jxr_unpack_alpha_sample(fz_context *ctx, struct info *info, jxr_image_t image, i
 	int bpc = jxr_get_CONTAINER_BPC(image);
 	switch (bpc)
 	{
-	default: fz_throw(ctx, FZ_ERROR_GENERIC, "unknown alpha sample type: %d", bpc);
+	default: fz_throw(ctx, FZ_ERROR_FORMAT, "unknown alpha sample type: %d", bpc);
 	case JXR_BD8: dp[0] = sp[0]; break;
 	case JXR_BD10: dp[0] = sp[0] >> 2; break;
 	case JXR_BD16: dp[0] = sp[0] >> 8; break;
@@ -282,7 +306,8 @@ jxr_read_image(fz_context *ctx, const unsigned char *data, int size, struct info
 	jxr_container_t container;
 	jxr_image_t image = NULL;
 	jxr_image_t alpha = NULL;
-	int rc, i;
+	size_t i;
+	int rc;
 
 	fz_var(image);
 	fz_var(alpha);
@@ -293,23 +318,23 @@ jxr_read_image(fz_context *ctx, const unsigned char *data, int size, struct info
 
 		rc = jxr_read_image_container_memory(container, (unsigned char *)data, size);
 		if (rc < 0)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "cannot read jxr image container: %s", jxr_error_string(rc));
+			fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot read jxr image container: %s", jxr_error_string(rc));
 
 		info->xres = jxrc_width_resolution(container, 0);
 		info->yres = jxrc_height_resolution(container, 0);
 		info->width = jxrc_image_width(container, 0);
 		info->height = jxrc_image_height(container, 0);
 
-		info->format = jxrc_image_pixelformat(container, 0);
+		info->format = (int) jxrc_image_pixelformat(container, 0);
 
 		for (i = 0; i < nelem(pixelformats); i++)
-			if (pixelformats[i].format == info->format)
+			if ((int) pixelformats[i].format == info->format)
 			{
 				info->comps = pixelformats[i].comps;
 				break;
 			}
 		if (i == nelem(pixelformats))
-			fz_throw(ctx, FZ_ERROR_GENERIC, "unsupported pixel format: %u", info->format);
+			fz_throw(ctx, FZ_ERROR_FORMAT, "unsupported pixel format: %u", info->format);
 
 		if (info->comps == 1)
 			info->cspace = fz_device_gray(ctx);
@@ -350,7 +375,7 @@ jxr_read_image(fz_context *ctx, const unsigned char *data, int size, struct info
 
 			rc = jxr_read_image_bitstream_memory(image, (unsigned char *)data + image_offset, size - image_offset);
 			if (rc < 0)
-				fz_throw(ctx, FZ_ERROR_GENERIC, "cannot read jxr image: %s", jxr_error_string(rc));
+				fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot read jxr image: %s", jxr_error_string(rc));
 
 			if (info->format == JXRC_FMT_32bppPBGRA ||
 					info->format == JXRC_FMT_64bppPRGBA ||
@@ -378,7 +403,7 @@ jxr_read_image(fz_context *ctx, const unsigned char *data, int size, struct info
 
 				rc = jxr_read_image_bitstream_memory(alpha, (unsigned char *)data + alpha_offset, size - alpha_offset);
 				if (rc < 0)
-					fz_throw(ctx, FZ_ERROR_GENERIC, "cannot read jxr image: %s", jxr_error_string(rc));
+					fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot read jxr image: %s", jxr_error_string(rc));
 			}
 		}
 	}
@@ -447,13 +472,13 @@ fz_load_jxr_info(fz_context *ctx, const unsigned char *data, size_t size, int *w
 fz_pixmap *
 fz_load_jxr(fz_context *ctx, const unsigned char *data, size_t size)
 {
-	fz_throw(ctx, FZ_ERROR_GENERIC, "JPEG-XR codec is not available");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "JPEG-XR codec is not available");
 }
 
 void
 fz_load_jxr_info(fz_context *ctx, const unsigned char *data, size_t size, int *wp, int *hp, int *xresp, int *yresp, fz_colorspace **cspacep)
 {
-	fz_throw(ctx, FZ_ERROR_GENERIC, "JPEG-XR codec is not available");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "JPEG-XR codec is not available");
 }
 
 #endif /* HAVE_JPEGXR */

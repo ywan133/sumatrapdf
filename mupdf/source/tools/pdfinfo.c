@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /*
  * Information tool.
  * Print information about the input pdf.
@@ -18,7 +40,8 @@ enum
 	SHADINGS = 0x08,
 	PATTERNS = 0x10,
 	XOBJS = 0x20,
-	ALL = DIMENSIONS | FONTS | IMAGES | SHADINGS | PATTERNS | XOBJS
+	ZUGFERD = 0x40,
+	ALL = DIMENSIONS | FONTS | IMAGES | SHADINGS | PATTERNS | XOBJS | ZUGFERD
 };
 
 struct info
@@ -171,6 +194,7 @@ infousage(void)
 		"\t-P\tlist patterns\n"
 		"\t-S\tlist shadings\n"
 		"\t-X\tlist form and postscript xobjects\n"
+		"\t-Z\tlist ZUGFeRD info\n"
 		"\tpages\tcomma separated list of page numbers and ranges\n"
 		);
 }
@@ -207,6 +231,7 @@ gatherdimensions(fz_context *ctx, globals *glo, int page, pdf_obj *pageref)
 {
 	fz_rect bbox;
 	pdf_obj *obj;
+	float unit;
 	int j;
 
 	obj = pdf_dict_get(ctx, pageref, PDF_NAME(MediaBox));
@@ -215,15 +240,11 @@ gatherdimensions(fz_context *ctx, globals *glo, int page, pdf_obj *pageref)
 
 	bbox = pdf_to_rect(ctx, obj);
 
-	obj = pdf_dict_get(ctx, pageref, PDF_NAME(UserUnit));
-	if (pdf_is_real(ctx, obj))
-	{
-		float unit = pdf_to_real(ctx, obj);
-		bbox.x0 *= unit;
-		bbox.y0 *= unit;
-		bbox.x1 *= unit;
-		bbox.y1 *= unit;
-	}
+	unit = pdf_dict_get_real_default(ctx, pageref, PDF_NAME(UserUnit), 1);
+	bbox.x0 *= unit;
+	bbox.y0 *= unit;
+	bbox.x1 *= unit;
+	bbox.y1 *= unit;
 
 	for (j = 0; j < glo->dims; j++)
 		if (!memcmp(glo->dim[j].u.dim.bbox, &bbox, sizeof (fz_rect)))
@@ -574,95 +595,80 @@ gatherpatterns(fz_context *ctx, globals *glo, int page, pdf_obj *pageref, pdf_ob
 }
 
 static void
-gatherresourceinfo(fz_context *ctx, globals *glo, int page, pdf_obj *rsrc, int show)
+gatherresourceinfo(fz_context *ctx, pdf_mark_list *mark_list, globals *glo, int page, pdf_obj *obj, int show)
 {
+	pdf_obj *rsrc;
 	pdf_obj *pageref;
 	pdf_obj *font;
 	pdf_obj *xobj;
 	pdf_obj *shade;
 	pdf_obj *pattern;
-	pdf_obj *subrsrc;
 	int i;
+
+	/* stop on cyclic resource dependencies */
+	if (pdf_mark_list_push(ctx, mark_list, obj))
+		return;
+
+	rsrc = pdf_dict_get(ctx, obj, PDF_NAME(Resources));
 
 	pageref = pdf_lookup_page_obj(ctx, glo->doc, page-1);
 	if (!pageref)
 		fz_throw(ctx, FZ_ERROR_GENERIC, "cannot retrieve info from page %d", page);
 
-	/* stop on cyclic resource dependencies */
-	if (pdf_mark_obj(ctx, rsrc))
-		return;
-
-	fz_try(ctx)
+	font = pdf_dict_get(ctx, rsrc, PDF_NAME(Font));
+	if (show & FONTS && font && !pdf_mark_list_push(ctx, mark_list, font))
 	{
-		font = pdf_dict_get(ctx, rsrc, PDF_NAME(Font));
-		if (show & FONTS && font)
+		int n;
+
+		gatherfonts(ctx, glo, page, pageref, font);
+		n = pdf_dict_len(ctx, font);
+		for (i = 0; i < n; i++)
 		{
-			int n;
-
-			gatherfonts(ctx, glo, page, pageref, font);
-			n = pdf_dict_len(ctx, font);
-			for (i = 0; i < n; i++)
-			{
-				pdf_obj *obj = pdf_dict_get_val(ctx, font, i);
-
-				subrsrc = pdf_dict_get(ctx, obj, PDF_NAME(Resources));
-				if (subrsrc && pdf_objcmp(ctx, rsrc, subrsrc))
-					gatherresourceinfo(ctx, glo, page, subrsrc, show);
-			}
-		}
-
-		xobj = pdf_dict_get(ctx, rsrc, PDF_NAME(XObject));
-		if (show & (IMAGES|XOBJS) && xobj)
-		{
-			int n;
-
-			if (show & IMAGES)
-				gatherimages(ctx, glo, page, pageref, xobj);
-			if (show & XOBJS)
-			{
-				gatherforms(ctx, glo, page, pageref, xobj);
-				gatherpsobjs(ctx, glo, page, pageref, xobj);
-			}
-			n = pdf_dict_len(ctx, xobj);
-			for (i = 0; i < n; i++)
-			{
-				pdf_obj *obj = pdf_dict_get_val(ctx, xobj, i);
-				subrsrc = pdf_dict_get(ctx, obj, PDF_NAME(Resources));
-				if (subrsrc && pdf_objcmp(ctx, rsrc, subrsrc))
-					gatherresourceinfo(ctx, glo, page, subrsrc, show);
-			}
-		}
-
-		shade = pdf_dict_get(ctx, rsrc, PDF_NAME(Shading));
-		if (show & SHADINGS && shade)
-			gathershadings(ctx, glo, page, pageref, shade);
-
-		pattern = pdf_dict_get(ctx, rsrc, PDF_NAME(Pattern));
-		if (show & PATTERNS && pattern)
-		{
-			int n;
-			gatherpatterns(ctx, glo, page, pageref, pattern);
-			n = pdf_dict_len(ctx, pattern);
-			for (i = 0; i < n; i++)
-			{
-				pdf_obj *obj = pdf_dict_get_val(ctx, pattern, i);
-				subrsrc = pdf_dict_get(ctx, obj, PDF_NAME(Resources));
-				if (subrsrc && pdf_objcmp(ctx, rsrc, subrsrc))
-					gatherresourceinfo(ctx, glo, page, subrsrc, show);
-			}
+			gatherresourceinfo(ctx, mark_list, glo, page, pdf_dict_get_val(ctx, font, i), show);
 		}
 	}
-	fz_always(ctx)
-		pdf_unmark_obj(ctx, rsrc);
-	fz_catch(ctx)
-		fz_rethrow(ctx);
+
+	xobj = pdf_dict_get(ctx, rsrc, PDF_NAME(XObject));
+	if (show & (IMAGES|XOBJS) && xobj && !pdf_mark_list_push(ctx, mark_list, xobj))
+	{
+		int n;
+
+		if (show & IMAGES)
+			gatherimages(ctx, glo, page, pageref, xobj);
+		if (show & XOBJS)
+		{
+			gatherforms(ctx, glo, page, pageref, xobj);
+			gatherpsobjs(ctx, glo, page, pageref, xobj);
+		}
+		n = pdf_dict_len(ctx, xobj);
+		for (i = 0; i < n; i++)
+		{
+			gatherresourceinfo(ctx, mark_list, glo, page, pdf_dict_get_val(ctx, xobj, i), show);
+		}
+	}
+
+	shade = pdf_dict_get(ctx, rsrc, PDF_NAME(Shading));
+	if (show & SHADINGS && shade && !pdf_mark_list_push(ctx, mark_list, shade))
+		gathershadings(ctx, glo, page, pageref, shade);
+
+	pattern = pdf_dict_get(ctx, rsrc, PDF_NAME(Pattern));
+	if (show & PATTERNS && pattern && !pdf_mark_list_push(ctx, mark_list, pattern))
+	{
+		int n;
+		gatherpatterns(ctx, glo, page, pageref, pattern);
+		n = pdf_dict_len(ctx, pattern);
+		for (i = 0; i < n; i++)
+		{
+			gatherresourceinfo(ctx, mark_list, glo, page, pdf_dict_get_val(ctx, pattern, i), show);
+		}
+	}
 }
 
 static void
 gatherpageinfo(fz_context *ctx, globals *glo, int page, int show)
 {
+	pdf_mark_list mark_list;
 	pdf_obj *pageref;
-	pdf_obj *rsrc;
 
 	pageref = pdf_lookup_page_obj(ctx, glo->doc, page-1);
 
@@ -671,8 +677,13 @@ gatherpageinfo(fz_context *ctx, globals *glo, int page, int show)
 
 	gatherdimensions(ctx, glo, page, pageref);
 
-	rsrc = pdf_dict_get(ctx, pageref, PDF_NAME(Resources));
-	gatherresourceinfo(ctx, glo, page, rsrc, show);
+	pdf_mark_list_init(ctx, &mark_list);
+	fz_try(ctx)
+		gatherresourceinfo(ctx, &mark_list, glo, page, pageref, show);
+	fz_always(ctx)
+		pdf_mark_list_free(ctx, &mark_list);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
 }
 
 static void
@@ -951,6 +962,30 @@ showinfo(fz_context *ctx, globals *glo, char *filename, int show, const char *pa
 }
 
 static void
+showzugferd(fz_context *ctx, globals *glo)
+{
+	float version;
+	fz_output *out = glo->out;
+	enum pdf_zugferd_profile profile = pdf_zugferd_profile(ctx, glo->doc, &version);
+	fz_buffer *buf;
+
+	if (profile == PDF_NOT_ZUGFERD)
+	{
+		fz_write_printf(ctx, out, "Not a ZUGFeRD file.\n");
+		return;
+	}
+
+	fz_write_printf(ctx, out, "ZUGFeRD version %g\n", version);
+	fz_write_printf(ctx, out, "%s profile\n", pdf_zugferd_profile_to_string(ctx, profile));
+
+	fz_write_printf(ctx, out, "Embedded XML:\n");
+	buf = pdf_zugferd_xml(ctx, glo->doc);
+	fz_write_buffer(ctx, out, buf);
+	fz_drop_buffer(ctx, buf);
+	fz_write_printf(ctx, out, "\n\n");
+}
+
+static void
 pdfinfo_info(fz_context *ctx, fz_output *out, char *filename, char *password, int show, char *argv[], int argc)
 {
 	enum { NO_FILE_OPENED, NO_INFO_GATHERED, INFO_SHOWN } state;
@@ -980,11 +1015,14 @@ pdfinfo_info(fz_context *ctx, fz_output *out, char *filename, char *password, in
 				glo.doc = pdf_open_document(glo.ctx, filename);
 				if (pdf_needs_password(ctx, glo.doc))
 					if (!pdf_authenticate_password(ctx, glo.doc, password))
-						fz_throw(glo.ctx, FZ_ERROR_GENERIC, "cannot authenticate password: %s", filename);
+						fz_throw(glo.ctx, FZ_ERROR_ARGUMENT, "cannot authenticate password: %s", filename);
 				glo.pagecount = pdf_count_pages(ctx, glo.doc);
 
 				showglobalinfo(ctx, &glo);
 				state = NO_INFO_GATHERED;
+
+				if (show & ZUGFERD)
+					showzugferd(ctx, &glo);
 			}
 			else
 			{
@@ -1013,7 +1051,7 @@ int pdfinfo_main(int argc, char **argv)
 	int ret;
 	fz_context *ctx;
 
-	while ((c = fz_getopt(argc, argv, "FISPXMp:")) != -1)
+	while ((c = fz_getopt(argc, argv, "FISPXMZp:")) != -1)
 	{
 		switch (c)
 		{
@@ -1023,6 +1061,7 @@ int pdfinfo_main(int argc, char **argv)
 		case 'P': if (show == ALL) show = PATTERNS; else show |= PATTERNS; break;
 		case 'X': if (show == ALL) show = XOBJS; else show |= XOBJS; break;
 		case 'M': if (show == ALL) show = DIMENSIONS; else show |= DIMENSIONS; break;
+		case 'Z': if (show == ALL) show = ZUGFERD; else show |= ZUGFERD; break;
 		case 'p': password = fz_optarg; break;
 		default:
 			infousage();
@@ -1047,7 +1086,10 @@ int pdfinfo_main(int argc, char **argv)
 	fz_try(ctx)
 		pdfinfo_info(ctx, fz_stdout(ctx), filename, password, show, &argv[fz_optind], argc-fz_optind);
 	fz_catch(ctx)
+	{
+		fz_report_error(ctx);
 		ret = 1;
+	}
 	fz_drop_context(ctx);
 	return ret;
 }

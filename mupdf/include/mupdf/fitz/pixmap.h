@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #ifndef MUPDF_FITZ_PIXMAP_H
 #define MUPDF_FITZ_PIXMAP_H
 
@@ -42,6 +64,11 @@ int fz_pixmap_x(fz_context *ctx, const fz_pixmap *pix);
 	Return the y value of the pixmap in pixels.
 */
 int fz_pixmap_y(fz_context *ctx, const fz_pixmap *pix);
+
+/**
+	Return sizeof fz_pixmap plus size of data, in bytes.
+*/
+size_t fz_pixmap_size(fz_context *ctx, fz_pixmap *pix);
 
 /**
 	Create a new pixmap, with its origin at (0,0)
@@ -273,6 +300,11 @@ void fz_clear_pixmap(fz_context *ctx, fz_pixmap *pix);
 void fz_invert_pixmap(fz_context *ctx, fz_pixmap *pix);
 
 /**
+	Invert the alpha fo all the pixels in a pixmap.
+*/
+void fz_invert_pixmap_alpha(fz_context *ctx, fz_pixmap *pix);
+
+/**
 	Transform the pixels in a pixmap so that luminance of each
 	pixel is inverted, and the chrominance remains unchanged (as
 	much as accuracy allows).
@@ -292,11 +324,17 @@ void fz_invert_pixmap_luminance(fz_context *ctx, fz_pixmap *pix);
 void fz_tint_pixmap(fz_context *ctx, fz_pixmap *pix, int black, int white);
 
 /**
-	Invert all the pixels in a given rectangle of a
+	Invert all the pixels in a given rectangle of a (premultiplied)
 	pixmap. All components of all pixels in the rectangle are
 	inverted (except alpha, which is unchanged).
 */
 void fz_invert_pixmap_rect(fz_context *ctx, fz_pixmap *image, fz_irect rect);
+
+/**
+	Invert all the pixels in a non-premultiplied pixmap in a
+	very naive manner.
+*/
+void fz_invert_pixmap_raw(fz_context *ctx, fz_pixmap *pix);
 
 /**
 	Apply gamma correction to a pixmap. All components
@@ -421,5 +459,58 @@ enum
  */
 fz_pixmap *
 fz_warp_pixmap(fz_context *ctx, fz_pixmap *src, const fz_point points[4], int width, int height);
+
+/* As for fz_warp_pixmap, where width/height are automatically 'guessed'. */
+fz_pixmap *
+fz_autowarp_pixmap(fz_context *ctx, fz_pixmap *src, const fz_point points[4]);
+
+/* Search for a "document" within a pixmap (greyscale or rgb, no alpha).
+ *
+ * points should point to an array of 4 fz_points.
+ *
+ * If the function return false, no document was found.
+ * If true, points has been updated to include the corner positions of
+ * the detected document within the src image.
+ */
+int
+fz_detect_document(fz_context *ctx, fz_point *points, fz_pixmap *src);
+
+/*
+	Convert between different separation results.
+*/
+fz_pixmap *fz_clone_pixmap_area_with_different_seps(fz_context *ctx, fz_pixmap *src, const fz_irect *bbox, fz_colorspace *dcs, fz_separations *seps, fz_color_params color_params, fz_default_colorspaces *default_cs);
+
+/*
+ * Extract alpha channel as a separate pixmap.
+ * Returns NULL if there is no alpha channel in the source.
+ */
+fz_pixmap *fz_new_pixmap_from_alpha_channel(fz_context *ctx, fz_pixmap *src);
+
+/*
+ * Combine a pixmap without an alpha channel with a soft mask.
+ */
+fz_pixmap *fz_new_pixmap_from_color_and_mask(fz_context *ctx, fz_pixmap *color, fz_pixmap *mask);
+
+/*
+ * Scale the pixmap up or down in size to fit the rectangle. Will return `NULL`
+ * if the scaling factors are out of range. This applies fancy filtering and
+ * will anti-alias the edges for subpixel positioning if using non-integer
+ * coordinates. If the clip rectangle is set, the returned pixmap may be subset
+ * to fit the clip rectangle. Pass `NULL` to the clip if you want the whole
+ * pixmap scaled.
+ */
+fz_pixmap *fz_scale_pixmap(fz_context *ctx, fz_pixmap *src, float x, float y, float w, float h, const fz_irect *clip);
+
+/*
+ * Reduces size to:
+ * tile->w => (tile->w + 2^factor-1) / 2^factor
+ * tile->h => (tile->h + 2^factor-1) / 2^factor
+ */
+void fz_subsample_pixmap(fz_context *ctx, fz_pixmap *tile, int factor);
+
+/*
+ * Copies r (clipped to both src and dest) in src to dest.
+ */
+void fz_copy_pixmap_rect(fz_context *ctx, fz_pixmap *dest, fz_pixmap *src, fz_irect r, const fz_default_colorspaces *default_cs);
 
 #endif

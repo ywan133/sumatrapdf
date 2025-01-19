@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /* PDFObject interface */
 
 JNIEXPORT void JNICALL
@@ -38,23 +60,6 @@ FUN(PDFObject_isIndirect)(JNIEnv *env, jobject self)
 
 	fz_try(ctx)
 		b = pdf_is_indirect(ctx, obj);
-	fz_catch(ctx)
-		jni_rethrow(env, ctx);
-
-	return b ? JNI_TRUE : JNI_FALSE;
-}
-
-JNIEXPORT jboolean JNICALL
-FUN(PDFObject_isNull)(JNIEnv *env, jobject self)
-{
-	fz_context *ctx = get_context(env);
-	pdf_obj *obj = from_PDFObject(env, self);
-	int b = 0;
-
-	if (!ctx || !obj) return JNI_FALSE;
-
-	fz_try(ctx)
-		b = pdf_is_null(ctx, obj);
 	fz_catch(ctx)
 		jni_rethrow(env, ctx);
 
@@ -414,7 +419,9 @@ FUN(PDFObject_resolve)(JNIEnv *env, jobject self)
 	pdf_obj *ind = NULL;
 	jobject jobj;
 
-	if (!ctx || !obj) return NULL;
+	if (!ctx) return NULL;
+
+	if (!obj) return to_PDFObject_safe(ctx, env, NULL);
 
 	fz_try(ctx)
 		ind = pdf_resolve_indirect(ctx, obj);
@@ -435,7 +442,9 @@ FUN(PDFObject_getArray)(JNIEnv *env, jobject self, jint index)
 	pdf_obj *arr = from_PDFObject(env, self);
 	pdf_obj *val = NULL;
 
-	if (!ctx || !arr) return NULL;
+	if (!ctx) return NULL;
+
+	if (!arr) return to_PDFObject_safe(ctx, env, NULL);
 
 	fz_try(ctx)
 		val = pdf_array_get(ctx, arr, index);
@@ -446,21 +455,26 @@ FUN(PDFObject_getArray)(JNIEnv *env, jobject self, jint index)
 }
 
 JNIEXPORT jobject JNICALL
-FUN(PDFObject_getDictionary)(JNIEnv *env, jobject self, jstring jname)
+FUN(PDFObject_getDictionary)(JNIEnv *env, jobject self, jstring jname, jboolean inheritable)
 {
 	fz_context *ctx = get_context(env);
 	pdf_obj *dict = from_PDFObject(env, self);
 	const char *name = NULL;
 	pdf_obj *val = NULL;
 
-	if (!ctx || !dict) return NULL;
+	if (!ctx) return NULL;
 	if (!jname) jni_throw_arg(env, "name must not be null");
+
+	if (!dict) return to_PDFObject_safe(ctx, env, NULL);
 
 	name = (*env)->GetStringUTFChars(env, jname, NULL);
 	if (!name) jni_throw_run(env, "cannot get name to lookup");
 
 	fz_try(ctx)
-		val = pdf_dict_gets(ctx, dict, name);
+		if (inheritable)
+			val = pdf_dict_gets_inheritable(ctx, dict, name);
+		else
+			val = pdf_dict_gets(ctx, dict, name);
 	fz_always(ctx)
 		(*env)->ReleaseStringUTFChars(env, jname, name);
 	fz_catch(ctx)
@@ -476,7 +490,9 @@ FUN(PDFObject_getDictionaryKey)(JNIEnv *env, jobject self, jint index)
 	pdf_obj *dict = from_PDFObject(env, self);
 	pdf_obj *key = NULL;
 
-	if (!ctx || !dict) return NULL;
+	if (!ctx) return NULL;
+
+	if (!dict) return to_PDFObject_safe(ctx, env, NULL);
 
 	fz_try(ctx)
 		key = pdf_dict_get_key(ctx, dict, index);
@@ -545,7 +561,7 @@ FUN(PDFObject_putArrayString)(JNIEnv *env, jobject self, jint index, jstring jst
 	fz_try(ctx)
 	{
 		if (str)
-			pdf_array_put_drop(ctx, arr, index, pdf_new_string(ctx, str, strlen(str)));
+			pdf_array_put_string(ctx, arr, index, str, strlen(str));
 		else
 			pdf_array_put(ctx, arr, index, PDF_NULL);
 	}
@@ -889,6 +905,105 @@ FUN(PDFObject_putDictionaryPDFObjectDate)(JNIEnv *env, jobject self, jobject jna
 }
 
 JNIEXPORT void JNICALL
+FUN(PDFObject_putDictionaryStringRect)(JNIEnv *env, jobject self, jstring jname, jobject jrect)
+{
+	fz_context *ctx = get_context(env);
+	pdf_obj *dict = from_PDFObject(env, self);
+	fz_rect rect  = from_Rect(env, jrect);
+	const char *name = NULL;
+	pdf_obj *key = NULL;
+
+	if (!ctx || !dict) return;
+	if (jname)
+	{
+		name = (*env)->GetStringUTFChars(env, jname, NULL);
+		if (!name) return;
+	}
+
+	fz_var(key);
+
+	fz_try(ctx)
+	{
+		key = name ? pdf_new_name(ctx, name) : NULL;
+		pdf_dict_put_rect(ctx, dict, key, rect);
+	}
+	fz_always(ctx)
+	{
+		pdf_drop_obj(ctx, key);
+		if (name)
+			(*env)->ReleaseStringUTFChars(env, jname, name);
+	}
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFObject_putDictionaryStringMatrix)(JNIEnv *env, jobject self, jstring jname, jobject jmatrix)
+{
+	fz_context *ctx = get_context(env);
+	pdf_obj *dict = from_PDFObject(env, self);
+	fz_matrix matrix  = from_Matrix(env, jmatrix);
+	const char *name = NULL;
+	pdf_obj *key = NULL;
+
+	if (!ctx || !dict) return;
+	if (jname)
+	{
+		name = (*env)->GetStringUTFChars(env, jname, NULL);
+		if (!name) return;
+	}
+
+	fz_var(key);
+
+	fz_try(ctx)
+	{
+		key = name ? pdf_new_name(ctx, name) : NULL;
+		pdf_dict_put_matrix(ctx, dict, key, matrix);
+	}
+	fz_always(ctx)
+	{
+		pdf_drop_obj(ctx, key);
+		if (name)
+			(*env)->ReleaseStringUTFChars(env, jname, name);
+	}
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+JNIEXPORT void JNICALL
+FUN(PDFObject_putDictionaryStringDate)(JNIEnv *env, jobject self, jstring jname, jlong time)
+{
+	fz_context *ctx = get_context(env);
+	pdf_obj *dict = from_PDFObject(env, self);
+	const char *name = NULL;
+	pdf_obj *key = NULL;
+
+	if (!ctx || !dict) return;
+	if (jname)
+	{
+		name = (*env)->GetStringUTFChars(env, jname, NULL);
+		if (!name) return;
+	}
+
+	fz_var(key);
+
+	fz_try(ctx)
+	{
+		key = name ? pdf_new_name(ctx, name) : NULL;
+		pdf_dict_put_date(ctx, dict, key, time);
+	}
+	fz_always(ctx)
+	{
+		pdf_drop_obj(ctx, key);
+		if (name)
+			(*env)->ReleaseStringUTFChars(env, jname, name);
+	}
+	fz_catch(ctx)
+		jni_rethrow_void(env, ctx);
+}
+
+
+JNIEXPORT void JNICALL
 FUN(PDFObject_deleteArray)(JNIEnv *env, jobject self, jint index)
 {
 	fz_context *ctx = get_context(env);
@@ -1216,4 +1331,44 @@ FUN(PDFObject_toString)(JNIEnv *env, jobject self, jboolean tight, jboolean asci
 		jni_rethrow(env, ctx);
 
 	return string;
+}
+
+JNIEXPORT jboolean JNICALL
+FUN(PDFObject_equals)(JNIEnv *env, jobject self, jobject jother)
+{
+	fz_context *ctx = get_context(env);
+	pdf_obj *obj = from_PDFObject_safe(env, self);
+	pdf_obj *other = NULL;
+	int result = 0;
+
+	if (!ctx) return JNI_FALSE;
+
+	if (!(*env)->IsInstanceOf(env, jother, cls_PDFObject))
+		return JNI_FALSE;
+
+	other = from_PDFObject_safe(env, jother);
+
+	fz_try(ctx)
+		result = pdf_objcmp(ctx, obj, other);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return result == 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+FUN(PDFObject_isFilespec)(JNIEnv *env, jobject self)
+{
+	fz_context *ctx = get_context(env);
+	pdf_obj *obj = from_PDFObject_safe(env, self);
+	int result = 0;
+
+	if (!ctx) return JNI_FALSE;
+
+	fz_try(ctx)
+		result = pdf_is_filespec(ctx, obj);
+	fz_catch(ctx)
+		jni_rethrow(env, ctx);
+
+	return result ? JNI_TRUE : JNI_FALSE;
 }

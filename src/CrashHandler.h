@@ -1,10 +1,12 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD */
 
-extern WCHAR* gCrashFilePath;
+extern char* gCrashFilePath;
+extern char* gSymbolsDir;
 
-void InstallCrashHandler(const WCHAR* crashDumpPath, const WCHAR* crashFilePath, const WCHAR* symDir);
-void SubmitCrashInfo();
+void InstallCrashHandler(const char* crashDumpPath, const char* crashFilePath, const char* symDir);
 void UninstallCrashHandler();
 bool CrashHandlerDownloadSymbols();
-bool SetSymbolsDir(const WCHAR* symDir);
+bool AreSymbolsDownloaded(const char* symDir);
+bool InitializeDbgHelp(bool force);
+bool SetSymbolsDir(const char* symDir);

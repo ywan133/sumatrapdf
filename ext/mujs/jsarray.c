@@ -1,6 +1,4 @@
 #include "jsi.h"
-#include "jsvalue.h"
-#include "jsbuiltin.h"
 
 int js_getlength(js_State *J, int idx)
 {
@@ -15,30 +13,6 @@ void js_setlength(js_State *J, int idx, int len)
 {
 	js_pushnumber(J, len);
 	js_setproperty(J, idx < 0 ? idx - 1 : idx, "length");
-}
-
-int js_hasindex(js_State *J, int idx, int i)
-{
-	char buf[32];
-	return js_hasproperty(J, idx, js_itoa(buf, i));
-}
-
-void js_getindex(js_State *J, int idx, int i)
-{
-	char buf[32];
-	js_getproperty(J, idx, js_itoa(buf, i));
-}
-
-void js_setindex(js_State *J, int idx, int i)
-{
-	char buf[32];
-	js_setproperty(J, idx, js_itoa(buf, i));
-}
-
-void js_delindex(js_State *J, int idx, int i)
-{
-	char buf[32];
-	js_delproperty(J, idx, js_itoa(buf, i));
 }
 
 static void jsB_new_Array(js_State *J)
@@ -88,10 +62,10 @@ static void Ap_concat(js_State *J)
 static void Ap_join(js_State *J)
 {
 	char * volatile out = NULL;
+	const char * volatile r = NULL;
 	const char *sep;
-	const char *r;
 	int seplen;
-	int k, n, len;
+	int k, n, len, rlen;
 
 	len = js_getlength(J, 0);
 
@@ -103,7 +77,7 @@ static void Ap_join(js_State *J)
 		seplen = 1;
 	}
 
-	if (len == 0) {
+	if (len <= 0) {
 		js_pushliteral(J, "");
 		return;
 	}
@@ -113,29 +87,40 @@ static void Ap_join(js_State *J)
 		js_throw(J);
 	}
 
-	n = 1;
+	n = 0;
 	for (k = 0; k < len; ++k) {
 		js_getindex(J, 0, k);
-		if (js_isundefined(J, -1) || js_isnull(J, -1))
-			r = "";
-		else
+		if (js_iscoercible(J, -1)) {
 			r = js_tostring(J, -1);
-		n += strlen(r);
+			rlen = strlen(r);
+		} else {
+			rlen = 0;
+		}
 
 		if (k == 0) {
-			out = js_malloc(J, n);
-			strcpy(out, r);
+			out = js_malloc(J, rlen + 1);
+			if (rlen > 0) {
+				memcpy(out, r, rlen);
+				n += rlen;
+			}
 		} else {
-			n += seplen;
-			out = js_realloc(J, out, n);
-			strcat(out, sep);
-			strcat(out, r);
+			if (n + seplen + rlen > JS_STRLIMIT)
+				js_rangeerror(J, "invalid string length");
+			out = js_realloc(J, out, n + seplen + rlen + 1);
+			if (seplen > 0) {
+				memcpy(out + n, sep, seplen);
+				n += seplen;
+			}
+			if (rlen > 0) {
+				memcpy(out + n, r, rlen);
+				n += rlen;
+			}
 		}
 
 		js_pop(J, 1);
 	}
 
-	js_pushstring(J, out);
+	js_pushlstring(J, out, n);
 	js_endtry(J);
 	js_free(J, out);
 }
@@ -262,8 +247,8 @@ static int sortcmp(const void *avoid, const void *bvoid)
 	double v;
 	int c;
 
-	int unx = (a->type == JS_TUNDEFINED);
-	int uny = (b->type == JS_TUNDEFINED);
+	int unx = (a->t.type == JS_TUNDEFINED);
+	int uny = (b->t.type == JS_TUNDEFINED);
 	if (unx) return !uny;
 	if (uny) return -1;
 
@@ -289,7 +274,7 @@ static int sortcmp(const void *avoid, const void *bvoid)
 
 static void Ap_sort(js_State *J)
 {
-	struct sortslot *array = NULL;
+	struct sortslot * volatile array = NULL;
 	int i, n, len;
 
 	len = js_getlength(J, 0);
@@ -300,8 +285,6 @@ static void Ap_sort(js_State *J)
 
 	if (len >= INT_MAX / (int)sizeof(*array))
 		js_rangeerror(J, "array is too large to sort");
-
-	array = js_malloc(J, len * sizeof *array);
 
 	/* Holding objects where the GC cannot see them is illegal, but if we
 	 * don't allow the GC to run we can use qsort() on a temporary array of
@@ -314,6 +297,8 @@ static void Ap_sort(js_State *J)
 		js_free(J, array);
 		js_throw(J);
 	}
+
+	array = js_malloc(J, len * sizeof *array);
 
 	n = 0;
 	for (i = 0; i < len; ++i) {
@@ -331,7 +316,7 @@ static void Ap_sort(js_State *J)
 		js_pushvalue(J, array[i].v);
 		js_setindex(J, 0, i);
 	}
-	for (i = n; i < len; ++i) {
+	for (i = len-i; i >= n; --i) {
 		js_delindex(J, 0, i);
 	}
 
@@ -347,18 +332,24 @@ static void Ap_splice(js_State *J)
 {
 	int top = js_gettop(J);
 	int len, start, del, add, k;
-	double f;
-
-	js_newarray(J);
 
 	len = js_getlength(J, 0);
+	start = js_tointeger(J, 1);
+	if (start < 0)
+		start = (len + start) > 0 ? len + start : 0;
+	else if (start > len)
+		start = len;
 
-	f = js_tointeger(J, 1);
-	if (f < 0) f = f + len;
-	start = f < 0 ? 0 : f > len ? len : f;
+	if (js_isdefined(J, 2))
+		del = js_tointeger(J, 2);
+	else
+		del = len - start;
+	if (del > len - start)
+		del = len - start;
+	if (del < 0)
+		del = 0;
 
-	f = js_tointeger(J, 2);
-	del = f < 0 ? 0 : f > len - start ? len - start : f;
+	js_newarray(J);
 
 	/* copy deleted items to return array */
 	for (k = 0; k < del; ++k)
@@ -423,9 +414,20 @@ static void Ap_unshift(js_State *J)
 
 static void Ap_toString(js_State *J)
 {
-	int top = js_gettop(J);
-	js_pop(J, top - 1);
-	Ap_join(J);
+	if (!js_iscoercible(J, 0))
+		js_typeerror(J, "'this' is not an object");
+	js_getproperty(J, 0, "join");
+	if (!js_iscallable(J, -1)) {
+		js_pop(J, 1);
+		// TODO: call Object.prototype.toString implementation directly
+		js_getglobal(J, "Object");
+		js_getproperty(J, -1, "prototype");
+		js_rot2pop1(J);
+		js_getproperty(J, -1, "toString");
+		js_rot2pop1(J);
+	}
+	js_copy(J, 0);
+	js_call(J, 0);
 }
 
 static void Ap_indexOf(js_State *J)
@@ -585,6 +587,7 @@ static void Ap_map(js_State *J)
 			js_pop(J, 1);
 		}
 	}
+	js_setlength(J, -1, len);
 }
 
 static void Ap_filter(js_State *J)
@@ -725,7 +728,7 @@ void jsB_initarray(js_State *J)
 		jsB_propf(J, "Array.prototype.shift", Ap_shift, 0);
 		jsB_propf(J, "Array.prototype.slice", Ap_slice, 2);
 		jsB_propf(J, "Array.prototype.sort", Ap_sort, 1);
-		jsB_propf(J, "Array.prototype.splice", Ap_splice, 0); /* 2 */
+		jsB_propf(J, "Array.prototype.splice", Ap_splice, 2);
 		jsB_propf(J, "Array.prototype.unshift", Ap_unshift, 0); /* 1 */
 
 		/* ES5 */

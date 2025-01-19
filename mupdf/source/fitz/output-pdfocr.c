@@ -1,13 +1,30 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 
+#include <assert.h>
 #include <string.h>
 #include <limits.h>
-
-#if !defined(HAVE_LEPTONICA) || !defined(HAVE_TESSERACT)
-#ifndef OCR_DISABLED
-#define OCR_DISABLED
-#endif
-#endif
 
 #ifdef OCR_DISABLED
 
@@ -25,6 +42,9 @@ const char *fz_pdfocr_write_options_usage =
 	"\tcompression=flate: Flate compression\n"
 	"\tstrip-height=N: Strip height (default 0=fullpage)\n"
 	"\tocr-language=<lang>: OCR language (default=eng)\n"
+	"\tocr-datadir=<datadir>: OCR data path (default=rely on TESSDATA_PREFIX)\n"
+	"\tskew=none,auto,<angle>: Whether to skew correct (default=none).\n"
+	"\tskew-border=increase,maintain,decrease: Size change for border pixels (default=increase).\n"
 	"\n";
 
 static const char funky_font[] =
@@ -135,7 +155,7 @@ fz_pdfocr_options *
 fz_parse_pdfocr_options(fz_context *ctx, fz_pdfocr_options *opts, const char *args)
 {
 #ifdef OCR_DISABLED
-	fz_throw(ctx, FZ_ERROR_GENERIC, "No OCR support in this build");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "No OCR support in this build");
 #else
 	const char *val;
 
@@ -148,18 +168,43 @@ fz_parse_pdfocr_options(fz_context *ctx, fz_pdfocr_options *opts, const char *ar
 		else if (fz_option_eq(val, "flate"))
 			opts->compress = 1;
 		else
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Unsupported PDFOCR compression %s (none, or flate only)", val);
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "Unsupported PDFOCR compression %s (none, or flate only)", val);
 	}
 	if (fz_has_option(ctx, args, "strip-height", &val))
 	{
 		int i = fz_atoi(val);
 		if (i <= 0)
-			fz_throw(ctx, FZ_ERROR_GENERIC, "Unsupported PDFOCR strip height %d (suggest 0)", i);
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "Unsupported PDFOCR strip height %d (suggest 0)", i);
 		opts->strip_height = i;
 	}
 	if (fz_has_option(ctx, args, "ocr-language", &val))
 	{
-		fz_strlcpy(opts->language, val, sizeof(opts->language));
+		fz_copy_option(ctx, val, opts->language, nelem(opts->language));
+	}
+	if (fz_has_option(ctx, args, "ocr-datadir", &val))
+	{
+		fz_copy_option(ctx, val, opts->datadir, nelem(opts->datadir));
+	}
+	if (fz_has_option(ctx, args, "skew", &val))
+	{
+		if (fz_option_eq(val, "auto"))
+			opts->skew_correct = 1;
+		else
+		{
+			opts->skew_correct = 2;
+			opts->skew_angle = fz_atof(val);
+		}
+	}
+	if (fz_has_option(ctx, args, "skew-border", &val))
+	{
+		if (fz_option_eq(val, "increase"))
+			opts->skew_border = 0;
+		else if (fz_option_eq(val, "maintain"))
+			opts->skew_border = 1;
+		else if (fz_option_eq(val, "decrease"))
+			opts->skew_border = 2;
+		else
+			fz_throw(ctx, FZ_ERROR_ARGUMENT, "Unsupported skew-border option");
 	}
 
 	return opts;
@@ -170,7 +215,7 @@ void
 fz_write_pixmap_as_pdfocr(fz_context *ctx, fz_output *out, const fz_pixmap *pixmap, const fz_pdfocr_options *pdfocr)
 {
 #ifdef OCR_DISABLED
-	fz_throw(ctx, FZ_ERROR_GENERIC, "No OCR support in this build");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "No OCR support in this build");
 #else
 	fz_band_writer *writer;
 
@@ -182,6 +227,7 @@ fz_write_pixmap_as_pdfocr(fz_context *ctx, fz_output *out, const fz_pixmap *pixm
 	{
 		fz_write_header(ctx, writer, pixmap->w, pixmap->h, pixmap->n, pixmap->alpha, pixmap->xres, pixmap->yres, 0, pixmap->colorspace, pixmap->seps);
 		fz_write_band(ctx, writer, pixmap->stride, pixmap->h, pixmap->samples);
+		fz_close_band_writer(ctx, writer);
 	}
 	fz_always(ctx)
 		fz_drop_band_writer(ctx, writer);
@@ -196,6 +242,10 @@ typedef struct pdfocr_band_writer_s
 	fz_band_writer super;
 	fz_pdfocr_options options;
 
+	/* The actual output size */
+	int deskewed_w;
+	int deskewed_h;
+
 	int obj_num;
 	int xref_max;
 	int64_t *xref;
@@ -206,10 +256,12 @@ typedef struct pdfocr_band_writer_s
 	unsigned char *compbuf;
 	size_t complen;
 
+	fz_pixmap *skew_bitmap;
+
 	void *tessapi;
 	fz_pixmap *ocrbitmap;
 
-	int (*progress)(fz_context *, void *, int);
+	fz_pdfocr_progress_fn *progress;
 	void *progress_arg;
 } pdfocr_band_writer;
 
@@ -233,6 +285,41 @@ new_obj(fz_context *ctx, pdfocr_band_writer *writer)
 }
 
 static void
+post_skew_write_header(fz_context *ctx, pdfocr_band_writer *writer, int w, int h)
+{
+	fz_output *out = writer->super.out;
+	int xres = writer->super.xres;
+	int yres = writer->super.yres;
+	int sh = writer->options.strip_height;
+	int n = writer->super.n;
+	int strips;
+	int i;
+
+	if (sh == 0)
+		sh = h;
+	assert(sh != 0 && "pdfocr_write_header() should not be given zero height input.");
+	strips = (h + sh-1)/sh;
+
+	writer->deskewed_w = w;
+	writer->deskewed_h = h;
+
+	writer->stripbuf = Memento_label(fz_malloc(ctx, (size_t)w * sh * n), "pdfocr_stripbuf");
+	writer->complen = fz_deflate_bound(ctx, (size_t)w * sh * n);
+	writer->compbuf = Memento_label(fz_malloc(ctx, writer->complen), "pdfocr_compbuf");
+
+	/* Always round the width of ocrbitmap up to a multiple of 4. */
+	writer->ocrbitmap = fz_new_pixmap(ctx, NULL, (w+3)&~3, h, NULL, 0);
+	fz_set_pixmap_resolution(ctx, writer->ocrbitmap, xres, yres);
+
+	/* Send the Page Object */
+	fz_write_printf(ctx, out, "%d 0 obj\n<</Type/Page/Parent 2 0 R/Resources<</XObject<<", new_obj(ctx, writer));
+	for (i = 0; i < strips; i++)
+		fz_write_printf(ctx, out, "/I%d %d 0 R", i, writer->obj_num + i);
+	fz_write_printf(ctx, out, ">>/Font<</F0 3 0 R>>>>/MediaBox[0 0 %g %g]/Contents %d 0 R>>\nendobj\n",
+		w * 72.0f / xres, h * 72.0f / yres, writer->obj_num + strips);
+}
+
+static void
 pdfocr_write_header(fz_context *ctx, fz_band_writer *writer_, fz_colorspace *cs)
 {
 	pdfocr_band_writer *writer = (pdfocr_band_writer *)writer_;
@@ -242,22 +329,20 @@ pdfocr_write_header(fz_context *ctx, fz_band_writer *writer_, fz_colorspace *cs)
 	int n = writer->super.n;
 	int s = writer->super.s;
 	int a = writer->super.alpha;
-	int xres = writer->super.xres;
-	int yres = writer->super.yres;
 	int sh = writer->options.strip_height;
 	int strips;
-	int i;
 
 	if (sh == 0)
 		sh = h;
+	assert(sh != 0 && "pdfocr_write_header() should not be given zero height input.");
 	strips = (h + sh-1)/sh;
 
 	if (a != 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "PDFOCR cannot write alpha channel");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "PDFOCR cannot write alpha channel");
 	if (s != 0)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "PDFOCR cannot write spot colors");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "PDFOCR cannot write spot colors");
 	if (n != 3 && n != 1)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "PDFOCR expected to be Grayscale or RGB");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "PDFOCR expected to be Grayscale or RGB");
 
 	fz_free(ctx, writer->stripbuf);
 	writer->stripbuf = NULL;
@@ -265,12 +350,6 @@ pdfocr_write_header(fz_context *ctx, fz_band_writer *writer_, fz_colorspace *cs)
 	writer->compbuf = NULL;
 	fz_drop_pixmap(ctx, writer->ocrbitmap);
 	writer->ocrbitmap = NULL;
-	writer->stripbuf = Memento_label(fz_malloc(ctx, (size_t)w * sh * n), "pdfocr_stripbuf");
-	writer->complen = fz_deflate_bound(ctx, (size_t)w * sh * n);
-	writer->compbuf = Memento_label(fz_malloc(ctx, writer->complen), "pdfocr_compbuf");
-	/* Always round the width of ocrbitmap up to a multiple of 4. */
-	writer->ocrbitmap = fz_new_pixmap(ctx, NULL, (w+3)&~3, h, NULL, 0);
-	fz_set_pixmap_resolution(ctx, writer->ocrbitmap, xres, yres);
 
 	/* Send the file header on the first page */
 	if (writer->pages == 0)
@@ -308,12 +387,10 @@ pdfocr_write_header(fz_context *ctx, fz_band_writer *writer_, fz_colorspace *cs)
 	writer->page_obj[writer->pages] = writer->obj_num;
 	writer->pages++;
 
-	/* Send the Page Object */
-	fz_write_printf(ctx, out, "%d 0 obj\n<</Type/Page/Parent 2 0 R/Resources<</XObject<<", new_obj(ctx, writer));
-	for (i = 0; i < strips; i++)
-		fz_write_printf(ctx, out, "/I%d %d 0 R", i, writer->obj_num + i);
-	fz_write_printf(ctx, out, ">>/Font<</F0 3 0 R>>>>/MediaBox[0 0 %g %g]/Contents %d 0 R>>\nendobj\n",
-		w * 72.0f / xres, h * 72.0f / yres, writer->obj_num + strips);
+	if (writer->options.skew_correct)
+		writer->skew_bitmap = fz_new_pixmap(ctx, n == 3 ? fz_device_rgb(ctx) : fz_device_gray(ctx), w, h, NULL, 0);
+	else
+		post_skew_write_header(ctx, writer, w, h);
 }
 
 static void
@@ -321,7 +398,7 @@ flush_strip(fz_context *ctx, pdfocr_band_writer *writer, int fill)
 {
 	unsigned char *data = writer->stripbuf;
 	fz_output *out = writer->super.out;
-	int w = writer->super.w;
+	int w = writer->deskewed_w;
 	int n = writer->super.n;
 	size_t len = (size_t)w*n*fill;
 
@@ -341,19 +418,16 @@ flush_strip(fz_context *ctx, pdfocr_band_writer *writer, int fill)
 }
 
 static void
-pdfocr_write_band(fz_context *ctx, fz_band_writer *writer_, int stride, int band_start, int band_height, const unsigned char *sp)
+post_skew_write_band(fz_context *ctx, pdfocr_band_writer *writer, int stride, int band_start, int band_height, const unsigned char *sp)
 {
-	pdfocr_band_writer *writer = (pdfocr_band_writer *)writer_;
 	fz_output *out = writer->super.out;
-	int w = writer->super.w;
-	int h = writer->super.h;
+	int w = writer->deskewed_w;
+	int h = writer->deskewed_h;
 	int n = writer->super.n;
+	int x, y;
 	int sh = writer->options.strip_height;
 	int line;
-	unsigned char *d = writer->ocrbitmap->samples;
-
-	if (!out)
-		return;
+	unsigned char *d;
 
 	if (sh == 0)
 		sh = h;
@@ -362,20 +436,19 @@ pdfocr_write_band(fz_context *ctx, fz_band_writer *writer_, int stride, int band
 	{
 		int dstline = (band_start+line) % sh;
 		memcpy(writer->stripbuf + (size_t)w*n*dstline,
-			   sp + (size_t)line * w * n,
-			   (size_t)w * n);
+			sp + (size_t)line * w * n,
+			(size_t)w * n);
 		if (dstline+1 == sh)
 			flush_strip(ctx, writer, dstline+1);
 	}
-
 	if (band_start + band_height == h && h % sh != 0)
 		flush_strip(ctx, writer, h % sh);
 
 	/* Copy strip to ocrbitmap, converting if required. */
+	d = writer->ocrbitmap->samples;
 	d += band_start*w;
 	if (n == 1)
 	{
-		int y;
 		for (y = band_height; y > 0; y--)
 		{
 			memcpy(d, sp, w);
@@ -386,7 +459,6 @@ pdfocr_write_band(fz_context *ctx, fz_band_writer *writer_, int stride, int band
 	}
 	else
 	{
-		int x, y;
 		for (y = band_height; y > 0; y--)
 		{
 			for (x = w; x > 0; x--)
@@ -398,6 +470,30 @@ pdfocr_write_band(fz_context *ctx, fz_band_writer *writer_, int stride, int band
 				*d++ = 0;
 		}
 	}
+}
+
+static void
+pdfocr_write_band(fz_context *ctx, fz_band_writer *writer_, int stride, int band_start, int band_height, const unsigned char *sp)
+{
+	pdfocr_band_writer *writer = (pdfocr_band_writer *)writer_;
+	fz_output *out = writer->super.out;
+	int w = writer->super.w;
+	int h = writer->super.h;
+	int n = writer->super.n;
+	int sh = writer->options.strip_height;
+	unsigned char *d;
+
+	if (!out)
+		return;
+
+	if (writer->skew_bitmap)
+	{
+		d = writer->skew_bitmap->samples;
+		d += band_start*w*n;
+		memcpy(d, sp, w*n*band_height);
+	}
+	else
+		post_skew_write_band(ctx, writer, stride, band_start, band_height, sp);
 }
 
 enum
@@ -598,14 +694,15 @@ queue_word(fz_context *ctx, char_callback_data_t *cb)
 	word->len = cb->word_len;
 	memcpy(word->bbox, cb->word_bbox, 4*sizeof(float));
 	memcpy(word->chars, cb->word_chars, cb->word_len * sizeof(int));
-	word->dirn = cb->word_dirn;
 	cb->word_len = 0;
-	cb->word_dirn = 0;
 
 	line_is_v = !!(cb->line_dirn & (WORD_CONTAINS_B2T | WORD_CONTAINS_T2B));
-	word_is_v = !!(cb->line_dirn & (WORD_CONTAINS_B2T | WORD_CONTAINS_T2B));
+	word_is_v = !!(cb->word_dirn & (WORD_CONTAINS_B2T | WORD_CONTAINS_T2B));
 	line_is_h = !!(cb->line_dirn & (WORD_CONTAINS_L2R | WORD_CONTAINS_R2L));
-	word_is_h = !!(cb->line_dirn & (WORD_CONTAINS_L2R | WORD_CONTAINS_R2L));
+	word_is_h = !!(cb->word_dirn & (WORD_CONTAINS_L2R | WORD_CONTAINS_R2L));
+
+	word->dirn = cb->word_dirn;
+	cb->word_dirn = 0;
 
 	/* Can we put the new word onto the end of the existing line? */
 	if (cb->line != NULL &&
@@ -733,7 +830,28 @@ pdfocr_progress(fz_context *ctx, void *arg, int prog)
 	if (writer->progress == NULL)
 		return 0;
 
-	return writer->progress(ctx, writer->progress_arg, prog);
+	return writer->progress(ctx, writer->progress_arg, writer->pages - 1, prog);
+}
+
+static void
+do_skew_correct(fz_context *ctx, pdfocr_band_writer *writer)
+{
+	fz_pixmap *deskewed;
+
+	if (writer->options.skew_correct == 1)
+		writer->options.skew_angle = fz_skew_detect(ctx, writer->skew_bitmap);
+
+	deskewed = fz_deskew_pixmap(ctx, writer->skew_bitmap, writer->options.skew_angle, writer->options.skew_border);
+
+	fz_try(ctx)
+	{
+		post_skew_write_header(ctx, writer, deskewed->w, deskewed->h);
+		post_skew_write_band(ctx, writer, deskewed->stride, 0, deskewed->h, deskewed->samples);
+	}
+	fz_always(ctx)
+		fz_drop_pixmap(ctx, deskewed);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
 }
 
 static void
@@ -741,18 +859,21 @@ pdfocr_write_trailer(fz_context *ctx, fz_band_writer *writer_)
 {
 	pdfocr_band_writer *writer = (pdfocr_band_writer *)writer_;
 	fz_output *out = writer->super.out;
-	int w = writer->super.w;
-	int h = writer->super.h;
 	int xres = writer->super.xres;
 	int yres = writer->super.yres;
 	int sh = writer->options.strip_height;
 	int strips;
-	int i;
+	int w, h, i;
 	size_t len;
 	unsigned char *data;
 	fz_buffer *buf = NULL;
 	char_callback_data_t cb = { NULL };
 
+	if (writer->options.skew_correct)
+		do_skew_correct(ctx, writer);
+
+	w = writer->deskewed_w;
+	h = writer->deskewed_h;
 	if (sh == 0)
 		sh = h;
 	strips = (h + sh-1)/sh;
@@ -808,13 +929,13 @@ pdfocr_write_trailer(fz_context *ctx, fz_band_writer *writer_)
 }
 
 static void
-pdfocr_drop_band_writer(fz_context *ctx, fz_band_writer *writer_)
+pdfocr_close_band_writer(fz_context *ctx, fz_band_writer *writer_)
 {
 	pdfocr_band_writer *writer = (pdfocr_band_writer *)writer_;
 	fz_output *out = writer->super.out;
 	int i;
 
-	/* We actually do the trailer writing in the drop */
+	/* We actually do the trailer writing in the close */
 	if (writer->xref_max > 2)
 	{
 		int64_t t_pos;
@@ -842,13 +963,17 @@ pdfocr_drop_band_writer(fz_context *ctx, fz_band_writer *writer_)
 			fz_write_printf(ctx, out, "%010ld 00000 n \n", writer->xref[i]);
 		fz_write_printf(ctx, out, "trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%ld\n%%%%EOF\n", writer->obj_num, t_pos);
 	}
+}
 
+static void
+pdfocr_drop_band_writer(fz_context *ctx, fz_band_writer *writer_)
+{
+	pdfocr_band_writer *writer = (pdfocr_band_writer *)writer_;
 	fz_free(ctx, writer->stripbuf);
 	fz_free(ctx, writer->compbuf);
 	fz_free(ctx, writer->page_obj);
 	fz_free(ctx, writer->xref);
 	fz_drop_pixmap(ctx, writer->ocrbitmap);
-
 	ocr_fin(ctx, writer->tessapi);
 }
 #endif
@@ -856,13 +981,14 @@ pdfocr_drop_band_writer(fz_context *ctx, fz_band_writer *writer_)
 fz_band_writer *fz_new_pdfocr_band_writer(fz_context *ctx, fz_output *out, const fz_pdfocr_options *options)
 {
 #ifdef OCR_DISABLED
-	fz_throw(ctx, FZ_ERROR_GENERIC, "No OCR support in this build");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "No OCR support in this build");
 #else
 	pdfocr_band_writer *writer = fz_new_band_writer(ctx, pdfocr_band_writer, out);
 
 	writer->super.header = pdfocr_write_header;
 	writer->super.band = pdfocr_write_band;
 	writer->super.trailer = pdfocr_write_trailer;
+	writer->super.close = pdfocr_close_band_writer;
 	writer->super.drop = pdfocr_drop_band_writer;
 
 	if (options)
@@ -884,12 +1010,12 @@ fz_band_writer *fz_new_pdfocr_band_writer(fz_context *ctx, fz_output *out, const
 
 	fz_try(ctx)
 	{
-		writer->tessapi = ocr_init(ctx, writer->options.language);
+		writer->tessapi = ocr_init(ctx, writer->options.language, writer->options.datadir);
 	}
 	fz_catch(ctx)
 	{
 		fz_drop_band_writer(ctx, &writer->super);
-		fz_throw(ctx, FZ_ERROR_GENERIC, "OCR initialisation failed");
+		fz_throw(ctx, FZ_ERROR_LIBRARY, "OCR initialisation failed");
 	}
 
 	return &writer->super;
@@ -897,16 +1023,16 @@ fz_band_writer *fz_new_pdfocr_band_writer(fz_context *ctx, fz_output *out, const
 }
 
 void
-fz_pdfocr_band_writer_set_progress(fz_context *ctx, fz_band_writer *writer_, int (*progress)(fz_context *, void *, int), void *progress_arg)
+fz_pdfocr_band_writer_set_progress(fz_context *ctx, fz_band_writer *writer_, fz_pdfocr_progress_fn *progress, void *progress_arg)
 {
 #ifdef OCR_DISABLED
-	fz_throw(ctx, FZ_ERROR_GENERIC, "No OCR support in this build");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "No OCR support in this build");
 #else
 	pdfocr_band_writer *writer = (pdfocr_band_writer *)writer_;
 	if (writer == NULL)
 		return;
 	if (writer->super.header != pdfocr_write_header)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Not a pdfocr band writer!");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Not a pdfocr band writer!");
 
 	writer->progress = progress;
 	writer->progress_arg = progress_arg;
@@ -917,7 +1043,7 @@ void
 fz_save_pixmap_as_pdfocr(fz_context *ctx, fz_pixmap *pixmap, char *filename, int append, const fz_pdfocr_options *pdfocr)
 {
 #ifdef OCR_DISABLED
-	fz_throw(ctx, FZ_ERROR_GENERIC, "No OCR support in this build");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "No OCR support in this build");
 #else
 	fz_output *out = fz_new_output_with_path(ctx, filename, append);
 	fz_try(ctx)
@@ -980,9 +1106,7 @@ pdfocr_close_writer(fz_context *ctx, fz_document_writer *wri_)
 {
 	fz_pdfocr_writer *wri = (fz_pdfocr_writer*)wri_;
 
-	fz_drop_band_writer(ctx, wri->bander);
-	wri->bander = NULL;
-
+	fz_close_band_writer(ctx, wri->bander);
 	fz_close_output(ctx, wri->out);
 }
 
@@ -1001,12 +1125,15 @@ fz_document_writer *
 fz_new_pdfocr_writer_with_output(fz_context *ctx, fz_output *out, const char *options)
 {
 #ifdef OCR_DISABLED
-	fz_throw(ctx, FZ_ERROR_GENERIC, "No OCR support in this build");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "No OCR support in this build");
 #else
-	fz_pdfocr_writer *wri = fz_new_derived_document_writer(ctx, fz_pdfocr_writer, pdfocr_begin_page, pdfocr_end_page, pdfocr_close_writer, pdfocr_drop_writer);
+	fz_pdfocr_writer *wri = NULL;
+
+	fz_var(wri);
 
 	fz_try(ctx)
 	{
+		wri = fz_new_derived_document_writer(ctx, fz_pdfocr_writer, pdfocr_begin_page, pdfocr_end_page, pdfocr_close_writer, pdfocr_drop_writer);
 		fz_parse_draw_options(ctx, &wri->draw, options);
 		fz_parse_pdfocr_options(ctx, &wri->pdfocr, options);
 		wri->out = out;
@@ -1014,6 +1141,7 @@ fz_new_pdfocr_writer_with_output(fz_context *ctx, fz_output *out, const char *op
 	}
 	fz_catch(ctx)
 	{
+		fz_drop_output(ctx, out);
 		fz_free(ctx, wri);
 		fz_rethrow(ctx);
 	}
@@ -1026,32 +1154,24 @@ fz_document_writer *
 fz_new_pdfocr_writer(fz_context *ctx, const char *path, const char *options)
 {
 #ifdef OCR_DISABLED
-	fz_throw(ctx, FZ_ERROR_GENERIC, "No OCR support in this build");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "No OCR support in this build");
 #else
 	fz_output *out = fz_new_output_with_path(ctx, path ? path : "out.pdfocr", 0);
-	fz_document_writer *wri = NULL;
-	fz_try(ctx)
-		wri = fz_new_pdfocr_writer_with_output(ctx, out, options);
-	fz_catch(ctx)
-	{
-		fz_drop_output(ctx, out);
-		fz_rethrow(ctx);
-	}
-	return wri;
+	return fz_new_pdfocr_writer_with_output(ctx, out, options);
 #endif
 }
 
 void
-fz_pdfocr_writer_set_progress(fz_context *ctx, fz_document_writer *writer, int (*progress)(fz_context *, void *, int), void *progress_arg)
+fz_pdfocr_writer_set_progress(fz_context *ctx, fz_document_writer *writer, fz_pdfocr_progress_fn *progress, void *progress_arg)
 {
 #ifdef OCR_DISABLED
-	fz_throw(ctx, FZ_ERROR_GENERIC, "No OCR support in this build");
+	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "No OCR support in this build");
 #else
 	fz_pdfocr_writer *wri = (fz_pdfocr_writer *)writer;
 	if (!writer)
 		return;
 	if (writer->begin_page != pdfocr_begin_page)
-		fz_throw(ctx, FZ_ERROR_GENERIC, "Not a pdfocr writer!");
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Not a pdfocr writer!");
 	fz_pdfocr_band_writer_set_progress(ctx, wri->bander, progress, progress_arg);
 #endif
 }

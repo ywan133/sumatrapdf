@@ -1,47 +1,17 @@
 
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
 #include "utils/BaseUtil.h"
-#include "utils/ScopedWin.h"
 #include "utils/WinUtil.h"
-#include "utils/Log.h"
 
-#include "wingui/TreeModel.h"
+#include "wingui/UIModels.h"
 
-#include "Annotation.h"
+#include "Settings.h"
+#include "DocController.h"
 #include "EngineBase.h"
 
-void FreePageText(PageText* pageText) {
-    str::Free(pageText->text);
-    free((void*)pageText->coords);
-    pageText->text = nullptr;
-    pageText->coords = nullptr;
-    pageText->len = 0;
-}
-
-RenderedBitmap::~RenderedBitmap() {
-    DeleteObject(hbmp);
-}
-
-RenderedBitmap* RenderedBitmap::Clone() const {
-    HBITMAP hbmp2 = (HBITMAP)CopyImage(hbmp, IMAGE_BITMAP, size.dx, size.dy, 0);
-    return new RenderedBitmap(hbmp2, size);
-}
-
-// render the bitmap into the target rectangle (streching and skewing as requird)
-bool RenderedBitmap::StretchDIBits(HDC hdc, Rect target) const {
-    return BlitHBITMAP(hbmp, hdc, target);
-}
-
-// callers must not delete this (use Clone if you have to modify it)
-HBITMAP RenderedBitmap::GetBitmap() const {
-    return hbmp;
-}
-
-Size RenderedBitmap::Size() const {
-    return size;
-}
+#include "utils/Log.h"
 
 Kind kindPageElementDest = "dest";
 Kind kindPageElementImage = "image";
@@ -51,41 +21,38 @@ Kind kindDestinationNone = "none";
 Kind kindDestinationScrollTo = "scrollTo";
 Kind kindDestinationLaunchURL = "launchURL";
 Kind kindDestinationLaunchEmbedded = "launchEmbedded";
+Kind kindDestinationAttachment = "launchAttachment";
 Kind kindDestinationLaunchFile = "launchFile";
-Kind kindDestinationNextPage = "nextPage";
-Kind kindDestinationPrevPage = "prevPage";
-Kind kindDestinationFirstPage = "firstPage";
-Kind kindDestinationLastPage = "lastPage";
-Kind kindDestinationFindDialog = "findDialog";
-Kind kindDestinationFullScreen = "fullscreen";
-Kind kindDestinationGoBack = "goBack";
-Kind kindDestinationGoForward = "goForward";
-Kind kindDestinationGoToPageDialog = "goToPageDialog";
-Kind kindDestinationPrintDialog = "printDialog";
-Kind kindDestinationSaveAsDialog = "saveAsDialog";
-Kind kindDestinationZoomToDialog = "zoomToDialog";
+Kind kindDestinationDjVu = "destinationDjVu";
+Kind kindDestinationMupdf = "destinationMupdf";
 
+// clang-format off
 static Kind destKinds[] = {
-    kindDestinationNone,           kindDestinationScrollTo,       kindDestinationLaunchURL,
-    kindDestinationLaunchEmbedded, kindDestinationLaunchFile,     kindDestinationNextPage,
-    kindDestinationPrevPage,       kindDestinationFirstPage,      kindDestinationLastPage,
-    kindDestinationFindDialog,     kindDestinationFullScreen,     kindDestinationGoBack,
-    kindDestinationGoForward,      kindDestinationGoToPageDialog, kindDestinationPrintDialog,
-    kindDestinationSaveAsDialog,   kindDestinationZoomToDialog,
+    kindDestinationNone,
+    kindDestinationScrollTo,
+    kindDestinationLaunchURL,
+    kindDestinationLaunchEmbedded,
+    kindDestinationAttachment,
+    kindDestinationLaunchFile,
+    kindDestinationDjVu,
+    kindDestinationMupdf
 };
+// clang-format on
 
-Kind resolveDestKind(char* s) {
-    if (str::IsEmpty(s)) {
-        return nullptr;
-    }
-    for (Kind kind : destKinds) {
-        if (str::Eq(s, kind)) {
-            return kind;
-        }
-    }
-    logf("resolveDestKind: unknown kind '%s'\n", s);
-    CrashIf(true);
-    return nullptr;
+bool IsExternalUrl(const WCHAR* url) {
+    return str::StartsWithI(url, L"http://") || str::StartsWithI(url, L"https://") || str::StartsWithI(url, L"mailto:");
+}
+
+bool IsExternalUrl(const char* url) {
+    return str::StartsWithI(url, "http://") || str::StartsWithI(url, "https://") || str::StartsWithI(url, "mailto:");
+}
+
+void FreePageText(PageText* pageText) {
+    str::Free(pageText->text);
+    free((void*)pageText->coords);
+    pageText->text = nullptr;
+    pageText->coords = nullptr;
+    pageText->len = 0;
 }
 
 PageDestination::~PageDestination() {
@@ -93,108 +60,31 @@ PageDestination::~PageDestination() {
     free(name);
 }
 
-Kind PageDestination::Kind() const {
-    return kind;
-}
-
-// page the destination points to (0 for external destinations such as URLs)
-int PageDestination::GetPageNo() const {
-    return pageNo;
-}
-
-// rectangle of the destination on the above returned page
-RectF PageDestination::GetRect() const {
-    return rect;
-}
-
 // string value associated with the destination (e.g. a path or a URL)
-WCHAR* PageDestination::GetValue() const {
+char* PageDestination::GetValue2() {
     return value;
 }
 
 // the name of this destination (reverses EngineBase::GetNamedDest) or nullptr
 // (mainly applicable for links of type "LaunchFile" to PDF documents)
-WCHAR* PageDestination::GetName() const {
+char* PageDestination::GetName2() {
     return name;
 }
 
-PageDestination* newSimpleDest(int pageNo, RectF rect, const WCHAR* value) {
+IPageDestination* NewSimpleDest(int pageNo, RectF rect, float zoom, const char* value) {
+    if (value) {
+        return new PageDestinationURL(value);
+    }
     auto res = new PageDestination();
     res->pageNo = pageNo;
     res->rect = rect;
     res->kind = kindDestinationScrollTo;
-    if (value) {
-        res->kind = kindDestinationLaunchURL;
-        res->value = str::Dup(value);
-    }
-    return res;
-}
-
-PageDestination* clonePageDestination(PageDestination* dest) {
-    if (!dest) {
-        return nullptr;
-    }
-    auto res = new PageDestination();
-    CrashIf(!dest->kind);
-    res->kind = dest->kind;
-    res->pageNo = dest->GetPageNo();
-    res->rect = dest->GetRect();
-    res->value = str::Dup(dest->GetValue());
-    res->name = str::Dup(dest->GetName());
+    res->zoom = zoom;
     return res;
 }
 
 bool IPageElement::Is(Kind expectedKind) {
-    Kind kind = GetKind();
     return kind == expectedKind;
-}
-
-PageElement::~PageElement() {
-    free(value);
-    delete dest;
-}
-
-Kind PageElement::GetKind() {
-    return kind_;
-}
-
-// page this element lives on (0 for elements in a ToC)
-int PageElement::GetPageNo() {
-    return pageNo;
-}
-
-// rectangle that can be interacted with
-RectF PageElement::GetRect() {
-    return rect;
-}
-
-// string value associated with this element (e.g. displayed in an infotip)
-// caller must free() the result
-WCHAR* PageElement::GetValue() {
-    return value;
-}
-
-// if this element is a link, this returns information about the link's destination
-// (the result is owned by the PageElement and MUST NOT be deleted)
-PageDestination* PageElement::AsLink() {
-    return dest;
-}
-
-IPageElement* PageElement::Clone() {
-    auto* res = new PageElement();
-    res->kind_ = kind_;
-    res->pageNo = pageNo;
-    res->rect = rect;
-    res->value = str::Dup(value);
-    res->dest = clonePageDestination(dest);
-    return res;
-}
-
-IPageElement* clonePageElement(IPageElement* el) {
-    if (!el) {
-        return nullptr;
-    }
-    return el->Clone();
 }
 
 Kind kindTocFzOutline = "tocFzOutline";
@@ -202,7 +92,7 @@ Kind kindTocFzOutlineAttachment = "tocFzOutlineAttachment";
 Kind kindTocFzLink = "tocFzLink";
 Kind kindTocDjvu = "tocDjvu";
 
-TocItem::TocItem(TocItem* parent, const WCHAR* title, int pageNo) {
+TocItem::TocItem(TocItem* parent, const char* title, int pageNo) {
     this->title = str::Dup(title);
     this->pageNo = pageNo;
     this->parent = parent;
@@ -210,17 +100,16 @@ TocItem::TocItem(TocItem* parent, const WCHAR* title, int pageNo) {
 
 TocItem::~TocItem() {
     delete child;
-    delete dest;
+    if (!destNotOwned) {
+        delete dest;
+    }
     while (next) {
         TocItem* tmp = next->next;
         next->next = nullptr;
         delete next;
         next = tmp;
     }
-    free(title);
-    free(rawVal1);
-    free(rawVal2);
-    free(engineFilePath);
+    str::Free(title);
 }
 
 void TocItem::AddSibling(TocItem* sibling) {
@@ -240,28 +129,10 @@ void TocItem::AddSiblingAtEnd(TocItem* sibling) {
 }
 
 void TocItem::AddChild(TocItem* newChild) {
-    TocItem* currChild = child;
+    TocItem* curr = child;
     child = newChild;
     newChild->parent = this;
-    newChild->next = currChild;
-}
-
-// TODO: pick a better name. I think it's used to expand root-level item
-void TocItem::OpenSingleNode() {
-    // only open (root level) ToC nodes if there are at most two
-    if (next && next->next) {
-        return;
-    }
-
-    if (!IsExpanded()) {
-        isOpenToggled = !isOpenToggled;
-    }
-    if (!next) {
-        return;
-    }
-    if (!next->IsExpanded()) {
-        next->isOpenToggled = !next->isOpenToggled;
-    }
+    newChild->next = curr;
 }
 
 // regular delete is recursive, this deletes only this item
@@ -275,53 +146,8 @@ void TocItem::DeleteJustSelf() {
 // returns the destination this ToC item points to or nullptr
 // (the result is owned by the TocItem and MUST NOT be deleted)
 // TODO: rename to GetDestination()
-PageDestination* TocItem::GetPageDestination() {
+IPageDestination* TocItem::GetPageDestination() const {
     return dest;
-}
-
-TocItem* CloneTocItemRecur(TocItem* ti, bool removeUnchecked) {
-    if (ti == nullptr) {
-        return nullptr;
-    }
-    if (removeUnchecked && ti->isUnchecked) {
-        TocItem* next = ti->next;
-        while (next && next->isUnchecked) {
-            next = next->next;
-        }
-        return CloneTocItemRecur(next, removeUnchecked);
-    }
-    TocItem* res = new TocItem();
-    res->parent = ti->parent;
-    res->title = str::Dup(ti->title);
-    res->isOpenDefault = ti->isOpenDefault;
-    res->isOpenToggled = ti->isOpenToggled;
-    res->isUnchecked = ti->isUnchecked;
-    res->pageNo = ti->pageNo;
-    res->id = ti->id;
-    res->fontFlags = ti->fontFlags;
-    res->color = ti->color;
-    res->dest = clonePageDestination(ti->dest);
-    res->child = CloneTocItemRecur(ti->child, removeUnchecked);
-
-    res->nPages = ti->nPages;
-    res->engineFilePath = str::Dup(ti->engineFilePath);
-
-    TocItem* next = ti->next;
-    if (removeUnchecked) {
-        while (next && next->isUnchecked) {
-            next = next->next;
-        }
-    }
-    res->next = CloneTocItemRecur(next, removeUnchecked);
-    return res;
-}
-
-WCHAR* TocItem::Text() {
-    return title;
-}
-
-TreeItem* TocItem::Parent() {
-    return parent;
 }
 
 int TocItem::ChildCount() {
@@ -334,7 +160,18 @@ int TocItem::ChildCount() {
     return n;
 }
 
-TreeItem* TocItem::ChildAt(int n) {
+TocItem* TocItem::ChildAt(int n) {
+    if (n == 0) {
+        currChild = child;
+        currChildNo = 0;
+        return child;
+    }
+    // speed up sequential iteration over children
+    if (currChild != nullptr && n == currChildNo + 1) {
+        currChild = currChild->next;
+        ++currChildNo;
+        return currChild;
+    }
     auto node = child;
     while (n > 0) {
         n--;
@@ -355,16 +192,13 @@ bool TocItem::IsExpanded() {
     return isOpenDefault != isOpenToggled;
 }
 
-bool TocItem::IsChecked() {
-    return !isUnchecked;
-}
-
 bool TocItem::PageNumbersMatch() const {
-    if (!dest || dest->pageNo == 0) {
-        return true;
+    int destPageNo = PageDestGetPageNo(dest);
+    if (destPageNo <= 0) {
+        return true; // TODO: should be false?
     }
-    if (pageNo != dest->pageNo) {
-        logf("pageNo: %d, dest->pageNo: %d\n", pageNo, dest->pageNo);
+    if (pageNo != destPageNo) {
+        logf("pageNo: %d, dest->pageNo: %d\n", pageNo, destPageNo);
         return false;
     }
     return true;
@@ -378,36 +212,60 @@ TocTree::~TocTree() {
     delete root;
 }
 
-int TocTree::RootCount() {
-    int n = 0;
-    auto node = root;
-    while (node) {
-        n++;
-        node = node->next;
-    }
-    return n;
+TreeItem TocTree::Root() {
+    return (TreeItem)root;
 }
 
-TreeItem* TocTree::RootAt(int n) {
-    auto node = root;
-    while (n > 0) {
-        n--;
-        node = node->next;
-    }
-    return node;
+char* TocTree::Text(TreeItem ti) {
+    auto tocItem = (TocItem*)ti;
+    return tocItem->title;
 }
 
-TocTree* CloneTocTree(TocTree* tree, bool removeUnchecked) {
-    TocTree* res = new TocTree();
-    res->root = CloneTocItemRecur(tree->root, removeUnchecked);
-    return res;
+TreeItem TocTree::Parent(TreeItem ti) {
+    auto tocItem = (TocItem*)ti;
+    return (TreeItem)tocItem->parent;
+}
+
+int TocTree::ChildCount(TreeItem ti) {
+    auto tocItem = (TocItem*)ti;
+    return tocItem->ChildCount();
+}
+
+TreeItem TocTree::ChildAt(TreeItem ti, int idx) {
+    auto tocItem = (TocItem*)ti;
+    return (TreeItem)tocItem->ChildAt(idx);
+}
+
+bool TocTree::IsExpanded(TreeItem ti) {
+    auto tocItem = (TocItem*)ti;
+    return tocItem->IsExpanded();
+}
+
+bool TocTree::IsChecked(TreeItem ti) {
+    auto tocItem = (TocItem*)ti;
+    return !tocItem->isUnchecked;
+}
+
+void TocTree::SetHandle(TreeItem ti, HTREEITEM hItem) {
+    ReportIf(ti < 0);
+    TocItem* tocItem = (TocItem*)ti;
+    tocItem->hItem = hItem;
+}
+
+HTREEITEM TocTree::GetHandle(TreeItem ti) {
+    ReportIf(ti < 0);
+    TocItem* tocItem = (TocItem*)ti;
+    return tocItem->hItem;
 }
 
 // TODO: speed up by removing recursion
-bool VisitTocTree(TocItem* ti, const std::function<bool(TocItem*)>& f) {
+bool VisitTocTree(TocItem* ti, const VisitTocTreeCb& f) {
     bool cont;
+    VisitTocTreeData d;
     while (ti) {
-        cont = f(ti);
+        d.ti = ti;
+        f.Call(&d);
+        cont = !d.stopTraversal;
         if (cont && ti->child) {
             cont = VisitTocTree(ti->child, f);
         }
@@ -419,11 +277,14 @@ bool VisitTocTree(TocItem* ti, const std::function<bool(TocItem*)>& f) {
     return true;
 }
 
-static bool VisitTocTreeWithParentRecursive(TocItem* ti, TocItem* parent,
-                                            const std::function<bool(TocItem* ti, TocItem* parent)>& f) {
+static bool VisitTocTreeWithParentRecursive(TocItem* ti, TocItem* parent, const VisitTocTreeCb& f) {
     bool cont;
+    VisitTocTreeData d;
     while (ti) {
-        cont = f(ti, parent);
+        d.ti = ti;
+        d.parent = parent;
+        f.Call(&d);
+        cont = !d.stopTraversal;
         if (cont && ti->child) {
             cont = VisitTocTreeWithParentRecursive(ti->child, ti, f);
         }
@@ -435,17 +296,17 @@ static bool VisitTocTreeWithParentRecursive(TocItem* ti, TocItem* parent,
     return true;
 }
 
-bool VisitTocTreeWithParent(TocItem* ti, const std::function<bool(TocItem* ti, TocItem* parent)>& f) {
+bool VisitTocTreeWithParent(TocItem* ti, const VisitTocTreeCb& f) {
     return VisitTocTreeWithParentRecursive(ti, nullptr, f);
 }
 
-static bool setTocItemParent(TocItem* ti, TocItem* parent) {
-    ti->parent = parent;
-    return true;
+static void SetTocItemParent(VisitTocTreeData* d) {
+    d->ti->parent = d->parent;
 }
 
 void SetTocTreeParents(TocItem* treeRoot) {
-    VisitTocTreeWithParent(treeRoot, setTocItemParent);
+    auto fn = MkFunc1Void(SetTocItemParent);
+    VisitTocTreeWithParent(treeRoot, fn);
 }
 
 RenderPageArgs::RenderPageArgs(int pageNo, float zoom, int rotation, RectF* pageRect, RenderTarget target,
@@ -458,21 +319,31 @@ RenderPageArgs::RenderPageArgs(int pageNo, float zoom, int rotation, RectF* page
     this->cookie_out = cookie_out;
 }
 
+int EngineBase::AddRef() {
+    return refCount.Add();
+}
+
+bool EngineBase::Release() {
+    int rc = refCount.Dec();
+    if (rc == 0) {
+        delete this;
+        return true;
+    }
+    return false;
+}
+
 EngineBase::~EngineBase() {
-    free(decryptionKey);
+    str::Free(decryptionKey);
+    str::Free(defaultExt);
 }
 
 int EngineBase::PageCount() const {
-    CrashIf(pageCount < 0);
+    ReportIf(pageCount < 0);
     return pageCount;
 }
 
-RectF EngineBase::PageContentBox(int pageNo, [[maybe_unused]] RenderTarget target) {
+RectF EngineBase::PageContentBox(int pageNo, RenderTarget) {
     return PageMediabox(pageNo);
-}
-
-bool EngineBase::SaveFileAsPDF([[maybe_unused]] const char* pdfFileName, [[maybe_unused]] bool includeUserAnnots) {
-    return false;
 }
 
 bool EngineBase::IsImageCollection() const {
@@ -491,11 +362,11 @@ float EngineBase::GetFileDPI() const {
     return fileDPI;
 }
 
-PageDestination* EngineBase::GetNamedDest([[maybe_unused]] const WCHAR* name) {
+IPageDestination* EngineBase::GetNamedDest(const char*) {
     return nullptr;
 }
 
-bool EngineBase::HacToc() {
+bool EngineBase::HasToc() {
     TocTree* tree = GetToc();
     return tree != nullptr;
 }
@@ -504,16 +375,30 @@ TocTree* EngineBase::GetToc() {
     return nullptr;
 }
 
+// default implementation that just sets wanted keys
+void EngineBase::GetProperties(const StrVec&, StrVec&) {
+#if 0
+    for (auto& key : keys) {
+        TempStr val = GetPropertyTemp(key);
+        if (!val) {
+            continue;
+        }
+        keyValueOut.Append(key);
+        keyValueOut.Append(val);
+    }
+#endif
+}
+
 bool EngineBase::HasPageLabels() const {
     return hasPageLabels;
 }
 
-WCHAR* EngineBase::GetPageLabel(int pageNo) const {
-    return str::Format(L"%d", pageNo);
+TempStr EngineBase::GetPageLabeTemp(int pageNo) const {
+    return str::FormatTemp("%d", pageNo);
 }
 
-int EngineBase::GetPageByLabel(const WCHAR* label) const {
-    return _wtoi(label);
+int EngineBase::GetPageByLabel(const char* label) const {
+    return atoi(label);
 }
 
 bool EngineBase::IsPasswordProtected() const {
@@ -524,8 +409,8 @@ char* EngineBase::GetDecryptionKey() const {
     return str::Dup(decryptionKey);
 }
 
-const WCHAR* EngineBase::FileName() const {
-    return fileNameBase.Get();
+const char* EngineBase::FilePath() const {
+    return fileNameBase;
 }
 
 RenderedBitmap* EngineBase::GetImageForPageElement(IPageElement*) {
@@ -533,7 +418,7 @@ RenderedBitmap* EngineBase::GetImageForPageElement(IPageElement*) {
     return nullptr;
 }
 
-void EngineBase::SetFileName(const WCHAR* s) {
+void EngineBase::SetFilePath(const char* s) {
     fileNameBase.SetCopy(s);
 }
 
@@ -543,15 +428,7 @@ PointF EngineBase::Transform(PointF pt, int pageNo, float zoom, int rotation, bo
     return rect.TL();
 }
 
-// skip file:// and maybe file:/// from s. It might be added by mupdf.
-// do not free the result
-const WCHAR* SkipFileProtocol(const WCHAR* s) {
-    if (!str::StartsWithI(s, L"file://")) {
-        return s;
-    }
-    s += 7;
-    if (s[0] == L'/') {
-        s += 1;
-    }
-    return s;
+bool EngineBase::HandleLink(IPageDestination*, ILinkHandler*) {
+    // if not implemented in derived classes
+    return false;
 }

@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2021 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "mupdf/fitz.h"
 #include "mupdf/pdf.h"
 
@@ -52,6 +74,16 @@ fz_unicode_from_glyph_name_strict(const char *name)
 	return 0;
 }
 
+static int
+read_num(const char *p, int base)
+{
+	char *e;
+	int v = strtol(p, &e, base);
+	if (*e != 0)
+		return 0;
+	return v;
+}
+
 int
 fz_unicode_from_glyph_name(const char *name)
 {
@@ -67,7 +99,27 @@ fz_unicode_from_glyph_name(const char *name)
 	p = strchr(buf, '.');
 	if (p) p[0] = 0;
 	p = strchr(buf, '_');
-	if (p) p[0] = 0;
+	if (p)
+	{
+		/* Hacky tests for alternative ligature names */
+		if (buf[0] == 'f')
+		{
+			if (!strcmp(buf, "f_f"))
+				strcpy(buf, "ff");
+			else if (!strcmp(buf, "f_f_i"))
+				strcpy(buf, "ffi");
+			else if (!strcmp(buf, "f_f_l"))
+				strcpy(buf, "ffl");
+			else if (!strcmp(buf, "f_i"))
+				strcpy(buf, "fi");
+			else if (!strcmp(buf, "f_l"))
+				strcpy(buf, "fl");
+			else
+				p[0] = 0;
+		}
+		else
+			p[0] = 0;
+	}
 
 	while (l <= r)
 	{
@@ -82,11 +134,13 @@ fz_unicode_from_glyph_name(const char *name)
 	}
 
 	if (buf[0] == 'u' && buf[1] == 'n' && buf[2] == 'i' && strlen(buf) == 7)
-		code = strtol(buf + 3, NULL, 16);
+		code = read_num(buf+3, 16);
 	else if (buf[0] == 'u')
-		code = strtol(buf + 1, NULL, 16);
+		code = read_num(buf+1, 16);
 	else if (buf[0] == 'a' && buf[1] != 0 && buf[2] != 0)
-		code = strtol(buf + 1, NULL, 10);
+		code = read_num(buf+1, 10);
+	else
+		code = read_num(buf, 10);
 
 	return (code > 0 && code <= 0x10ffff) ? code : FZ_REPLACEMENT_CHARACTER;
 }

@@ -1,15 +1,9 @@
 package main
 
-import (
-	"strings"
+import "github.com/kjk/common/u"
 
-	"github.com/kjk/u"
-)
-
+// return false to exclude a file
 func excludeFiles(s string) bool {
-	if strings.Contains(s, "Trans_sumatra_txt.cpp") {
-		return false
-	}
 	return true
 }
 

@@ -1,16 +1,11 @@
-/* Copyright 2021 the SumatraPDF project authors (see AUTHORS file).
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-bool IsValidPageRange(const WCHAR* ranges);
-bool IsBenchPagesInfo(const WCHAR* s);
-void BenchFileOrDir(WStrVec& pathsToBench);
-bool IsStressTesting();
-void BenchEbookLayout(WCHAR* filePath);
-
 struct Flags;
-struct WindowInfo;
+struct MainWindow;
 
-void StartStressTest(Flags* i, WindowInfo* win);
-
-void OnStressTestTimer(WindowInfo* win, int timerId);
-void FinishStressTest(WindowInfo* win);
+void BenchFileOrDir(StrVec& pathsToBench);
+bool IsStressTesting();
+void StartStressTest(Flags* i, MainWindow* win);
+void OnStressTestTimer(MainWindow* win, int timerId);
+void FinishStressTest(MainWindow* win);

@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 /*
 This code does smooth scaling of a pixmap.
 
@@ -266,32 +288,9 @@ init_weights(fz_weights *weights, int j)
 }
 
 static void
-add_weight(fz_weights *weights, int j, int i, fz_scale_filter *filter,
-	float x, float F, float G, int src_w, float dst_w)
+insert_weight(fz_weights *weights, int j, int i, int weight)
 {
-	float dist = j - x + 0.5f - ((i + 0.5f)*dst_w/src_w);
-	float f;
-	int min, len, index, weight;
-
-	dist *= G;
-	if (dist < 0)
-		dist = -dist;
-	f = filter->fn(filter, dist)*F;
-	weight = (int)(256*f+0.5f);
-
-	/* Ensure i is in range */
-	if (i < 0 || i >= src_w)
-		return;
-	if (weight == 0)
-	{
-		/* We add a fudge factor here to allow for extreme downscales
-		 * where all the weights round to 0. Ensure that at least one
-		 * (arbitrarily the first one) is non zero. */
-		if (weights->new_line && f > 0)
-			weight = 1;
-		else
-			return;
-	}
+	int min, len, index;
 
 	/* Move j from patch_l...patch_l+patch_w range to 0..patch_w range */
 	j -= weights->patch_l;
@@ -340,6 +339,27 @@ add_weight(fz_weights *weights, int j, int i, fz_scale_filter *filter,
 		/* Infrequent case */
 		weights->index[index+i-min] += weight;
 	}
+}
+
+static void
+add_weight(fz_weights *weights, int j, int i, fz_scale_filter *filter,
+	float x, float F, float G, int src_w, float dst_w)
+{
+	float dist = j - x + 0.5f - ((i + 0.5f)*dst_w/src_w);
+	float f;
+	int weight;
+
+	dist *= G;
+	if (dist < 0)
+		dist = -dist;
+	f = filter->fn(filter, dist)*F;
+	weight = (int)(256*f+0.5f);
+
+	/* Ensure i is in range */
+	if (i < 0 || i >= src_w)
+		return;
+	if (weight != 0)
+		insert_weight(weights, j, i, weight);
 }
 
 static void
@@ -420,6 +440,18 @@ check_weights(fz_weights *weights, int j, int w, float x, float wf)
 		weights->index[maxidx-1] += 256-sum;
 }
 
+static int
+window_fix(int l, int *rp, float window, float centre)
+{
+	int r = *rp;
+	while (centre - l > window)
+		l++;
+	while (r - centre > window)
+		r--;
+	*rp = r;
+	return l;
+}
+
 static fz_weights *
 make_weights(fz_context *ctx, int src_w, float x, float dst_w, fz_scale_filter *filter, int vertical, int dst_w_int, int patch_l, int patch_r, int n, int flip, fz_scale_cache *cache)
 {
@@ -475,10 +507,31 @@ make_weights(fz_context *ctx, int src_w, float x, float dst_w, fz_scale_filter *
 		int l, r;
 		l = ceilf(centre - window);
 		r = floorf(centre + window);
+
+		/* Now, due to the vagaries of floating point, if centre is large, l
+		 * and r can actually end up further than 2*window apart. All we care
+		 * about in this case is that we don't crash! We want a cheap correction
+		 * that avoids the assert and doesn't cost too much in the normal case.
+		 * This should do. */
+		if (r - l > 2 * window)
+			l = window_fix(l, &r, window, centre);
+
 		init_weights(weights, j);
 		for (; l <= r; l++)
 		{
 			add_weight(weights, j, l, filter, x, F, G, src_w, dst_w);
+		}
+		if (weights->new_line)
+		{
+			/* In very rare cases (bug 706764) we might not actually
+			 * have generated any non-zero weights for this destination
+			 * pixel. Just use the central pixel. */
+			int src_x = floorf(centre);
+			if (src_x >= src_w)
+				src_x = src_w-1;
+			if (src_x < 0)
+				src_x = 0;
+			insert_weight(weights, j, src_x, 1);
 		}
 		check_weights(weights, j, dst_w_int, x, dst_w);
 		if (vertical)

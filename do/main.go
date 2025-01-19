@@ -2,27 +2,82 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/kjk/u"
+	"github.com/kjk/common/u"
 )
 
 var (
-	flgNoCleanCheck          bool
-	flgUpload                bool
-	flgSkipTranslationVerify bool
+	r2Access          string
+	r2Secret          string
+	b2Access          string
+	b2Secret          string
+	transUploadSecret string
 )
+
+func loadSecrets() bool {
+	var m map[string]string
+	panicIf(!u.IsWinOrMac(), "secretsEnv is empty and running on linux")
+	secretsSrcPath := filepath.Join("..", "secrets", "sumatrapdf.env")
+	d, err := os.ReadFile(secretsSrcPath)
+	if err != nil {
+		logf("Failed to read secrets from %s, will try env variables\n", secretsSrcPath)
+		return false
+	}
+	m = u.ParseEnvMust(d)
+
+	getEnv := func(key string, val *string, minLen int) {
+		v := strings.TrimSpace(m[key])
+		if len(v) < minLen {
+			logf("Missing %s, len: %d, wanted: %d\n", key, len(v), minLen)
+			return
+		}
+		*val = v
+		// logf("Got %s, '%s'\n", key, v)
+		logf("Got %s\n", key)
+	}
+	getEnv("R2_ACCESS", &r2Access, 8)
+	getEnv("R2_SECRET", &r2Secret, 8)
+	getEnv("BB_ACCESS", &b2Access, 8)
+	getEnv("BB_SECRET", &b2Secret, 8)
+	getEnv("TRANS_UPLOAD_SECRET", &transUploadSecret, 4)
+	return true
+}
+
+func ensureAllUploadCreds() {
+	panicIf(r2Access == "", "Not uploading to s3 because R2_ACCESS env variable not set\n")
+	panicIf(r2Secret == "", "Not uploading to s3 because R2_SECRET env variable not set\n")
+	panicIf(b2Access == "", "Not uploading to backblaze because BB_ACCESS env variable not set\n")
+	panicIf(b2Secret == "", "Not uploading to backblaze because BB_SECRET env variable not set\n")
+}
+
+func getSecrets() {
+	if loadSecrets() {
+		return
+	}
+	r2Access = os.Getenv("R2_ACCESS")
+	r2Secret = os.Getenv("R2_SECRET")
+	b2Access = os.Getenv("BB_ACCESS")
+	b2Secret = os.Getenv("BB_SECRET")
+	transUploadSecret = os.Getenv("TRANS_UPLOAD_SECRET")
+}
 
 func regenPremake() {
 	premakePath := filepath.Join("bin", "premake5.exe")
 	{
-		cmd := exec.Command(premakePath, "vs2019")
-		u.RunCmdLoggedMust(cmd)
+		cmd := exec.Command(premakePath, "vs2022")
+		runCmdLoggedMust(cmd)
+	}
+
+	{
+		cmd := exec.Command(premakePath, "--with-clang", "vs2022")
+		runCmdLoggedMust(cmd)
 	}
 }
 
@@ -32,18 +87,27 @@ func openForAppend(name string) (*os.File, error) {
 
 func runCmdShowProgressAndLog(cmd *exec.Cmd, path string) error {
 	f, err := openForAppend(path)
-	panicIfErr(err)
+	must(err)
 	defer f.Close()
 
 	cmd.Stdout = io.MultiWriter(f, os.Stdout)
 	cmd.Stderr = io.MultiWriter(f, os.Stderr)
-	fmt.Printf("> %s\n", u.FmtCmdShort(*cmd))
+	logf("> %s\n", fmtCmdShort(*cmd))
 	return cmd.Run()
 }
 
 const (
 	cppcheckLogFile = "cppcheck.out.txt"
 )
+
+func detectCppcheckExe() string {
+	// TODO: better detection logic
+	path := `c:\Program Files\Cppcheck\cppcheck.exe`
+	if pathExists(path) {
+		return path
+	}
+	return "cppcheck.exe"
+}
 
 func runCppCheck(all bool) {
 	// -q : quiet, doesn't print progress report
@@ -56,13 +120,14 @@ func runCppCheck(all bool) {
 	// ... line with a problem
 	var cmd *exec.Cmd
 
-	// TODO: not sure if adding Windows SDK include  path helps.
+	// TODO: not sure if adding Windows SDK include path helps.
 	// It takes a lot of time and doesn't seem to provide value
 	//winSdkIncludeDir := `C:\Program Files (x86)\Windows Kits\10\Include\10.0.18362.0\um`
 	// "-I", winSdkIncludeDir
 	// "-D__RPCNDR_H_VERSION__=440"
+	// STDMETHODIMP_(type)=type
 
-	args := []string{"--platform=win64", "-DWIN32", "-D_WIN32", "-D_MSC_VER=1800", "-D_M_X64", "-DIFACEMETHODIMP_(x)=x", "-DSTDAPI_(x)=x", "-DPRE_RELEASE_VER=3.3", "-q", "-v"}
+	args := []string{"--platform=win64", "-DWIN32", "-D_WIN32", "-D_MSC_VER=1800", "-D_M_X64", "-DIFACEMETHODIMP_(x)=x", "-DSTDMETHODIMP_(x)=x", "-DSTDAPI_(x)=x", "-DPRE_RELEASE_VER=3.4", "-q", "-v"}
 	if all {
 		args = append(args, "--enable=style")
 		args = append(args, "--suppress=constParameter")
@@ -85,189 +150,161 @@ func runCppCheck(all bool) {
 		// I often use global variables set at compile time to
 		// control paths to take
 		args = append(args, "--suppress=knownConditionTrueFalse")
+		args = append(args, "--suppress=constParameterPointer")
+		args = append(args, "--suppress=constVariablePointer")
+		args = append(args, "--suppress=constVariableReference")
+		args = append(args, "--suppress=constParameterReference")
+		args = append(args, "--suppress=useInitializationList")
+		args = append(args, "--suppress=duplInheritedMember")
+		args = append(args, "--suppress=unusedStructMember")
+		args = append(args, "--suppress=CastIntegerToAddressAtReturn")
+		args = append(args, "--suppress=uselessOverride") // false positive
 	}
-	args = append(args, "--inline-suppr", "-I", "src", "-I", "src/utils", "src")
-	cmd = exec.Command("cppcheck", args...)
+	args = append(args, "--check-level=exhaustive", "--inline-suppr", "-I", "src", "-I", "src/utils", "src")
+	cppcheckExe := detectCppcheckExe()
+	cmd = exec.Command(cppcheckExe, args...)
 	os.Remove(cppcheckLogFile)
 	err := runCmdShowProgressAndLog(cmd, cppcheckLogFile)
 	must(err)
 	logf("\nLogged output to '%s'\n", cppcheckLogFile)
 }
 
-func main() {
-	if u.DirExists("/opt/buildhome/repo") {
-		// on Cloudflare pages build machine
-		os.Chdir("/opt/buildhome/repo")
-	} else {
-		u.CdUpDir("sumatrapdf")
+type BuildOptions struct {
+	upload                    bool
+	verifyTranslationUpToDate bool
+	doCleanCheck              bool
+	releaseBuild              bool
+}
+
+func ensureBuildOptionsPreRequesites(opts *BuildOptions) {
+	logf("upload: %v\n", opts.upload)
+	logf("verifyTranslationUpToDate: %v\n", opts.verifyTranslationUpToDate)
+
+	if opts.upload {
+		ensureAllUploadCreds()
 	}
-	logf("Current directory: %s\n", u.CurrDirAbsMust())
+
+	if opts.verifyTranslationUpToDate {
+		verifyTranslationsMust()
+	}
+	if opts.doCleanCheck {
+		panicIf(!isGitClean(""), "git has unsaved changes\n")
+	}
+	if opts.releaseBuild {
+		verifyOnReleaseBranchMust()
+		os.RemoveAll("out")
+	}
+}
+
+func main() {
+	logf("Current directory: %s\n", currDirAbsMust())
 	timeStart := time.Now()
 	defer func() {
-		fmt.Printf("Finished in %s\n", time.Since(timeStart))
+		logf("Finished in %s\n", time.Since(timeStart))
 	}()
 
+	// ad-hoc flags to be set manually (to show less options)
 	var (
-		flgRegenPremake            bool
-		flgCIBuild                 bool
-		flgUploadCiBuild           bool
-		flgBuildLzsa               bool
-		flgBuildPreRelease         bool
-		flgBuildRaMicroPreRelease  bool
-		flgBuildRelease            bool
-		flgBuildReleaseFast        bool
-		flgBuildRelease32Fast      bool
-		flgSmoke                   bool
-		flgWc                      bool
-		flgDownloadTranslations    bool
-		flgRegenerateTranslattions bool
-		flgUploadTranslations      bool
-		flgClean                   bool
-		flgDeleteOldBuilds         bool
-		flgCrashes                 bool
-		flgCheckAccessKeys         bool
-		flgBuildNo                 bool
-		flgTriggerPreRel           bool
-		flgTriggerRaMicroPreRel    bool
-		flgTriggerCodeQL           bool
-		flgWebsiteRun              bool
-		flgWebsiteDeployProd       bool
-		flgWebsiteDeployDev        bool
-		flgWebsiteDeployCloudflare bool
-		flgWebsiteImportNotion     bool
-		flgWebsiteImportAndDeploy  bool
-		flgWebsiteBuildCloudflare  bool
-		flgNoCache                 bool
-		flgClangFormat             bool
-		flgCppCheck                bool
-		flgCppCheckAll             bool
-		flgClangTidy               bool
-		flgDiff                    bool
-		flgGenStructs              bool
-		flgUpdateVer               string
+		flgBuildLzsa              = false
+		flgClangTidy              = false
+		flgClangTidyFix           = false
+		flgCppCheck               = false
+		flgCppCheckAll            = false
+		flgFindLargestFilesByExt  = false
+		flgGenTranslationsInfoCpp = false
+		flgPrintBuildNo           = false
+	)
+
+	var (
+		flgBuildLogview         bool
+		flgBuildNo              int
+		flgBuildPreRelease      bool
+		flgBuildRelease         bool
+		flgBuildSmoke           bool
+		flgBuildCodeQL          bool
+		flgCheckAccessKeys      bool
+		flgCIBuild              bool
+		flgCIDailyBuild         bool
+		flgClangFormat          bool
+		flgClean                bool
+		flgDiff                 bool
+		flgFilesList            bool
+		flgFileUpload           string
+		flgGenDocs              bool
+		flgGenSettings          bool
+		flgGenWebsiteDocs       bool
+		flgLogView              bool
+		flgRegenPremake         bool
+		flgRunTests             bool
+		flgTransDownload        bool
+		flgTriggerCodeQL        bool
+		flgUpdateGoDeps         bool
+		flgUpdateVer            string
+		flgUpload               bool
+		flgWc                   bool
+		flgSignUploadPreRelease bool
 	)
 
 	{
+		flag.StringVar(&flgFileUpload, "file-upload", "", "upload a test file to s3 / spaces")
+		flag.BoolVar(&flgFilesList, "files-list", false, "list uploaded files in s3 / spaces")
 		flag.BoolVar(&flgRegenPremake, "premake", false, "regenerate premake*.lua files")
 		flag.BoolVar(&flgCIBuild, "ci", false, "run CI steps")
-		flag.BoolVar(&flgUploadCiBuild, "ci-upload", false, "upload the result of ci build to s3 and do spaces")
-		flag.BoolVar(&flgSmoke, "smoke", false, "run smoke build (installer for 64bit release)")
+		flag.BoolVar(&flgCIDailyBuild, "ci-daily", false, "run CI daily steps")
+		flag.BoolVar(&flgBuildSmoke, "build-smoke", false, "run smoke build (installer for 64bit release)")
+		flag.BoolVar(&flgSignUploadPreRelease, "sign-upload-pre-rel", false, "sign and upload pre-release")
 		flag.BoolVar(&flgBuildPreRelease, "build-pre-rel", false, "build pre-release")
-		flag.BoolVar(&flgBuildRaMicroPreRelease, "build-ramicro-pre-rel", false, "build ramicro pre-release")
 		flag.BoolVar(&flgBuildRelease, "build-release", false, "build release")
-		flag.BoolVar(&flgBuildReleaseFast, "build-release-fast", false, "build only 64-bit release installer, for testing")
-		flag.BoolVar(&flgBuildRelease32Fast, "build-release-32-fast", false, "build only 32-bit release installer, for testing")
-		flag.BoolVar(&flgBuildLzsa, "build-lzsa", false, "build MakeLZSA.exe")
-		flag.BoolVar(&flgNoCleanCheck, "no-clean-check", false, "allow running if repo has changes (for testing build script)")
+		flag.BoolVar(&flgBuildCodeQL, "build-codeql", false, "build for codeql")
+		//flag.BoolVar(&flgBuildLzsa, "build-lzsa", false, "build MakeLZSA.exe")
 		flag.BoolVar(&flgUpload, "upload", false, "upload the build to s3 and do spaces")
-		flag.BoolVar(&flgClangFormat, "clang-format", false, "format source files with clang-format")
+		flag.BoolVar(&flgClangFormat, "format", false, "format source files with clang-format")
 		flag.BoolVar(&flgWc, "wc", false, "show loc stats (like wc -l)")
-		flag.BoolVar(&flgDownloadTranslations, "trans-dl", false, "download translations and re-generate C code")
-		flag.BoolVar(&flgRegenerateTranslattions, "trans-regen", false, "regenerate .cpp translations files from strings/translations.txt")
-		flag.BoolVar(&flgUploadTranslations, "trans-upload", false, "upload translations to apptranslators.org if changed")
+		flag.BoolVar(&flgTransDownload, "trans-dl", false, "download latest translations to translations/translations.txt")
+		//flag.BoolVar(&flgGenTranslationsInfoCpp, "trans-gen-info", false, "generate src/TranslationLangs.cpp")
 		flag.BoolVar(&flgClean, "clean", false, "clean the build (remove out/ files except for settings)")
-		flag.BoolVar(&flgDeleteOldBuilds, "delete-old-builds", false, "delete old builds")
-		flag.BoolVar(&flgCrashes, "crashes", false, "see crashes in a web ui")
 		flag.BoolVar(&flgCheckAccessKeys, "check-access-keys", false, "check access keys for menu items")
-		flag.BoolVar(&flgBuildNo, "build-no", false, "print build number")
-		flag.BoolVar(&flgTriggerPreRel, "trigger-pre-rel", false, "trigger pre-release build")
-		flag.BoolVar(&flgTriggerRaMicroPreRel, "trigger-ramicro-pre-rel", false, "trigger pre-release build")
+		//flag.BoolVar(&flgPrintBuildNo, "build-no", false, "print build number")
 		flag.BoolVar(&flgTriggerCodeQL, "trigger-codeql", false, "trigger codeql build")
-		flag.BoolVar(&flgWebsiteRun, "website-run", false, "preview website locally")
-		flag.BoolVar(&flgWebsiteDeployProd, "website-deploy-prod", false, "deploy website")
-		flag.BoolVar(&flgWebsiteDeployDev, "website-deploy-dev", false, "deploy a preview of website")
-		flag.BoolVar(&flgWebsiteDeployCloudflare, "website-deploy-cf", false, "deploy website to cloudflare")
-		flag.BoolVar(&flgWebsiteImportNotion, "website-import-notion", false, "import docs from notion")
-		flag.BoolVar(&flgWebsiteImportAndDeploy, "website-import-deploy", false, "import from notion and deploy")
-		flag.BoolVar(&flgWebsiteBuildCloudflare, "website-build-cf", false, "build the website (download Sumatra files")
-		flag.BoolVar(&flgNoCache, "no-cache", false, "if true, notion import ignores cache")
 		flag.BoolVar(&flgCppCheck, "cppcheck", false, "run cppcheck (must be installed)")
 		flag.BoolVar(&flgCppCheckAll, "cppcheck-all", false, "run cppcheck with more checks (must be installed)")
-		flag.BoolVar(&flgClangTidy, "clang-tidy", false, "run clang-tidy (must be installed)")
+		//flag.BoolVar(&flgClangTidy, "clang-tidy", false, "run clang-tidy (must be installed)")
+		//flag.BoolVar(&flgClangTidyFix, "clang-tidy-fix", false, "run clang-tidy (must be installed)")
 		flag.BoolVar(&flgDiff, "diff", false, "preview diff using winmerge")
-		flag.BoolVar(&flgGenStructs, "gen-structs", false, "re-generate src/SettingsStructs.h")
+		flag.BoolVar(&flgGenSettings, "gen-settings", false, "re-generate src/Settings.h")
 		flag.StringVar(&flgUpdateVer, "update-auto-update-ver", "", "update version used for auto-update checks")
+		flag.BoolVar(&flgLogView, "logview", false, "run logview")
+		flag.BoolVar(&flgRunTests, "run-tests", false, "run test_util executable")
+		flag.BoolVar(&flgBuildLogview, "build-logview", false, "build logview-win. Use -upload to also upload it to backblaze")
+		flag.IntVar(&flgBuildNo, "build-no-info", 0, "print build number info for given build number")
+		flag.BoolVar(&flgUpdateGoDeps, "update-go-deps", false, "update go dependencies")
+		flag.BoolVar(&flgGenDocs, "gen-docs", false, "generate html docs in docs/www from markdown in docs/md")
+		flag.BoolVar(&flgGenWebsiteDocs, "gen-docs-website", false, "generate html docs in ../sumatra-website repo and check them in")
 		flag.Parse()
 	}
 
-	// early check so we don't find it out only after 20 minutes of building
-	if flgUpload || flgUploadCiBuild {
-		if shouldSignAndUpload() {
-			panicIf(!hasSpacesCreds())
-			panicIf(!hasS3Creds())
-		}
-	}
-
-	if flgWebsiteRun {
-		websiteRunLocally()
+	if false {
+		genHTMLDocsForApp()
+		// genTranslationInfoCpp()
 		return
 	}
 
-	if flgWebsiteImportNotion {
-		websiteImportNotion()
+	if flgGenDocs {
+		genHTMLDocsForApp()
 		return
 	}
 
-	if flgWebsiteDeployDev {
-		websiteDeployDev()
+	if flgGenWebsiteDocs {
+		genHTMLDocsForWebsite()
 		return
 	}
 
-	if flgWebsiteDeployProd {
-		websiteDeployProd()
-		return
-	}
-
-	if flgWebsiteImportAndDeploy {
-		websiteImportNotion()
-		u.CdUpDir("sumatrapdf")
-		websiteDeployProd()
-		return
-	}
-
-	if flgWebsiteBuildCloudflare {
-		websiteBuildCloudflare()
-		return
-	}
-
-	if flgWebsiteDeployCloudflare {
-		websiteDeployCloudlare()
-		return
-	}
-
-	if flgDiff {
-		winmergeDiffPreview()
-		return
-	}
-
-	if flgGenStructs {
-		genAndSaveSettingsStructs()
-		return
-	}
-
-	if flgWc {
-		doLineCount()
-		return
-	}
-
-	if flgTriggerCodeQL {
-		triggerCodeQL()
-		return
-	}
-
-	if flgTriggerPreRel {
-		triggerPreRelBuild()
-		triggerRaMicroPreRelBuild()
-		return
-	}
-
-	if flgTriggerRaMicroPreRel {
-		triggerRaMicroPreRelBuild()
-		return
-	}
-
-	if flgClean {
-		clean()
+	if flgUpdateGoDeps {
+		defer measureDuration()()
+		u.UpdateGoDeps("do", true)
+		u.UpdateGoDeps(filepath.Join("tools", "regress"), true)
+		u.UpdateGoDeps(filepath.Join("tools", "logview-cli"), true)
+		u.UpdateGoDeps(filepath.Join("tools", "logview"), true)
 		return
 	}
 
@@ -276,18 +313,13 @@ func main() {
 		return
 	}
 
-	if flgCrashes {
-		previewCrashes()
-		return
-	}
-
 	if flgCppCheck || flgCppCheckAll {
 		runCppCheck(flgCppCheckAll)
 		return
 	}
 
-	if flgClangTidy {
-		runClangTidy()
+	if flgClangTidy || flgClangTidyFix {
+		runClangTidy(flgClangTidyFix)
 		return
 	}
 
@@ -301,18 +333,8 @@ func main() {
 		return
 	}
 
-	if flgDownloadTranslations {
-		downloadTranslationsMain()
-		return
-	}
-
-	if flgRegenerateTranslattions {
-		regenerateLangs()
-		return
-	}
-
-	if flgUploadTranslations {
-		uploadStringsIfChanged()
+	if flgGenTranslationsInfoCpp {
+		genTranslationInfoCpp()
 		return
 	}
 
@@ -321,129 +343,251 @@ func main() {
 		return
 	}
 
-	if flgSmoke {
-		smokeBuild()
+	if flgBuildCodeQL {
+		buildCodeQL()
 		return
 	}
 
-	if flgBuildNo {
-		detectVersions()
+	getSecrets()
+
+	if flgTransDownload {
+		downloadTranslations()
 		return
 	}
 
-	if flgCIBuild {
-		// TODO: temporary
-		//dumpEnv()
-		//dumpWebHookEventPayload()
+	detectVersions()
 
-		// ci build does the same thing as pre-release
-		if shouldSignAndUpload() {
-			failIfNoCertPwd()
-		}
-		flgSkipTranslationVerify = true
-		detectVersions()
-		gev := getGitHubEventType()
-		switch gev {
-		case githubEventNone, githubEventTypeCodeQL:
-			// daily build on push
-			buildDaily()
-		case githubEventTypeBuildPreRel:
-			buildPreRelease()
-		case githubEventTypeBuildRaMicroPreRel:
-			buildRaMicroPreRelease()
-		default:
-			panic("unkown value from getGitHubEventType()")
+	if false {
+		testCompressOneOff()
+		if false {
+			// make them reachable
+			testGenUpdateTxt()
+			buildPreRelease(kPlatformIntel64, true)
+			deleteFilesOneOff()
 		}
 		return
 	}
 
-	if flgDeleteOldBuilds {
-		fmt.Printf("delete old builds\n")
-		minioDeleteOldBuilds()
-		s3DeleteOldBuilds()
+	if flgBuildNo > 0 {
+		printBuildNoInfo(flgBuildNo)
 		return
 	}
 
-	// on GitHub Actions the build happens in an earlier step
-	if flgUploadCiBuild {
-		if shouldSkipUpload() {
-			fmt.Printf("Skipping upload\n")
-			return
-		}
-		flgUpload = true
-		detectVersions()
+	if flgFindLargestFilesByExt {
+		findLargestFileByExt()
+		return
+	}
 
-		gev := getGitHubEventType()
-		switch gev {
-		case githubEventNone:
-			// daily build on push
-			s3UploadBuildMust(buildTypeDaily)
-			spacesUploadBuildMust(buildTypeDaily)
-		case githubEventTypeBuildPreRel:
-			s3UploadBuildMust(buildTypePreRel)
-			spacesUploadBuildMust(buildTypePreRel)
-		case githubEventTypeBuildRaMicroPreRel:
-			spacesUploadBuildMust(buildTypeRaMicro)
-		case githubEventTypeCodeQL:
-			// do nothing
-		default:
-			panic("unkown value from getGitHubEventType()")
-		}
+	if flgFileUpload != "" {
+		fileUpload(flgFileUpload)
+		return
+	}
 
-		minioDeleteOldBuilds()
-		s3DeleteOldBuilds()
+	if flgBuildLogview {
+		buildLogView()
+		if flgUpload {
+			uploadLogView()
+		}
+		return
+	}
+
+	if flgFilesList {
+		filesList()
+		return
+	}
+
+	opts := &BuildOptions{}
+
+	if flgUpload {
+		// given by me from cmd-line
+		opts.upload = true
+	}
+
+	if flgSignUploadPreRelease {
+		signAndUploadLatestPreRelease()
 		return
 	}
 
 	if flgBuildRelease {
-		failIfNoCertPwd()
-		detectVersions()
-		buildRelease()
-		if flgUpload {
-			s3UploadBuildMust(buildTypeRel)
-			spacesUploadBuildMust(buildTypeRel)
+		// only when building locally, not on GitHub CI
+		opts.verifyTranslationUpToDate = true
+		opts.doCleanCheck = true
+		opts.releaseBuild = true
+	}
+	//opts.doCleanCheck = false // for ad-hoc testing
+
+	ensureBuildOptionsPreRequesites(opts)
+
+	if flgDiff {
+		u.WinmergeDiffPreview()
+		return
+	}
+
+	if flgGenSettings {
+		genAndSaveSettingsStructs()
+		return
+	}
+
+	if flgWc {
+		doLineCount()
+		return
+	}
+
+	if flgTriggerCodeQL {
+		triggerBuildWebHook(githubEventTypeCodeQL)
+		return
+	}
+
+	if flgClean {
+		cleanPreserveSettings()
+		return
+	}
+
+	if flgBuildSmoke {
+		buildSmoke(false) // TODO: flgSign
+		return
+	}
+
+	if flgPrintBuildNo {
+		return
+	}
+
+	if flgCIDailyBuild {
+		buildCiDaily(flgUpload)
+		return
+	}
+
+	if flgCIBuild {
+		buildCi()
+		if opts.upload {
+			uploadToStorage(buildTypePreRel)
+		} else {
+			logf("uploadToStorage: skipping because opts.upload = false\n")
 		}
 		return
 	}
 
-	if flgBuildReleaseFast {
-		failIfNoCertPwd()
-		detectVersions()
-		buildReleaseFast()
+	if flgBuildRelease {
+		buildRelease()
+		if opts.upload {
+			uploadToStorage(buildTypeRel)
+		} else {
+			logf("uploadToStorage: skipping because opts.upload = false\n")
+		}
 		return
 	}
 
-	if flgBuildRelease32Fast {
-		failIfNoCertPwd()
-		detectVersions()
-		buildRelease32Fast()
-		return
-	}
-
+	// this one is typically for me to build locally, so build all projects
+	// to build less use -build-smoke
 	if flgBuildPreRelease {
-		// make sure we can sign the executables
-		failIfNoCertPwd()
-		detectVersions()
-		buildPreRelease()
-		s3UploadBuildMust(buildTypePreRel)
-		spacesUploadBuildMust(buildTypePreRel)
-		return
-	}
-
-	if flgBuildRaMicroPreRelease {
-		// make sure we can sign the executables
-		failIfNoCertPwd()
-		detectVersions()
-		buildRaMicroPreRelease()
-		//s3UploadBuildMust(buildTypeRaMicro)
-		//spacesUploadBuildMust(buildTypeRaMicro)
+		cleanReleaseBuilds()
+		genHTMLDocsForApp()
+		buildPreRelease(kPlatformIntel64, true)
+		if opts.upload {
+			uploadToStorage(buildTypePreRel)
+		} else {
+			logf("uploadToStorage: skipping because opts.upload = false\n")
+		}
 		return
 	}
 
 	if flgUpdateVer != "" {
+		ensureAllUploadCreds()
 		updateAutoUpdateVer(flgUpdateVer)
 		return
 	}
 
+	if flgLogView {
+		logView()
+		return
+	}
+
+	if flgRunTests {
+		buildTestUtil()
+		dir := filepath.Join("out", "rel64")
+		cmd := exec.Command(".\\test_util.exe")
+		cmd.Dir = dir
+		runCmdLoggedMust(cmd)
+		return
+	}
+
 	flag.Usage()
+}
+
+func logView() {
+	path := filepath.Join(logViewWinDir, "build", "bin", "logview.exe")
+	if !u.FileExists(path) {
+		logf("'%s' doesn't exist, rebuilding\n", path)
+		buildLogView()
+	} else {
+		logf("'%s' already exist. If you want to re-build:\n", path)
+		logf("rm \"%s\"\n", path)
+	}
+	cmd := exec.Command(path)
+	err := cmd.Start()
+	must(err)
+	logf("Started %s\n", path)
+}
+
+func cmdRunLoggedInDir(dir string, args ...string) {
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	cmdRunLoggedMust(cmd)
+}
+
+var logViewWinDir = filepath.Join("tools", "logview")
+
+func buildLogView() {
+	ver := extractLogViewVersion()
+	logf("biuldLogView: ver: %s\n", ver)
+	os.RemoveAll(filepath.Join(logViewWinDir, "build", "bin"))
+	//cmdRunLoggedInDir(".", "wails", "build", "-clean", "-f", "-upx")
+	cmdRunLoggedInDir(logViewWinDir, "wails", "build", "-clean", "-f", "-upx")
+
+	path := filepath.Join(logViewWinDir, "build", "bin", "logview.exe")
+	panicIf(!u.FileExists(path))
+	// signMust(path)
+	logf("\n")
+	printFileSize(path)
+}
+
+func extractLogViewVersion() string {
+	path := filepath.Join(logViewWinDir, "frontend", "src", "version.js")
+	d, err := os.ReadFile(path)
+	must(err)
+	d = u.NormalizeNewlinesInPlace(d)
+	s := string(d)
+	// s looks like:
+	// export const version = "0.1.2";
+	parts := strings.Split(s, "\n")
+	s = parts[0]
+	parts = strings.Split(s, " ")
+	panicIf(len(parts) != 5)
+	ver := parts[4] // "0.1.2";
+	ver = strings.ReplaceAll(ver, `"`, "")
+	ver = strings.ReplaceAll(ver, `;`, "")
+	parts = strings.Split(ver, ".")
+	panicIf(len(parts) < 2) // must be at least 1.0
+	// verify all elements are numbers
+	for _, part := range parts {
+		n, err := strconv.ParseInt(part, 10, 32)
+		panicIf(err != nil)
+		panicIf(n > 100)
+	}
+	return ver
+}
+
+func printFileSize(path string) {
+	size := u.FileSize(path)
+	logf("%s: %s\n", path, u.FormatSize(size))
+}
+
+func printBuildNoInfo(buildNo int) {
+	out := runExeMust("git", "log", "--oneline")
+	lines := toTrimmedLines(out)
+	// we add 1000 to create a version that is larger than the svn version
+	// from the time we used svn
+	n := len(lines) - (buildNo - 1000)
+	s := lines[n]
+	logf("%d: %s\n", buildNo, s)
 }

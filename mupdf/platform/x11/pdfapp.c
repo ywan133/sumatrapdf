@@ -1,3 +1,25 @@
+// Copyright (C) 2004-2024 Artifex Software, Inc.
+//
+// This file is part of MuPDF.
+//
+// MuPDF is free software: you can redistribute it and/or modify it under the
+// terms of the GNU Affero General Public License as published by the Free
+// Software Foundation, either version 3 of the License, or (at your option)
+// any later version.
+//
+// MuPDF is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+// FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+// details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with MuPDF. If not, see <https://www.gnu.org/licenses/agpl-3.0.en.html>
+//
+// Alternative licensing terms are available from the licensor.
+// For commercial licensing, see <https://www.artifex.com/> or contact
+// Artifex Software, Inc., 39 Mesa Street, Suite 108A, San Francisco,
+// CA 94129, USA, for further information.
+
 #include "pdfapp.h"
 #include "curl_stream.h"
 #include "mupdf/helpers/pkcs7-openssl.h"
@@ -6,52 +28,67 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <sys/stat.h>
-
-#ifdef _MSC_VER
-#define stat _stat
-#endif
 
 #ifdef _WIN32
 #include <windows.h>
 #include <direct.h> /* for getcwd */
 #else
 #include <unistd.h> /* for getcwd */
+#include <sys/stat.h> /* for mkdir */
 #endif
 
 #define BEYOND_THRESHHOLD 40
-
-#ifndef PATH_MAX
-#define PATH_MAX 4096
-#endif
 
 #ifndef MAX
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
 #endif
 
-time_t
-stat_mtime(const char *path)
+static int create_accel_path(fz_context *ctx, char outname[], size_t len, int create, const char *absname, ...)
 {
-	struct stat info;
+	va_list args;
+	char *s = outname;
+	size_t z, remain = len;
+	char *arg;
 
-	if (stat(path, &info) < 0)
-		return 0;
+	va_start(args, absname);
 
-	return info.st_mtime;
+	while ((arg = va_arg(args, char *)) != NULL)
+	{
+		z = fz_snprintf(s, remain, "%s", arg);
+		if (z+1 > remain)
+			goto fail; /* won't fit */
+
+		if (create)
+			(void) fz_mkdir(outname);
+		if (!fz_is_directory(ctx, outname))
+			goto fail; /* directory creation failed, or that dir doesn't exist! */
+#ifdef _WIN32
+		s[z] = '\\';
+#else
+		s[z] = '/';
+#endif
+		s[z+1] = 0;
+		s += z+1;
+		remain -= z+1;
+	}
+
+	if (fz_snprintf(s, remain, "%s.accel", absname) >= remain)
+		goto fail; /* won't fit */
+
+	va_end(args);
+
+	return 1;
+
+fail:
+	va_end(args);
+
+	return 0;
 }
 
-static int convert_to_accel_path(fz_context *ctx, char outname[], char *absname, size_t len)
+static int convert_to_accel_path(fz_context *ctx, char outname[], char *absname, size_t len, int create)
 {
 	char *tmpdir;
 	char *s;
-
-	tmpdir = getenv("TEMP");
-	if (!tmpdir)
-		tmpdir = getenv("TMP");
-	if (!tmpdir)
-		tmpdir = "/var/tmp";
-	if (!fz_is_directory(ctx, tmpdir))
-		tmpdir = "/tmp";
 
 	if (absname[0] == '/' || absname[0] == '\\')
 		++absname;
@@ -63,17 +100,34 @@ static int convert_to_accel_path(fz_context *ctx, char outname[], char *absname,
 		++s;
 	}
 
-	if (fz_snprintf(outname, len, "%s/%s.accel", tmpdir, absname) >= len)
-		return 0;
-	return 1;
+#ifdef _WIN32
+	tmpdir = getenv("USERPROFILE");
+	if (tmpdir && create_accel_path(ctx, outname, len, create, absname, tmpdir, ".config", "mupdf", NULL))
+		return 1; /* OK! */
+	/* TEMP and TMP are user-specific on modern windows. */
+	tmpdir = getenv("TEMP");
+	if (tmpdir && create_accel_path(ctx, outname, len, create, absname, tmpdir, "mupdf", NULL))
+		return 1; /* OK! */
+	tmpdir = getenv("TMP");
+	if (tmpdir && create_accel_path(ctx, outname, len, create, absname, tmpdir, "mupdf", NULL))
+		return 1; /* OK! */
+#else
+	tmpdir = getenv("XDG_CACHE_HOME");
+	if (tmpdir && create_accel_path(ctx, outname, len, create, absname, tmpdir, "mupdf", NULL))
+		return 1; /* OK! */
+	tmpdir = getenv("HOME");
+	if (tmpdir && create_accel_path(ctx, outname, len, create, absname, tmpdir, ".cache", "mupdf", NULL))
+		return 1; /* OK! */
+#endif
+	return 0; /* Fail */
 }
 
-static int get_accelerator_filename(fz_context *ctx, char outname[], size_t len, const char *filename)
+static int get_accelerator_filename(fz_context *ctx, char outname[], size_t len, const char *filename, int create)
 {
 	char absname[PATH_MAX];
 	if (!fz_realpath(filename, absname))
 		return 0;
-	if (!convert_to_accel_path(ctx, outname, absname, len))
+	if (!convert_to_accel_path(ctx, outname, absname, len, create))
 		return 0;
 	return 1;
 }
@@ -86,7 +140,7 @@ static void save_accelerator(fz_context *ctx, fz_document *doc, const char *file
 		return;
 	if (!fz_document_supports_accelerator(ctx, doc))
 		return;
-	if (!get_accelerator_filename(ctx, absname, sizeof(absname), filename))
+	if (!get_accelerator_filename(ctx, absname, sizeof(absname), filename, 1))
 		return;
 
 	fz_save_accelerator(ctx, doc, absname);
@@ -162,7 +216,7 @@ char *pdfapp_version(pdfapp_t *app)
 {
 	return
 		"MuPDF " FZ_VERSION "\n"
-		"Copyright 2006-2020 Artifex Software, Inc.\n";
+		"Copyright 2006-2022 Artifex Software, Inc.\n";
 }
 
 char *pdfapp_usage(pdfapp_t *app)
@@ -253,15 +307,15 @@ void pdfapp_reloadfile(pdfapp_t *app)
 	pdfapp_open(app, filename, 1);
 }
 
-static void event_cb(fz_context *ctx, pdf_document *doc, pdf_doc_event *event, void *data)
+static void event_cb(fz_context *ctx, pdf_document *doc, pdf_doc_event *evt, void *data)
 {
 	pdfapp_t *app = (pdfapp_t *)data;
 
-	switch (event->type)
+	switch (evt->type)
 	{
 	case PDF_DOCUMENT_EVENT_ALERT:
 		{
-			pdf_alert_event *alert = pdf_access_alert_event(ctx, event);
+			pdf_alert_event *alert = pdf_access_alert_event(ctx, evt);
 			winalert(app, alert);
 		}
 		break;
@@ -272,7 +326,7 @@ static void event_cb(fz_context *ctx, pdf_document *doc, pdf_doc_event *event, v
 
 	case PDF_DOCUMENT_EVENT_EXEC_MENU_ITEM:
 		{
-			const char *item = pdf_access_exec_menu_item_event(ctx, event);
+			const char *item = pdf_access_exec_menu_item_event(ctx, evt);
 
 			if (!strcmp(item, "Print"))
 				winprint(app);
@@ -283,7 +337,7 @@ static void event_cb(fz_context *ctx, pdf_document *doc, pdf_doc_event *event, v
 
 	case PDF_DOCUMENT_EVENT_LAUNCH_URL:
 		{
-			pdf_launch_url_event *launch_url = pdf_access_launch_url_event(ctx, event);
+			pdf_launch_url_event *launch_url = pdf_access_launch_url_event(ctx, evt);
 
 			pdfapp_warn(app, "The document attempted to open url: %s. (Not supported by app)", launch_url->url);
 		}
@@ -291,7 +345,7 @@ static void event_cb(fz_context *ctx, pdf_document *doc, pdf_doc_event *event, v
 
 	case PDF_DOCUMENT_EVENT_MAIL_DOC:
 		{
-			pdf_mail_doc_event *mail_doc = pdf_access_mail_doc_event(ctx, event);
+			pdf_mail_doc_event *mail_doc = pdf_access_mail_doc_event(ctx, evt);
 
 			pdfapp_warn(app, "The document attempted to mail the document%s%s%s%s%s%s%s%s (Not supported)",
 				mail_doc->to[0]?", To: ":"", mail_doc->to,
@@ -360,6 +414,7 @@ static int make_fake_doc(pdfapp_t *app)
 	}
 	fz_catch(ctx)
 	{
+		fz_report_error(ctx);
 		fz_drop_document(ctx, (fz_document *) pdf);
 		return 1;
 	}
@@ -402,6 +457,7 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int kbps
 				{
 					if (fz_caught(ctx) == FZ_ERROR_TRYLATER)
 					{
+						fz_ignore_error(ctx);
 						pdfapp_sleep(100);
 						continue;
 					}
@@ -412,18 +468,19 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int kbps
 		}
 		else if (kbps > 0)
 		{
-			fz_stream *stream = fz_open_file_progressive(ctx, filename, kbps, pdfapp_more_data, app);
+			app->stream = fz_open_file_progressive(ctx, filename, kbps, pdfapp_more_data, app);
 			while (1)
 			{
 				fz_try(ctx)
 				{
-					fz_seek(ctx, stream, 0, SEEK_SET);
-					app->doc = fz_open_document_with_stream(ctx, filename, stream);
+					fz_seek(ctx, app->stream, 0, SEEK_SET);
+					app->doc = fz_open_document_with_stream(ctx, filename, app->stream);
 				}
 				fz_catch(ctx)
 				{
 					if (fz_caught(ctx) == FZ_ERROR_TRYLATER)
 					{
+						fz_ignore_error(ctx);
 						pdfapp_sleep(100);
 						continue;
 					}
@@ -441,12 +498,12 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int kbps
 			time_t dtime;
 
 			/* If there was an accelerator to load, what would it be called? */
-			if (get_accelerator_filename(ctx, accelpath, sizeof(accelpath), filename))
+			if (get_accelerator_filename(ctx, accelpath, sizeof(accelpath), filename, 0))
 			{
 				/* Check whether that file exists, and isn't older than
 				 * the document. */
-				atime = stat_mtime(accelpath);
-				dtime = stat_mtime(filename);
+				atime = fz_stat_mtime(accelpath);
+				dtime = fz_stat_mtime(filename);
 				if (atime == 0)
 				{
 					/* No accelerator */
@@ -456,7 +513,11 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int kbps
 				else
 				{
 					/* Accelerator data is out of date */
-					unlink(accelpath);
+#ifdef _WIN32
+					fz_remove_utf8(accelpath);
+#else
+					remove(accelpath);
+#endif
 					accel = NULL; /* In case we have jumped up from below */
 				}
 			}
@@ -466,8 +527,12 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int kbps
 	}
 	fz_catch(ctx)
 	{
+		fz_report_error(ctx);
 		if (!reload || make_fake_doc(app))
+		{
+			fz_report_error(ctx);
 			pdfapp_error(app, "cannot open document");
+		}
 	}
 
 	idoc = pdf_specifics(app->ctx, app->doc);
@@ -476,10 +541,11 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int kbps
 		fz_try(ctx)
 		{
 			pdf_enable_js(ctx, idoc);
-			pdf_set_doc_event_callback(ctx, idoc, event_cb, app);
+			pdf_set_doc_event_callback(ctx, idoc, event_cb, NULL, app);
 		}
 		fz_catch(ctx)
 		{
+			fz_report_error(ctx);
 			pdfapp_error(app, "cannot load javascript embedded in document");
 		}
 	}
@@ -502,12 +568,7 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int kbps
 		}
 
 		app->docpath = fz_strdup(ctx, filename);
-		app->doctitle = filename;
-		if (strrchr(app->doctitle, '\\'))
-			app->doctitle = strrchr(app->doctitle, '\\') + 1;
-		if (strrchr(app->doctitle, '/'))
-			app->doctitle = strrchr(app->doctitle, '/') + 1;
-		app->doctitle = fz_strdup(ctx, app->doctitle);
+		app->doctitle = fz_strdup(ctx, fz_basename(filename));
 
 		fz_layout_document(app->ctx, app->doc, app->layout_w, app->layout_h, app->layout_em);
 
@@ -523,6 +584,7 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int kbps
 			{
 				if (fz_caught(ctx) == FZ_ERROR_TRYLATER)
 				{
+					fz_ignore_error(ctx);
 					continue;
 				}
 				fz_rethrow(ctx);
@@ -539,15 +601,22 @@ void pdfapp_open_progressive(pdfapp_t *app, char *filename, int reload, int kbps
 			{
 				app->outline = NULL;
 				if (fz_caught(ctx) == FZ_ERROR_TRYLATER)
+				{
+					fz_ignore_error(ctx);
 					app->outline_deferred = PDFAPP_OUTLINE_DEFERRED;
+				}
 				else
+				{
+					fz_report_error(ctx);
 					pdfapp_warn(app, "Failed to load outline.");
+				}
 			}
 			break;
 		}
 	}
 	fz_catch(ctx)
 	{
+		fz_report_error(ctx);
 		pdfapp_error(app, "cannot open document");
 	}
 
@@ -680,6 +749,7 @@ static int pdfapp_save(pdfapp_t *app)
 			}
 			fz_catch(app->ctx)
 			{
+				fz_report_error(app->ctx);
 				/* Ignore any error, so we drop out with
 				 * failure below. */
 			}
@@ -790,9 +860,15 @@ static void pdfapp_loadpage(pdfapp_t *app, int no_cache)
 	fz_catch(app->ctx)
 	{
 		if (fz_caught(app->ctx) == FZ_ERROR_TRYLATER)
+		{
+			fz_ignore_error(app->ctx);
 			app->incomplete = 1;
+		}
 		else
+		{
+			fz_report_error(app->ctx);
 			pdfapp_warn(app, "Failed to load page.");
+		}
 		return;
 	}
 
@@ -831,9 +907,15 @@ static void pdfapp_loadpage(pdfapp_t *app, int no_cache)
 		fz_catch(app->ctx)
 		{
 			if (fz_caught(app->ctx) == FZ_ERROR_TRYLATER)
+			{
+				fz_ignore_error(app->ctx);
 				app->incomplete = 1;
+			}
 			else
+			{
+				fz_report_error(app->ctx);
 				pdfapp_warn(app, "Failed to load page.");
+			}
 			errored = 1;
 		}
 	}
@@ -871,9 +953,15 @@ static void pdfapp_loadpage(pdfapp_t *app, int no_cache)
 	fz_catch(app->ctx)
 	{
 		if (fz_caught(app->ctx) == FZ_ERROR_TRYLATER)
+		{
+			fz_ignore_error(app->ctx);
 			app->incomplete = 1;
+		}
 		else
+		{
+			fz_report_error(app->ctx);
 			pdfapp_warn(app, "Failed to load page.");
+		}
 		errored = 1;
 	}
 
@@ -895,9 +983,14 @@ void pdfapp_reloadpage(pdfapp_t *app)
 	if (app->outline_deferred == PDFAPP_OUTLINE_LOAD_NOW)
 	{
 		fz_try(app->ctx)
+		{
 			app->outline = fz_load_outline(app->ctx, app->doc);
+		}
 		fz_catch(app->ctx)
+		{
+			fz_report_error(app->ctx);
 			app->outline = NULL;
+		}
 		app->outline_deferred = 0;
 	}
 	pdfapp_showpage(app, 1, 1, 1, 0, 0);
@@ -945,8 +1038,8 @@ static void pdfapp_showpage(pdfapp_t *app, int loadpage, int drawpage, int repai
 			mediabox = fz_bound_page(app->ctx, app->page);
 		fz_catch(app->ctx)
 		{
-			if (fz_caught(app->ctx) != FZ_ERROR_TRYLATER)
-				fz_rethrow(app->ctx);
+			fz_rethrow_unless(app->ctx, FZ_ERROR_TRYLATER);
+			fz_ignore_error(app->ctx);
 			mediabox = fz_make_rect(0, 0, 100, 100);
 			app->incomplete = 1;
 		}
@@ -983,7 +1076,10 @@ static void pdfapp_showpage(pdfapp_t *app, int loadpage, int drawpage, int repai
 			fz_strlcat(buf, buf2, MAX_TITLE);
 		}
 		else
-			sprintf(buf, "%s%s", app->doctitle, buf2);
+		{
+			fz_strlcpy(buf, app->doctitle, MAX_TITLE);
+			fz_strlcat(buf, buf2, MAX_TITLE);
+		}
 		wintitle(app, buf);
 
 		pdfapp_viewctm(&ctm, app);
@@ -1029,7 +1125,10 @@ static void pdfapp_showpage(pdfapp_t *app, int loadpage, int drawpage, int repai
 		fz_always(app->ctx)
 			fz_drop_device(app->ctx, idev);
 		fz_catch(app->ctx)
+		{
+			fz_report_error(app->ctx);
 			cookie.errors++;
+		}
 	}
 
 	if (transition && drawpage)
@@ -1108,11 +1207,19 @@ static void pdfapp_gotouri(pdfapp_t *app, char *uri)
 	{
 		char buf_base[PATH_MAX];
 		char buf_cwd[PATH_MAX];
-		fz_dirname(buf_base, app->docpath, sizeof buf_base);
-		getcwd(buf_cwd, sizeof buf_cwd);
-		fz_snprintf(buf, sizeof buf, "file://%s/%s/%s", buf_cwd, buf_base, uri+7);
-		fz_cleanname(buf+7);
-		uri = buf;
+		if (getcwd(buf_cwd, sizeof buf_cwd))
+		{
+			fz_dirname(buf_base, app->docpath, sizeof buf_base);
+			fz_snprintf(buf, sizeof buf, "file://%s/%s/%s", buf_cwd, buf_base, uri+7);
+			fz_cleanname(buf+7);
+			uri = buf;
+		}
+	}
+
+	if (strncmp(uri, "file://", 7) && strncmp(uri, "http://", 7) && strncmp(uri, "https://", 8) && strncmp(uri, "mailto:", 7))
+	{
+		fz_warn(app->ctx, "refusing to open unknown link (%s)", uri);
+		return;
 	}
 
 	winopenuri(app, uri);
@@ -1187,7 +1294,7 @@ static void pdfapp_search_in_direction(pdfapp_t *app, enum panning *panto, int d
 			pdfapp_showpage(app, 1, 0, 0, 0, 1);
 		}
 
-		app->hit_count = fz_search_stext_page(app->ctx, app->page_text, app->search, app->hit_bbox, nelem(app->hit_bbox));
+		app->hit_count = fz_search_stext_page(app->ctx, app->page_text, app->search, NULL, app->hit_bbox, nelem(app->hit_bbox));
 		if (app->hit_count > 0)
 		{
 			*panto = dir == 1 ? PAN_TO_TOP : PAN_TO_BOTTOM;
@@ -1316,6 +1423,7 @@ void pdfapp_onkey(pdfapp_t *app, int c, int modifiers)
 		app->number[app->numberlen] = '\0';
 	}
 
+key_rewritten:
 	switch (c)
 	{
 	case 'q':
@@ -1458,6 +1566,13 @@ void pdfapp_onkey(pdfapp_t *app, int c, int modifiers)
 		break;
 
 	case 'h':
+		if (modifiers & 8)
+		{
+			/* Alt pressed. Treat this as 't'. (i.e. ALT-Left) */
+			modifiers &= ~8;
+			c = 't';
+			goto key_rewritten;
+		}
 		app->panx += app->imgw / 10;
 		pdfapp_showpage(app, 0, 0, 1, 0, 0);
 		break;
@@ -2042,5 +2157,29 @@ void pdfapp_postblit(pdfapp_t *app)
 	{
 		/* Completed. */
 		app->in_transit = 0;
+	}
+}
+
+void pdfapp_load_profile(pdfapp_t *app, char *profile_name)
+{
+	fz_buffer *profile_data = NULL;
+	fz_var(profile_data);
+	fz_try(app->ctx)
+	{
+		profile_data = fz_read_file(app->ctx, profile_name);
+#ifdef _WIN32
+		app->colorspace = fz_new_icc_colorspace(app->ctx, FZ_COLORSPACE_BGR, 0, NULL, profile_data);
+#else
+		app->colorspace = fz_new_icc_colorspace(app->ctx, FZ_COLORSPACE_RGB, 0, NULL, profile_data);
+#endif
+	}
+	fz_always(app->ctx)
+	{
+		fz_drop_buffer(app->ctx, profile_data);
+	}
+	fz_catch(app->ctx)
+	{
+		fz_report_error(app->ctx);
+		pdfapp_error(app, "cannot load color profile");
 	}
 }
